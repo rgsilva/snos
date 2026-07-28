@@ -66,12 +66,52 @@ poll of the mailbox. Barely perceptible interactively, and it would matter only
 for scripted use. Low priority, listed so the 16 frames in every measurement
 above are accounted for rather than mysterious.
 
-## 5. Link: the SNES → gateway direction is still stop-and-wait
+## 5. Link throughput — measured, and the earlier figures were wrong
 
-The gateway → SNES direction was fixed (~2.5×) by pipelining the gateway. The
-reverse direction carries only commands today, so it is invisible — but IRC
-sends as much as it receives, and `OPEN` will make this the first thing anyone
-notices.
+I had been quoting ~1.7 KB/s and ~3.4 KB/s. Both were wrong. Measured
+end to end, fetching a 3215-byte file through the live gateway:
+
+| | |
+|---|---|
+| throughput | **~590 B/s** |
+| link exchanges | **58.2/s** — essentially the full 60 Hz frame rate |
+| payload per exchange | **~10 bytes** of a 64-byte frame |
+
+So the link is not stalling at all. It runs at frame rate and the frames are
+about 85% empty. Two separate causes, and the second is the interesting one:
+
+**Stop-and-wait.** `gateway.py` keeps a single in-flight frame (`awaiting` is a
+boolean), so a *data* frame can only leave on every other exchange. That alone
+halves it.
+
+**A window does not fix it, and I proved that the hard way.** I implemented one,
+measured a 3.2x speedup, and it was false — my benchmark detected completion by
+looking for `"> "`, which also matches the `"> "` inside `"-> "`, so it was
+timing how fast the download *started*. With the detection corrected, the
+windowed gateway stalls after 2 KB and the file lands at zero bytes.
+
+The reason is structural: `net.c` accepts a frame only when `seq == rx_next`,
+strictly in order, and **the WRAM link mailbox holds exactly one frame per
+direction**. Send two frames before the SNES polls and the second overwrites the
+first; the SNES then sees a sequence gap, refuses to ack, and the sender wedges
+with the window full. Stop-and-wait was masking a bridge that has no flow
+control of its own.
+
+So the order is: **fix the bridge handshake first** — the host must not write a
+new frame until the SNES has consumed the previous one — *then* a window becomes
+possible. Doing it the other way round is what produced the 2 KB stall.
+
+Reverted. A correct 590 B/s beats a broken 1820.
+
+Also unexplained and worth a look: even allowing for stop-and-wait, a data frame
+carries ~20 bytes of a possible ~58. Something upstream of `build()` is feeding
+it in small pieces.
+
+**Real hardware is a different question.** None of this constrains the cable: a
+synchronous exchange has no file bridge, no 1-deep mailbox and no 60 Hz ceiling.
+These numbers measure the emulator path, which is the one being developed
+against — worth remembering before optimising for a bottleneck that will not
+exist at M7.
 
 ## On `-O0`
 
