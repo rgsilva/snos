@@ -76,14 +76,19 @@
 EXITFLAG      .equ    0x7e1a12
 APPRUNNING    .equ    0x7e1a16
 
-;;; Direct page for trap handlers. NOT $0000, and this is load-bearing:
+;;; Direct pages for trap handlers. NOT $0000, and this is load-bearing:
 ;;; Calypsi's C code keeps working values in direct-page pseudo-registers whose
 ;;; slots the linker hands out from the static call graph, which cannot contain
 ;;; an interrupt edge. Sharing a direct page with the interrupted code lets a
 ;;; handler quietly corrupt a pointer mid-computation — one wrong byte at a
 ;;; time, in whatever the foreground happened to be doing. Since the pseudo
 ;;; registers are direct-page relative, a separate D makes that impossible.
-IRQ_DP        .equ    0x1b00
+;;; COP and NMI get SEPARATE pages, not one shared "interrupt" page. NMI fires
+;;; while a system call is running, so a single shared page just moves the
+;;; collision from (foreground, NMI) to (COP, NMI) — which showed up as LOAD
+;;; dropping one character of a saved BASIC program.
+SYS_DP        .equ    0x1b00          ; COP and BRK (synchronous traps)
+NMI_DP        .equ    0x1c00          ; NMI (fires during the above)
 
 snos_stub:
               rti
@@ -102,8 +107,8 @@ snos_nmi:
               phb
               phk                           ; DB = this bank, so C can reach
               plb                           ; near data
-              lda     ##IRQ_DP
-              tcd                           ; interrupts get their own DP
+              lda     ##NMI_DP
+              tcd                           ; NMI gets a direct page of its own
               sep     #0x20
               lda     abs:0x4210            ; ack NMI (clears the flag)
               rep     #0x20
@@ -143,7 +148,7 @@ snos_cop:
               phb
               phk
               plb
-              lda     ##IRQ_DP
+              lda     ##SYS_DP
               tcd
               tsc                           ; A = frame pointer for the handler:
                                             ;   sp+1 DB, +2 D, +4 Y, +6 X, +8 A,
@@ -174,7 +179,7 @@ snos_brk:
               phb
               phk
               plb
-              lda     ##IRQ_DP
+              lda     ##SYS_DP
               tcd
               tsc
               jsl     snos_brk_c            ; panics; does not return

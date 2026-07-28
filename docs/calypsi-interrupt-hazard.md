@@ -28,18 +28,38 @@ per second.
 save and restore anything. Give them a different direct page and the collision
 becomes impossible rather than merely unlikely.
 
-SNOS keeps three disjoint direct pages live (`snes/calypsi/linker.scm`):
+SNOS keeps **four** disjoint direct pages live (`snes/calypsi/linker.scm`):
 
 | D | Owner |
 |---|---|
 | `$0000` | kernel foreground |
 | `$1900` | the running application |
-| `$1B00` | **trap handlers** — NMI, COP, BRK |
+| `$1B00` | COP and BRK — synchronous traps |
+| `$1C00` | NMI |
+
+### One "interrupt" page is not enough
+
+The first fix gave all three trap handlers a single shared page, which is wrong
+for the same reason the original bug was wrong: **NMI fires while a system call
+is executing**, so COP and NMI are concurrent with each other. Sharing one page
+merely moves the collision from (foreground, NMI) to (COP, NMI).
+
+It resurfaced as BASIC's `LOAD` reading `30 NEXT` back as line `3` — one dropped
+character, in a file that was byte-for-byte correct on disk. Same signature,
+one level down.
+
+The rule: **every context that can be live simultaneously needs its own direct
+page.** Today that is four. If M10 adds preemptive multitasking, each process
+needs one too — which is another claim on the 8 KB of bank $00, and worth
+remembering when budgeting that milestone.
 
 The trap shims in `snes/calypsi/header.s` do:
 
 ```asm
-    lda     ##IRQ_DP        ; $1B00, NOT $0000
+    lda     ##SYS_DP        ; $1B00 in the COP/BRK shims — NOT $0000
+    tcd
+...
+    lda     ##NMI_DP        ; $1C00 in the NMI shim — and NOT $1B00 either
     tcd
 ```
 

@@ -34,7 +34,7 @@ KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps test test-boot test-input test-shell test-apps test-fs clean
+.PHONY: all kernel apps test test-boot test-input test-shell test-apps test-fs test-basic clean
 all: kernel
 kernel: $(BUILD)/snos.sfc
 
@@ -62,11 +62,13 @@ $(BUILD)/snos.raw: $(KERNEL_O)
 # Each app is a separate link into its own ROM bank, then dropped into the
 # cartridge image at the byte offset that bank maps to. HiROM makes that
 # arithmetic trivial: SNES $C0:0000+N is ROM byte N, so bank $C8 is 0x080000.
-APPS := hello pad
+APPS := hello pad basic
 APP_BANK_hello := c8
 APP_BANK_pad   := c9
+APP_BANK_basic := ca
 APP_AT_hello   := 0x080000
 APP_AT_pad     := 0x090000
+APP_AT_basic   := 0x0A0000
 
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)
@@ -95,7 +97,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-boot test-input test-shell test-apps test-fs
+test: test-boot test-input test-shell test-apps test-fs test-basic
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
@@ -114,6 +116,10 @@ test-apps: $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
 test-fs: $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
 	rm -f "$(MESEN_SRM)"
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
+
+test-basic: $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
+	rm -f "$(MESEN_SRM)"
+	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
 
 clean:
 	rm -rf $(BUILD)

@@ -24,6 +24,11 @@ void kcon_init(void) { con_init(); }
 void kcon_putc(int c) {
   con_putc(c);
   mb_putc((char)c);
+  /* Push completed lines to the screen as they happen. Without this, output
+   * only reaches VRAM when something calls con_flush — which the shell does
+   * while waiting for input, but a running application does not. A BASIC
+   * program printing in a loop would otherwise show nothing until it stopped. */
+  if (c == '\n') con_flush();
 }
 
 void kcon_puts(const char *s) {

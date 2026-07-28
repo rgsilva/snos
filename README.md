@@ -23,7 +23,7 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M2 — Syscall ABI (COP) + shell | ✅ |
 | M3 — Apps: exec + return | ✅ |
 | M4 — Filesystem (ROMFS + SRAMFS) | ✅ |
-| M5 — BASIC | |
+| M5 — BASIC | ✅ |
 | M6 — Network stack (uIP) | |
 | M7 — Real hardware | |
 | M8 — IRC client | |
