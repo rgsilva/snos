@@ -41,8 +41,13 @@
  * the console was a stream device to an app — text in, scrolling out — with no
  * way to address a position, discover the usable height, read input without
  * blocking, or get the d-pad away from the on-screen keyboard. An editor is not
- * merely awkward without those; it is impossible. */
-#define SNOS_ABI_VERSION 2
+ * merely awkward without those; it is impossible.
+ *
+ * Version 3 added the network calls. The abstraction handed to an application
+ * is a STREAM and nothing else: the gateway terminates TLS and speaks HTTP, so
+ * FETCH and a future raw OPEN differ only in how the stream comes into being.
+ * An application never sees an IP packet, a TLS record or a header block. */
+#define SNOS_ABI_VERSION 3
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -88,6 +93,13 @@
 /* $50-$5F  time */
 #define SYS_FRAMES 0x50   /* -> free-running 60 Hz frame counter */
 #define SYS_WAITVBL 0x51
+/* $60-$6F  network. Streams via a gateway; see kernel/net.h for why the
+ * gateway does TLS and HTTP and the SNES does not. */
+#define SYS_NET_UP 0x60    /* -> 1 if a gateway is attached */
+#define SYS_NET_FETCH 0x61 /* p0/p1 = URL -> channel, or SYS_ERR */
+#define SYS_NET_READ 0x62  /* p0/p1 = buffer, p2 = channel, A = max -> count */
+#define SYS_NET_STATE 0x63 /* A = channel -> NET_ST_*; p0 = HTTP status */
+#define SYS_NET_CLOSE 0x64 /* A = channel */
 /* $70-$7F  debug */
 #define SYS_TRACE 0x70 /* p0/p1 = string -> the test mailbox */
 
@@ -144,6 +156,11 @@ uint16_t sys_fsize(void);
 uint16_t sys_dir(uint16_t index);
 uint16_t sys_unlink(void);
 uint16_t sys_trace_raw(void);
+uint16_t sys_net_up(void);
+uint16_t sys_net_fetch_raw(void); /* URL in the parameter block */
+uint16_t sys_net_read_raw(uint16_t max);
+uint16_t sys_net_state(uint16_t ch);
+uint16_t sys_net_close(uint16_t ch);
 
 /* Console character set, as far as an application is concerned.
  *
@@ -190,6 +207,26 @@ static uint16_t sys_puts(const char *s) {
 static uint16_t sys_trace(const char *s) {
   snos_set_ptr(s);
   return sys_trace_raw();
+}
+
+/* Stream states, mirroring kernel/net.h. An application loops until the state
+ * stops being OPEN; EOF is reported only once the buffered bytes are drained,
+ * so nothing that already arrived is ever abandoned. */
+#define SNOS_NET_FREE 0
+#define SNOS_NET_OPENING 1
+#define SNOS_NET_OPEN 2
+#define SNOS_NET_EOF 3
+#define SNOS_NET_ERROR 4
+
+static uint16_t sys_net_fetch(const char *url) {
+  snos_set_ptr(url);
+  return sys_net_fetch_raw();
+}
+
+static uint16_t sys_net_read(uint16_t ch, void *buf, uint16_t max) {
+  snos_set_ptr((const char *)buf);
+  SNOS_ARGS.p2 = ch;
+  return sys_net_read_raw(max);
 }
 
 static uint16_t sys_puts_at(int row, int col, const char *s) {

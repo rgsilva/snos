@@ -27,6 +27,7 @@
 #include "mailbox.h"
 #include "farmem.h"
 #include "fs.h"
+#include "net.h"
 
 #define BANK0M 0x7E0000ul
 
@@ -57,6 +58,23 @@ static uint16_t kill_held;
 void snos_nmi_c(void) {
   snos_frames++;
   pad_latch();
+
+  /* Move one network frame. This is the reason the kernel owns NMI outright:
+   * the link keeps running while an application has the machine, so a program
+   * that never yields still gets its download.
+   *
+   * The display gets first claim on the vblank, though. NMI fires at the top of
+   * the window and con_flush() does its DMA from the FOREGROUND inside it, so
+   * an NMI that runs long enough consumes the window and the DMA lands during
+   * active display, where VRAM writes are ignored. That failure is invisible in
+   * every assertion — the mailbox shows perfect output while the screen sits
+   * frozen — and a link poll costs more cycles than a vblank has.
+   *
+   * Deferring is self-balancing rather than a starvation risk: the console can
+   * only stay dirty while something is printing, and something can only keep
+   * printing while data keeps arriving, which requires this to run. The two
+   * alternate. */
+  if (!con_dirty_pending()) net_service();
 
   /* The kill switch. It lives here, in the interrupt the kernel owns
    * unconditionally, precisely so an application cannot defeat it: a wedged
@@ -237,6 +255,36 @@ uint16_t snos_cop_c(uint16_t sp) {
     }
     return 0;
   }
+
+  case SYS_NET_UP:
+    return (uint16_t)(net_up() ? 1 : 0);
+
+  case SYS_NET_FETCH: {
+    char url[256];
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int i, r;
+    for (i = 0; i < 255; i++) {
+      url[i] = (char)far_rd(bank, (uint16_t)(off + i));
+      if (url[i] == 0) break;
+    }
+    url[i < 255 ? i : 255] = 0;
+    r = net_fetch(url);
+    return r < 0 ? SYS_ERR : (uint16_t)r;
+  }
+
+  case SYS_NET_READ: {
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1, ch = SNOS_ARGS.p2;
+    uint8_t __far *dst = (uint8_t __far *)(((uint32_t)bank << 16) | (uint32_t)off);
+    return (uint16_t)net_read((int)ch, dst, (int)a);
+  }
+
+  case SYS_NET_STATE:
+    SNOS_ARGS.p0 = net_http_status((int)a);
+    return (uint16_t)net_state((int)a);
+
+  case SYS_NET_CLOSE:
+    net_close((int)a);
+    return 0;
 
   case SYS_TRACE: {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;

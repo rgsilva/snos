@@ -17,6 +17,7 @@
 #include "app.h"
 #include "fs.h"
 #include "sram.h"
+#include "net.h"
 
 static char line[128];
 
@@ -80,6 +81,8 @@ static void cmd_help(void) {
   kcon_puts("rm NAME   delete a file\n");
   kcon_puts("sram      cartridge SRAM usage\n");
   kcon_puts("fstest    verify SRAM addressing\n");
+  kcon_puts("net       gateway link status\n");
+  kcon_puts("get URL   fetch a URL and print it\n");
   kcon_puts("\nrun edit  full-screen text editor\n");
   kcon_puts("run basic integer BASIC\n");
 }
@@ -355,9 +358,111 @@ static void cmd_fstest(void) {
   }
 }
 
+static void cmd_net(void) {
+  if (!net_up()) {
+    kcon_puts("no gateway attached\n");
+    kcon_puts("(emulator: run tools/netbridge.lua; hardware: M7)\n");
+    return;
+  }
+  kcon_puts("gateway up. frames ");
+  kcon_putu(net_stat_rx_frames);
+  kcon_puts(", bad sums ");
+  kcon_putu(net_stat_bad_sum);
+  kcon_puts(", resends ");
+  kcon_putu(net_stat_resent);
+  kcon_putc('\n');
+}
+
+/* Fetch a URL and print the body.
+ *
+ * The gateway has already done DNS, TLS, redirects, chunked decoding and gzip,
+ * so what arrives here is plain bytes and the only work left is to show them.
+ * That division is the entire point of the design: none of those five things
+ * would be reasonable on a 3.58 MHz CPU, and TLS would not be possible at all.
+ */
+static uint8_t get_buf[128];
+
+static void cmd_get(const char *url) {
+  int ch, st;
+  uint16_t total = 0;
+  uint16_t deadline;
+
+  if (*url == 0) {
+    kcon_puts("usage: get URL\n");
+    return;
+  }
+  if (!net_up()) {
+    kcon_puts("no gateway attached\n");
+    return;
+  }
+
+  ch = net_fetch(url);
+  if (ch < 0) {
+    kcon_puts("fetch failed: no free channel\n");
+    return;
+  }
+
+  /* Wait for the gateway to report a status. Ten seconds is generous for DNS
+   * plus a TLS handshake on the far side and still short enough that a wedged
+   * gateway does not look like a hung machine. */
+  deadline = (uint16_t)(snos_frames + 600u);
+  while (net_state(ch) == NET_ST_OPENING) {
+    if ((int16_t)(snos_frames - deadline) >= 0) {
+      kcon_puts("timeout waiting for the gateway\n");
+      net_close(ch);
+      return;
+    }
+    kbd_idle();
+  }
+
+  st = net_state(ch);
+  if (st == NET_ST_ERROR) {
+    kcon_puts("gateway error ");
+    kcon_putu(net_http_status(ch));
+    kcon_putc('\n');
+    net_close(ch);
+    return;
+  }
+
+  kcon_puts("HTTP ");
+  kcon_putu(net_http_status(ch));
+  kcon_putc('\n');
+
+  for (;;) {
+    int n = net_read(ch, get_buf, (int)sizeof get_buf);
+    int i;
+    if (n > 0) {
+      for (i = 0; i < n; i++) kcon_putc(get_buf[i]);
+      total = (uint16_t)(total + n);
+      continue;
+    }
+    st = net_state(ch);
+    if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
+    /* Any keypress abandons the transfer. A page can be tens of kilobytes and
+     * the console prints a line per frame, so without this a mistyped URL means
+     * waiting minutes for something you no longer want. */
+    if (kbd_getchar_nonblock() >= 0) {
+      kcon_puts("\n[aborted]\n");
+      break;
+    }
+    kbd_idle();
+  }
+
+  kcon_puts("\n[");
+  kcon_putu(total);
+  kcon_puts(" bytes]\n");
+  net_close(ch);
+}
+
 /* ---------------------------------------------------------------- shell */
 
 void shell_run(void) {
+  /* Started here rather than in main() only because main.c is being edited
+   * concurrently; it belongs beside the other subsystem inits. Safe regardless:
+   * net_service() is guarded by a readiness flag, so the NMI handler does
+   * nothing until this runs. */
+  net_init();
+
   kcon_puts("type 'help' for commands\n\n");
   for (;;) {
     char *rest;
@@ -380,6 +485,8 @@ void shell_run(void) {
     else if (streq(line, "rm")) cmd_rm(rest);
     else if (streq(line, "sram")) cmd_sram();
     else if (streq(line, "fstest")) cmd_fstest();
+    else if (streq(line, "net")) cmd_net();
+    else if (streq(line, "get")) cmd_get(rest);
     else {
       kcon_puts("unknown command: ");
       kcon_puts(line);

@@ -487,6 +487,23 @@ void con_split_disable(void) {
     con_invalidate_all();
 }
 
+/* Does the display still owe VRAM a write?
+ *
+ * The NMI handler uses this to decide whether it may spend the vblank on
+ * anything else. con_flush() runs in the FOREGROUND and does its DMA inside the
+ * vblank window, but NMI fires at the top of that window and preempts it — so
+ * any long-running NMI work consumes the window and the DMA silently lands
+ * during active display, where VRAM writes are ignored. The symptom is not a
+ * crash or a glitch: the screen simply stops updating while the mailbox shows
+ * everything working perfectly. */
+int con_dirty_pending(void) {
+    int i;
+    if (vofs_dirty) return 1;
+    for (i = 0; i < RING; i++)
+        if (dirty[i]) return 1;
+    return 0;
+}
+
 void con_invalidate_all(void) {
     int i;
     for (i = 0; i < RING; i++) dirty[i] = 1;

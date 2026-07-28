@@ -38,6 +38,10 @@
 ;;
 ;; Test mailbox lives at $7EF000 (out of bank $00 entirely — it is 4 KB, and
 ;; bank $00 is far too expensive to spend on test scaffolding).
+;;
+;; $7EE000-$7EEFFF is the LINK mailbox: the emulated network cable, mirroring
+;; the physical frame exchange byte for byte so that everything above it is
+;; exercised for real. See kernel/link.h.
 
 (define memories
   '((memory KernelDirectPage
@@ -66,10 +70,10 @@
             (qualifier near)
             (section data znear near fastregs))
 
-    ;; WRAM $7E2000-$7EEFFF: kernel far data (console shadow, ROMFS cache,
-    ;; later uIP buffers).  $7EF000-$7EFFFF is the mailbox — see mailbox.h.
+    ;; WRAM $7E2000-$7EDFFF: kernel far data (console shadow, ROMFS cache,
+    ;; network rings).  $7EE000 is the link mailbox, $7EF000 the test mailbox.
     (memory HiRAM
-            (address (#x7e2000 . #x7eefff))
+            (address (#x7e2000 . #x7edfff))
             (type RAM)
             (qualifier far)
             (section heap zfar far huge))

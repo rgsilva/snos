@@ -40,6 +40,10 @@ void con_split_disable(void);
 void con_panel_row(int screen_row, const uint8_t *chars);
 void con_invalidate_all(void);
 
+/* True while con_flush still has VRAM work to do. The NMI handler must not
+ * spend the vblank on background work while this is set — see console.c. */
+int con_dirty_pending(void);
+
 #define CON_BOX_H 1
 #define CON_BOX_V 2
 #define CON_BOX_TL 3

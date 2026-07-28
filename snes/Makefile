@@ -44,12 +44,13 @@ LNFLAGS = calypsi/linker.scm --output-format=raw --rtattr exit=simplified \
           $(CALDIR)/lib/clib-lc-ld-snes-noppu.a
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
-            $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c
+            $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c $(K)/net.c \
+            $(K)/link.c $(K)/link_wram.c $(K)/link_serial.c
 KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps test test-boot test-input test-shell test-apps test-fs test-basic test-panel test-editor clean
+.PHONY: all kernel apps test test-boot test-input test-shell test-apps test-fs test-basic test-panel test-editor test-net clean
 all: kernel
 kernel: $(BUILD)/snos.sfc
 
@@ -124,7 +125,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-boot test-input test-shell test-apps test-fs test-basic test-panel test-editor
+test: test-boot test-input test-shell test-apps test-fs test-basic test-panel test-editor test-net
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(call check_no_gui)
@@ -162,6 +163,10 @@ test-editor: $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
 	$(call check_no_gui)
 	rm -f "$(MESEN_SRM)"
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
+
+test-net: $(BUILD)/snos.sfc $(BUILD)/test/net.lua
+	$(call check_no_gui)
+	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/net.lua
 
 clean:
 	rm -rf $(BUILD)

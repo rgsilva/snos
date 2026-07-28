@@ -26,6 +26,8 @@
               .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
               .public sys_open, sys_getc_f, sys_putc_f, sys_close
               .public sys_fsize, sys_dir, sys_unlink
+              .public sys_net_up, sys_net_fetch_raw, sys_net_read_raw
+              .public sys_net_state, sys_net_close
               .public sys_puts_at_raw, sys_screen, sys_pollkey, sys_osk
 
 sys_exit:       cop     #0x00
@@ -82,6 +84,19 @@ sys_unlink:     cop     #0x36
 sys_frames:     cop     #0x50
                 rtl
 sys_waitvbl:    cop     #0x51
+                rtl
+
+sys_net_up:     cop     #0x60
+                rtl
+sys_net_fetch_raw:
+                cop     #0x61
+                rtl
+sys_net_read_raw:
+                cop     #0x62
+                rtl
+sys_net_state:  cop     #0x63
+                rtl
+sys_net_close:  cop     #0x64
                 rtl
 
 sys_trace_raw:  cop     #0x70
