@@ -49,7 +49,11 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
 .PHONY: all kernel apps bridge test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager clean
-all: kernel
+# The combined Lua bridge is built by default. It used to be produced only on
+# demand into build/, which is gitignored — so it existed, worked, and was
+# invisible. Mesen loads exactly one script at a time, so this is the file to
+# point its Script Window at.
+all: kernel $(BUILD)/snosbridge.lua
 kernel: $(BUILD)/snos.sfc
 
 $(BUILD):
