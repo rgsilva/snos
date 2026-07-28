@@ -29,4 +29,20 @@ void con_row_save(int r, uint8_t *dst);
 void con_row_restore(int r, const uint8_t *src);
 void con_clear(void);
 
+/* Keyboard panel. It lives in a SECOND pair of tilemaps held still by an HDMA
+ * split, so text scrolls underneath it and it never moves. Box-drawing glyphs
+ * are available as characters $01-$06 (h, v, and the four corners). */
+void con_set_text_rows(int n);
+void con_split_enable(int panel_top_row);
+void con_split_disable(void);
+void con_panel_row(int screen_row, const uint8_t *chars);
+void con_invalidate_all(void);
+
+#define CON_BOX_H 1
+#define CON_BOX_V 2
+#define CON_BOX_TL 3
+#define CON_BOX_TR 4
+#define CON_BOX_BL 5
+#define CON_BOX_BR 6
+
 #endif

@@ -94,43 +94,45 @@ function M.has_highlight(from_row, to_row)
   return false
 end
 
--- ----------------------------------------------------------------- sprites
--- The on-screen keyboard is drawn with sprites, so it is asserted through OAM
--- rather than the tilemap. That is the whole point of the change: it lives in
--- absolute screen coordinates and cannot be disturbed by the console scrolling.
-function M.sprites()
-  local list = {}
-  for i = 0, 127 do
-    local y = emu.read(i * 4 + 1, emu.memType.snesSpriteRam)
-    if y < 224 then
-      list[#list + 1] = {
-        x = emu.read(i * 4 + 0, emu.memType.snesSpriteRam),
-        y = y,
-        tile = emu.read(i * 4 + 2, emu.memType.snesSpriteRam),
-        attr = emu.read(i * 4 + 3, emu.memType.snesSpriteRam),
-      }
-    end
-  end
-  table.sort(list, function(a, b)
-    if a.y ~= b.y then return a.y < b.y end
-    return a.x < b.x
-  end)
-  return list
+-- ------------------------------------------------------------------ panel
+-- The keyboard lives in its OWN pair of tilemaps, held still by an HDMA split
+-- while the text scrolls above it. So it is read from there, not from the text
+-- map — which is exactly the separation that stops it being corrupted.
+M.BG2_PANEL, M.BG1_PANEL = 0x0800, 0x0C00
+M.PANEL_TOP, M.PANEL_ROWS = 22, 6
+
+local function panel_char(mapword, row, cell)
+  local w = mapword + row * 32 + cell
+  return (emu.read16(w * 2, emu.memType.snesVideoRam) & 0x1FF) >> 1
 end
 
--- Panel glyphs in reading order; '#' stands for the border and fill tiles.
-function M.sprite_text()
+function M.panel_row(row)
   local out = {}
-  for _, s in ipairs(M.sprites()) do
-    out[#out + 1] = (s.tile < 128) and string.char(s.tile) or "#"
+  for cell = 0, 31 do
+    out[#out + 1] = string.char(panel_char(M.BG2_PANEL, row, cell))
+    out[#out + 1] = string.char(panel_char(M.BG1_PANEL, row, cell))
   end
-  return table.concat(out)
+  return (table.concat(out):gsub("%s+$", ""))
 end
 
--- True if some sprite uses the selected palette (attr bits 1-3 == 1).
-function M.sprite_has_selection()
-  for _, s in ipairs(M.sprites()) do
-    if ((s.attr >> 1) & 7) == 1 then return true end
+function M.panel_text()
+  local out = {}
+  for r = M.PANEL_TOP, M.PANEL_TOP + M.PANEL_ROWS - 1 do out[#out + 1] = M.panel_row(r) end
+  return table.concat(out, "\n")
+end
+
+function M.panel_text_plain()
+  return (M.panel_text():gsub("[\128-\255]", function(c)
+    return string.char(c:byte() & 0x7F)
+  end))
+end
+
+-- True if any character in the panel is inverse-video, i.e. a key is selected.
+function M.panel_has_highlight()
+  for r = M.PANEL_TOP, M.PANEL_TOP + M.PANEL_ROWS - 1 do
+    for _, b in ipairs({ M.panel_row(r):byte(1, -1) }) do
+      if b >= 0x80 then return true end
+    end
   end
   return false
 end

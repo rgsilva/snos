@@ -89,18 +89,24 @@ emu.addEventCallback(function()
   -- command, so the shell rejecting it by name proves the characters arrived.
   r.check(text:find("unknown command: qw", 1, true) ~= nil,
           "OSK did not produce 'qw' - navigation or the A-press is broken")
-  -- The panel is sprites now, so look in OAM, not the tilemap.
-  local spr = L.sprite_text()
-  print("--- osk sprites ---"); print(spr)
-  r.check(spr:find("1234567890-=", 1, true) ~= nil, "OSK number row not in OAM")
-  r.check(spr:find("qwertyuiop[]", 1, true) ~= nil, "OSK key rows not in OAM")
-  r.check(L.sprite_has_selection(), "no key drawn with the selected palette")
+  -- The keyboard is read from its own tilemap.
+  local panel = L.panel_text_plain()
+  print("--- keyboard panel ---"); print(panel)
+  r.check(panel:find("keyboard", 1, true) ~= nil, "panel frame/title missing")
+  r.check(panel:find("1 2 3 4 5 6 7 8 9 0", 1, true) ~= nil, "number row missing")
+  r.check(panel:find("q w e r t y u i o p", 1, true) ~= nil, "key rows missing")
+  r.check(panel:find("A type key", 1, true) ~= nil, "controller mapping missing")
+  r.check(panel:find("SELECT hide", 1, true) ~= nil, "controller mapping truncated")
+  r.check(L.panel_has_highlight(), "no key drawn inverse - selection invisible")
 
-  -- And the crucial one: the keyboard must leave the text completely alone.
-  -- The old background-overlay panel scrolled with the console and destroyed
-  -- whatever it drifted over.
-  r.check(plain:find("v0.1", 1, true) ~= nil,
-          "banner gone - the keyboard is corrupting the console again")
+  -- The crucial one: after all that scrolling, the keyboard must not have
+  -- leaked into the TEXT map. The old version scrolled with the console and
+  -- destroyed whatever it drifted over.
+  local textmap = L.screen_text_plain(22)
+  r.check(textmap:find("keyboard", 1, true) == nil,
+          "keyboard has leaked into the scrolling text area")
+  r.check(textmap:find("A type key", 1, true) == nil,
+          "keyboard hints have leaked into the scrolling text area")
 
   local low = text:match("STACKLOW (%x+)")
   if low then

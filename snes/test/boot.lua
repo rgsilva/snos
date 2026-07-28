@@ -48,7 +48,7 @@ emu.addEventCallback(function()
           "banner not present in VRAM tilemap - console did not render")
   -- The storage line is measured at boot, not compiled in, so it also proves
   -- the SRAM probe and the filesystem mount both ran.
-  r.check(screen:find("K sram", 1, true) ~= nil,
+  r.check(screen:find("K SRAM", 1, true) ~= nil,
           "boot status line missing - SRAM probe or fs mount did not run")
 
   local low = text:match("STACKLOW (%x+)")

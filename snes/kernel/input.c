@@ -1,22 +1,21 @@
 /* SNOS input layer: controller, on-screen keyboard, line editor.
  *
- * The OSK is drawn with SPRITES, as a bordered panel floating in the middle of
- * the screen.
+ * The keyboard is a panel across the bottom of the screen, drawn as text in the
+ * console's own font — so it is exactly as crisp as the terminal, 8 pixels per
+ * glyph in Mode 5's 512-dot space.
  *
- * It began as text written into the console's bottom rows, which was wrong in a
- * way no amount of care would have fixed. The console scrolls the background
- * with the hardware scroll registers, so the panel scrolled along with the
- * text: keyboard rows drifted up into the output, and typing near the bottom
- * corrupted the display. Moving it elsewhere on the background would only have
- * changed where it drifted from.
+ * It is NOT drawn into the text tilemaps. Those scroll, and an earlier version
+ * that lived in them drifted up through the display and corrupted whatever it
+ * landed on. It has its own pair of tilemaps held still by an HDMA split
+ * (console.c): text scrolls above the split, the panel below it never moves,
+ * and the console's text area shrinks so nothing scrolls underneath.
  *
- * Sprites are addressed in absolute screen coordinates and are untouched by
- * background scrolling, so the whole class of bug disappears. Nothing needs
- * saving or restoring either — hiding the panel is one register write.
+ * A sprite version fixed the scrolling too, but sprites are locked to 256 dots
+ * in Mode 5 while the background is 512 — so every glyph came out twice as wide
+ * as the surrounding text. That is hardware, not styling, and it looked awful.
  */
 #include "input.h"
 #include "console.h"
-#include "sprite.h"
 #include "mailbox.h"
 #include "snos.h"
 
@@ -65,17 +64,15 @@ uint16_t pad_pressed(void) {
 
 /* ------------------------------------------------------------------ OSK */
 
-/* A 14x6 grid of 8x8 sprite cells: a one-cell border around four rows of at
- * most twelve keys. 84 sprites, and at most 14 on any scanline, which is
- * comfortably inside the SNES limits of 128 total and 32 per line. */
-#define PANEL_W 14
-#define PANEL_H 6
+/* Six rows across the bottom: a framed panel with the key grid on the left and
+ * the controller mapping on the right, so the controls are visible exactly when
+ * you need them rather than buried in `help`. */
+#define PANEL_ROWS 6
+#define PANEL_TOP (28 - PANEL_ROWS)
 #define KEY_ROWS 4
-#define KEYS_MAX 12
-
-/* Centred: the screen is 256x224 in sprite coordinates. */
-#define PANEL_X ((256 - PANEL_W * 8) / 2)
-#define PANEL_Y ((224 - PANEL_H * 8) / 2)
+#define KEY_COL0 3   /* left edge of the key grid */
+#define KEY_STEP 2   /* one blank column between keys, so it reads as a grid */
+#define HINT_COL 34  /* controller mapping starts here */
 
 static const char *const KEYS_LO[KEY_ROWS] = {
     "1234567890-=",
@@ -90,7 +87,15 @@ static const char *const KEYS_HI[KEY_ROWS] = {
     "ZXCVBNM<>?",
 };
 
-static uint8_t panel[PANEL_W * PANEL_H];
+/* One per key row, shown to the right of the grid. */
+static const char *const HINTS[KEY_ROWS] = {
+    "A type key      START  enter",
+    "B backspace     SELECT hide",
+    "X space",
+    "Y shift",
+};
+
+static uint8_t panel_buf[64];
 static uint8_t panel_dirty;
 static int osk_on = 1;      /* visible by default: on a stock SNES it is the
                              * only way to type, so starting hidden would leave
@@ -112,62 +117,90 @@ static void clamp_sel(void) {
   if (sel_col < 0) sel_col = 0;
 }
 
-static void build_panel(void) {
-  int r, c;
-  for (r = 0; r < PANEL_H; r++) {
-    for (c = 0; c < PANEL_W; c++) {
-      uint8_t v;
-      if (r == 0 || r == PANEL_H - 1 || c == 0 || c == PANEL_W - 1) {
-        v = SPR_BORDER;
-      } else {
-        int kr = r - 1, kc = c - 1;
-        const char *s = osk_shift ? KEYS_HI[kr] : KEYS_LO[kr];
-        if (kc < keyrow_len(kr)) {
-          v = (uint8_t)s[kc];
-          if (kr == sel_row && kc == sel_col) v |= SPR_SELECTED;
-        } else {
-          v = SPR_PAD;
-        }
-      }
-      panel[r * PANEL_W + c] = v;
+static void put(uint8_t *b, int col, const char *s) {
+  while (*s && col < 63) b[col++] = (uint8_t)*s++;
+}
+
+static void build_row(uint8_t *b, int prow) {
+  int i;
+
+  for (i = 0; i < 64; i++) b[i] = ' ';
+
+  /* Frame */
+  if (prow == 0) {
+    for (i = 1; i < 63; i++) b[i] = CON_BOX_H;
+    b[0] = CON_BOX_TL;
+    b[63] = CON_BOX_TR;
+    put(b, 2, " keyboard ");
+    return;
+  }
+  if (prow == PANEL_ROWS - 1) {
+    for (i = 1; i < 63; i++) b[i] = CON_BOX_H;
+    b[0] = CON_BOX_BL;
+    b[63] = CON_BOX_BR;
+    return;
+  }
+  b[0] = CON_BOX_V;
+  b[63] = CON_BOX_V;
+
+  {
+    int krow = prow - 1;
+    const char *s = osk_shift ? KEYS_HI[krow] : KEYS_LO[krow];
+
+    /* Stagger each row by one column, the way a real keyboard is offset. */
+    for (i = 0; s[i]; i++) {
+      int c = KEY_COL0 + krow + i * KEY_STEP;
+      if (c >= 62) break;
+      /* $80 selects the inverse-video twin of the glyph — the selection
+       * highlight, since Mode 5 has no spare layer to draw a cursor on. */
+      b[c] = (uint8_t)(s[i] | ((krow == sel_row && i == sel_col) ? 0x80 : 0x00));
     }
+    put(b, HINT_COL, HINTS[krow]);
   }
 }
 
 void osk_show(void) {
   osk_on = 1;
-  panel_dirty = 1;
+  panel_dirty = (1 << PANEL_ROWS) - 1;
+  con_split_enable(PANEL_TOP);
 }
 
 void osk_hide(void) {
   osk_on = 0;
-  spr_enable(0);
+  panel_dirty = 0;
+  con_split_disable();
 }
 
 int osk_visible(void) { return osk_on; }
 
-/* Rebuild and upload in one go. The whole panel is 544 bytes of OAM, which is
- * nothing in a vblank, so there is no need for the per-row dirty tracking the
- * background version needed. */
+/* One row per call, so a repaint never overruns a vblank. Only panel changes
+ * cost anything now — scrolling text no longer disturbs it at all, which is
+ * the entire point of the split. */
 void osk_redraw(void) {
+  int i;
   if (!osk_on || !panel_dirty) return;
-  build_panel();
-  spr_panel(panel, PANEL_W, PANEL_H, PANEL_X, PANEL_Y);
-  spr_commit();
-  spr_enable(1);
-  panel_dirty = 0;
+  for (i = 0; i < PANEL_ROWS; i++) {
+    if (panel_dirty & (1 << i)) {
+      build_row(panel_buf, i);
+      con_panel_row(PANEL_TOP + i, panel_buf);
+      panel_dirty &= (uint8_t)~(1 << i);
+      return;
+    }
+  }
 }
 
 static void move_sel(int dr, int dc) {
+  int old = sel_row;
   if (dr) {
     sel_row = (sel_row + dr + KEY_ROWS) % KEY_ROWS;
     clamp_sel();
+    panel_dirty |= (uint8_t)((1 << (old + 1)) | (1 << (sel_row + 1)));
   }
   if (dc) {
     int n = keyrow_len(sel_row);
     sel_col = (sel_col + dc + n) % n;
+    panel_dirty |= (uint8_t)(1 << (sel_row + 1));
   }
-  panel_dirty = 1;
 }
 
 int osk_poll(void) {
@@ -203,7 +236,7 @@ int osk_poll(void) {
   if (p & PAD_Y) {
     osk_shift = !osk_shift;
     clamp_sel();
-    panel_dirty = 1;
+    panel_dirty |= 0x1E; /* all four key rows */
     return -1;
   }
   if (p & PAD_UP) move_sel(-1, 0);
@@ -222,7 +255,6 @@ int osk_poll(void) {
 
 void kbd_init(void) {
   R8(0x4200) = 0x81; /* NMI + auto-joypad read */
-  spr_init();
   osk_show();
 }
 

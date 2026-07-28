@@ -78,11 +78,7 @@ int main(void) {
   /* One line of genuinely useful state: how much storage there is, and what is
    * on it. The SRAM figure is measured at this boot, not compiled in. */
   kcon_putu((uint16_t)(sram_size() >> 10));
-  kcon_puts("K sram, ");
-  kcon_putu((uint16_t)app_count());
-  kcon_puts(" apps, ");
-  kcon_putu((uint16_t)fs_count());
-  kcon_puts(" files\n");
+  kcon_puts("K SRAM\n");
 
   shell_run(); /* never returns */
   return 0;
