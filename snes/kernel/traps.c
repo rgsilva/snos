@@ -343,8 +343,15 @@ uint16_t snos_cop_c(uint16_t sp) {
     return (uint16_t)net_read((int)ch, dst, (int)a);
   }
 
+  case SYS_FS_FREE:
+    return (uint16_t)(fs_free() >> 10);
+
   case SYS_NET_STATE:
     SNOS_ARGS.p0 = net_http_status((int)a);
+    /* p1 carries the flags the gateway sent with the status. Bit 0 says the
+     * body is Mode 3 tile data, which the caller needs before it picks a
+     * filename or decides whether printing it makes any sense. */
+    SNOS_ARGS.p1 = (uint16_t)net_is_image((int)a);
     return (uint16_t)net_state((int)a);
 
   case SYS_NET_CLOSE:

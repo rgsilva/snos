@@ -94,16 +94,27 @@ local function push_ctrl(typ, payload)
   push(CH_CTRL, string.char(typ, #payload) .. payload)
 end
 
+-- The flags byte on S2C_OPEN says "this body is Mode 3 tile data". A real
+-- gateway sets it from the response's Content-Type; this one keys off the URL,
+-- which is the same decision made from the only information a canned server
+-- has. It is appended, so a three-byte reply still parses.
+local F_IMAGE = 1
+
 local function on_fetch(ch, url)
   gw.fetches[#gw.fetches + 1] = url
   if url:find("missing") then
-    push_ctrl(S2C_OPEN, string.char(ch, 404 & 0xFF, (404 >> 8) & 0xFF))
+    push_ctrl(S2C_OPEN, string.char(ch, 404 & 0xFF, (404 >> 8) & 0xFF, 0))
     push(ch, BODY_404)
   elseif url:find("big") then
-    push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF))
+    push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF, 0))
     push(ch, BODY_BIG)
+  elseif url:find("%.jpg") then
+    -- Auto-conversion: the caller asked for a JPEG and never said "image".
+    gw.images[#gw.images + 1] = url
+    push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF, F_IMAGE))
+    push(ch, BODY_IMG)
   else
-    push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF))
+    push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF, 0))
     push(ch, BODY_OK)
   end
   push_ctrl(S2C_EOF, string.char(ch))
@@ -327,7 +338,8 @@ emu.addEventCallback(function()
 
   if frame < at then return end
 
-  if step == 1 then L.feed("net\n"); at = frame + 150; step = 2; return end
+  -- Bare `net` now lists its subcommands rather than meaning `status`.
+  if step == 1 then L.feed("net status\n"); at = frame + 150; step = 2; return end
   if step == 2 then L.feed("get http://example.com/ok -\n"); at = frame + 900; step = 3; return end
   if step == 3 then L.feed("get http://example.com/missing -\n"); at = frame + 600; step = 4; return end
   if step == 4 then
@@ -379,13 +391,23 @@ emu.addEventCallback(function()
   end
   if step == 10 then L.feed("cat WINLOSS.TXT\n"); at = frame + 600; step = 11; return end
   -- "partial file kept" is a claim; check the volume actually has it.
-  if step == 11 then L.feed("ls\n"); at = frame + 300; step = 12; return end
+  if step == 11 then L.feed("ls\n"); at = frame + 300; step = 11.5; return end
+  -- Printing tile data to the console is refused rather than sprayed.
+  if step == 11.5 then
+    L.feed("get http://example.com/pic.jpg -\n")
+    at = frame + 900
+    step = 12
+    return
+  end
 
   -- The image path: fetch a converted picture, store it, and display it. The
   -- assertions below read CGRAM and VRAM directly, because whether a picture
   -- actually reached the PPU is not something the console can be asked.
   if step == 12 then
-    L.feed("image http://example.com/pic TINY\n")
+    -- No `image` command any more, and no flag: the URL ends .jpg, the gateway
+    -- notices and converts, and the name is forced to .IMG because the bytes
+    -- are no longer a JPEG.
+    L.feed("get http://example.com/pic.jpg TINY\n")
     at = frame + 1200
     step = 13
     return
@@ -410,6 +432,11 @@ emu.addEventCallback(function()
         #gw.fetches, gw.drop_snes, gw.corrupt_out))
 
   r.check(L.status() ~= L.STATUS_PANIC, "kernel panicked")
+  -- `get` is an application now, reached without a `run` prefix.
+  r.check(text:find("[get exited", 1, true) ~= nil,
+          "get did not run as an application via the name fallback")
+  r.check(text:find("that is a picture", 1, true) ~= nil,
+          "printing a converted picture to the console was not refused")
   r.check(text:find("gateway up", 1, true) ~= nil,
           "kernel did not detect the gateway")
 
@@ -463,6 +490,11 @@ emu.addEventCallback(function()
 
   -- ---------------------------------------------------------------- image
   r.check(#gw.images >= 1, "gateway received no image request")
+  -- Auto-conversion: nothing asked for an image. The URL ended .jpg, the
+  -- gateway said so with the flags byte, and the name was forced to .IMG
+  -- because the bytes are no longer a JPEG.
+  r.check(text:find("picture - view TINY.IMG", 1, true) ~= nil,
+          "the converted picture was not announced as one")
   r.check(text:find("saved TINY.IMG", 1, true) ~= nil,
           "the converted picture never reached the volume")
 

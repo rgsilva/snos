@@ -66,21 +66,25 @@ static void put_kv(const char *k, uint16_t v) {
 
 /* ------------------------------------------------------------- builtins */
 
+/* One column for every description, wide enough for the longest usage on the
+ * left. It had grown two: the original entries at column 10 and later ones at
+ * column 22, so the descriptions no longer lined up and the list read as two
+ * lists. 14 fits "write N T" and "run N [A]" with room, inside 64 columns. */
 static void cmd_help(void) {
-  kcon_puts("help      this list\n");
-  kcon_puts("clear     clear the screen\n");
-  kcon_puts("mem       memory and cartridge SRAM usage\n");
-  kcon_puts("echo ...  print arguments\n");
-  kcon_puts("apps      list applications\n");
-  kcon_puts("run N [A] run an application, with an argument\n");
-  kcon_puts("ls        list files\n");
-  kcon_puts("cat NAME  print a file\n");
-  kcon_puts("write N T write text T to file N\n");
-  kcon_puts("rm NAME   delete a file\n");
-  kcon_puts("net [status|test]     gateway status, or prove it works\n");
-  kcon_puts("get URL DEST          fetch; DEST of - prints to the console\n");
-  kcon_puts("image URL [NAME]      save a picture, converted for viewing\n");
-  kcon_puts("debug     diagnostics (debug with no argument lists them)\n");
+  kcon_puts("help          this list\n");
+  kcon_puts("clear         clear the screen\n");
+  kcon_puts("mem           memory and cartridge SRAM usage\n");
+  kcon_puts("echo ...      print arguments\n");
+  kcon_puts("apps          list applications\n");
+  kcon_puts("run N [A]     run an application, with an argument\n");
+  kcon_puts("ls            list files\n");
+  kcon_puts("cat NAME      print a file\n");
+  kcon_puts("write N T     write text T to file N\n");
+  kcon_puts("rm NAME       delete a file\n");
+  kcon_puts("net           gateway diagnostics\n");
+  kcon_puts("debug         other diagnostics\n");
+  kcon_puts("\nan application's name runs it: get, view, edit, basic\n");
+  kcon_puts("get URL DEST  fetch; DEST of - prints to the console\n");
 }
 
 static void cmd_ver(void) {
@@ -199,23 +203,12 @@ static void set_argv(const char *s) {
   dst[i] = 0;
 }
 
-static void cmd_run(char *cmdline) {
-  const app_entry_t *a;
+/* Shared by `run NAME` and by typing an application's name directly. Factored
+ * so the two paths cannot drift — an ABI check that guards one entry point and
+ * not the other is worse than no check at all. */
+static void run_app_entry(const app_entry_t *a, const char *args) {
   uint16_t rc;
-  char *name = cmdline;
-  const char *args = split_word(cmdline);
 
-  if (*name == 0) {
-    kcon_puts("usage: run NAME [ARGS]\n");
-    return;
-  }
-  a = app_find(name);
-  if (a == 0) {
-    kcon_puts("no such application: ");
-    kcon_puts(name);
-    kcon_putc('\n');
-    return;
-  }
   if (a->minabi > SNOS_ABI_VERSION) {
     /* An app built against a newer kernel must be refused rather than run and
      * allowed to fall over on a syscall that does not exist yet. */
@@ -240,6 +233,35 @@ static void cmd_run(char *cmdline) {
   }
 }
 
+static void cmd_run(char *cmdline) {
+  const app_entry_t *a;
+  char *name = cmdline;
+  const char *args = split_word(cmdline);
+
+  if (*name == 0) {
+    kcon_puts("usage: run NAME [ARGS]\n");
+    return;
+  }
+  a = app_find(name);
+  if (a == 0) {
+    kcon_puts("no such application: ");
+    kcon_puts(name);
+    kcon_putc('\n');
+    return;
+  }
+  run_app_entry(a, args);
+}
+
+/* Not a builtin? Try an application of that name.
+ *
+ * This is what makes `get` viable as an application rather than a shell
+ * command: `get URL DEST` has to work without a `run` prefix, or moving it out
+ * of the kernel would have made it worse to use. It generalises for free —
+ * `edit FILE`, `view PIC.IMG` and `basic` all work now — and `run` stays for
+ * when you want to be explicit or when an app shares a name with a builtin.
+ *
+ * Returns 0 if there is no such application, so the caller still owns the
+ * unknown-command message. */
 static void cmd_ls(void) {
   int i, n = fs_count();
   if (n == 0) {
@@ -457,26 +479,24 @@ static uint8_t net_test_buf[64];
 static void cmd_net_test(void) {
   int ch, st;
   uint32_t got = 0;
-  uint16_t deadline;
+  uint16_t deadline, http;
 
   if (!net_up()) {
-    kcon_puts("no gateway attached\n");
+    kcon_puts("fail (no gateway)\n");
     return;
   }
-  kcon_puts("fetching ");
-  kcon_puts(NET_TEST_URL);
-  kcon_putc('\n');
+  kcon_puts("testing...\n");
 
   ch = net_fetch(NET_TEST_URL);
   if (ch < 0) {
-    kcon_puts("FAIL: no free channel\n");
+    kcon_puts("fail (no free channel)\n");
     return;
   }
 
   deadline = (uint16_t)(snos_frames + 900u);
   while (net_state(ch) == NET_ST_OPENING) {
     if ((int16_t)(snos_frames - deadline) >= 0) {
-      kcon_puts("FAIL: timed out waiting for the gateway\n");
+      kcon_puts("fail (timed out)\n");
       net_close(ch);
       return;
     }
@@ -494,352 +514,36 @@ static void cmd_net_test(void) {
     if ((int16_t)(snos_frames - deadline) >= 0) break;
     kbd_idle();
   }
-
-  kcon_puts("HTTP ");
-  kcon_putu(net_http_status(ch));
-  kcon_puts(", ");
-  kcon_putu((uint16_t)got);
-  kcon_puts(" bytes\n");
+  http = net_http_status(ch);
   net_close(ch);
 
-  /* Any reply at all is a pass, including an error page. The target sits behind
+  /* Any reply is a pass, including an error page. The target sits behind
    * Cloudflare and will refuse most non-browser requests; that refusal still
    * proves DNS resolved, TCP connected, TLS completed and the link carried
    * bytes both ways. Asserting on the content would test Cloudflare's mood. */
-  if (got > 0) kcon_puts("OK - DNS, TLS and the link all work\n");
-  else kcon_puts("FAIL: connected but received nothing\n");
+  if (got > 0) {
+    kcon_puts("pass (http ");
+    kcon_putu(http);
+    kcon_puts(", ");
+    kcon_putu32(got);
+    kcon_puts(" bytes)\n");
+  } else {
+    kcon_puts("fail (http ");
+    kcon_putu(http);
+    kcon_puts(", 0 bytes)\n");
+  }
 }
 
 static void cmd_net(char *rest) {
   char *what = rest;
   (void)split_word(rest);
-  if (*what == 0 || streq(what, "status")) {
-    cmd_net_status();
-  } else if (streq(what, "test")) {
-    cmd_net_test();
-  } else {
-    kcon_puts("net status   gateway link and counters\n");
-    kcon_puts("net test     fetch a known URL to prove the path works\n");
-  }
-}
-
-/* Fetch a URL and print the body.
- *
- * The gateway has already done DNS, TLS, redirects, chunked decoding and gzip,
- * so what arrives here is plain bytes and the only work left is to show them.
- * That division is the entire point of the design: none of those five things
- * would be reasonable on a 3.58 MHz CPU, and TLS would not be possible at all.
- */
-static uint8_t get_buf[128];
-
-static void cmd_get(const char *url) {
-  int ch, st;
-  uint16_t total = 0;
-  uint16_t deadline;
-
-  if (*url == 0) {
-    kcon_puts("usage: get URL\n");
-    return;
-  }
-  if (!net_up()) {
-    kcon_puts("no gateway attached\n");
-    return;
-  }
-
-  ch = net_fetch(url);
-  if (ch < 0) {
-    kcon_puts("fetch failed: no free channel\n");
-    return;
-  }
-
-  /* Wait for the gateway to report a status. Ten seconds is generous for DNS
-   * plus a TLS handshake on the far side and still short enough that a wedged
-   * gateway does not look like a hung machine. */
-  deadline = (uint16_t)(snos_frames + 600u);
-  while (net_state(ch) == NET_ST_OPENING) {
-    if ((int16_t)(snos_frames - deadline) >= 0) {
-      kcon_puts("timeout waiting for the gateway\n");
-      net_close(ch);
-      return;
-    }
-    kbd_idle();
-  }
-
-  st = net_state(ch);
-  if (st == NET_ST_ERROR) {
-    kcon_puts("gateway error ");
-    kcon_putu(net_http_status(ch));
-    kcon_putc('\n');
-    net_close(ch);
-    return;
-  }
-
-  kcon_puts("HTTP ");
-  kcon_putu(net_http_status(ch));
-  kcon_putc('\n');
-
-  for (;;) {
-    int n = net_read(ch, get_buf, (int)sizeof get_buf);
-    int i;
-    if (n > 0) {
-      for (i = 0; i < n; i++) kcon_putc(get_buf[i]);
-      total = (uint16_t)(total + n);
-      continue;
-    }
-    st = net_state(ch);
-    if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
-    /* Any keypress abandons the transfer. A page can be tens of kilobytes and
-     * the console prints a line per frame, so without this a mistyped URL means
-     * waiting minutes for something you no longer want. */
-    if (kbd_getchar_nonblock() >= 0) {
-      kcon_puts("\n[aborted]\n");
-      break;
-    }
-    kbd_idle();
-  }
-
-  kcon_puts("\n[");
-  kcon_putu(total);
-  kcon_puts(" bytes]\n");
-  net_close(ch);
-}
-
-/* Derive a filename from a URL's last path segment.
- *
- * Uppercased because that is the convention on this volume — the ROM packer
- * emits uppercase and BASIC's SAVE writes uppercase. Matching is
- * case-insensitive so this is cosmetic, but a directory listing that mixes the
- * two looks like a bug. */
-/* Replace (or add) the extension. An .IMG is not the resource that was
- * requested — it is a Mode 3 rendition of it — so saving a converted photo as
- * PHOTO.JPG would be a lie the viewer then has to detect by sniffing. */
-static void force_ext(char *name, const char *ext) {
-  int i = 0, dot = -1;
-  while (name[i]) {
-    if (name[i] == '.') dot = i;
-    i++;
-  }
-  if (dot >= 0) i = dot;
-  if (i > FS_NAME_LEN - 4) i = FS_NAME_LEN - 4;
-  name[i++] = '.';
-  while (*ext) name[i++] = *ext++;
-  name[i] = 0;
-}
-
-static void name_from_url(const char *url, char *out) {
-  const char *p = url, *seg = url;
-  int i = 0;
-
-  /* Skip the scheme so its "//" is not mistaken for a path separator. */
-  while (*p) {
-    if (p[0] == '/' && p[1] == '/') {
-      p += 2;
-      seg = p;
-      break;
-    }
-    if (*p == '/') break;
-    p++;
-  }
-  for (; *p; p++) {
-    if (*p == '/') seg = p + 1;
-    else if (*p == '?' || *p == '#') break; /* query is not part of the name */
-  }
-
-  for (; seg < p && *seg && i < FS_NAME_LEN; seg++) {
-    char c = *seg;
-    if (c == '?' || c == '#') break;
-    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-    out[i++] = c;
-  }
-  out[i] = 0;
-  /* "example.com" and "example.com/" both have an empty last segment. */
-  if (i == 0) {
-    const char *d = "INDEX.HTM";
-    while (*d) out[i++] = *d++;
-    out[i] = 0;
-  }
-}
-
-static void download_to_volume(char *rest, int want_image) {
-  char nm[FS_NAME_LEN + 1];
-  char *given;
-  int ch, st;
-  uint32_t got = 0, budget, dots = 0;
-  uint16_t deadline;
-  int aborted = 0, full = 0;
-
-  given = split_word(rest);
-  if (*rest == 0) {
-    kcon_puts(want_image ? "usage: image URL [NAME]\n"
-                         : "usage: download URL [NAME]\n");
-    return;
-  }
-  if (!net_up()) {
-    kcon_puts("no gateway attached\n");
-    return;
-  }
-
-  if (*given) {
-    int i = 0;
-    while (given[i] && i < FS_NAME_LEN) {
-      char c = given[i];
-      if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-      nm[i] = c;
-      i++;
-    }
-    nm[i] = 0;
-  } else {
-    name_from_url(rest, nm);
-  }
-  if (want_image) force_ext(nm, "IMG");
-
-  /* Refuse before starting rather than after filling the volume. */
-  budget = fs_free();
-  if (budget < 1024ul) {
-    kcon_puts("not enough room on the SRAM volume\n");
-    return;
-  }
-
-  ch = want_image ? net_image(rest) : net_fetch(rest);
-  if (ch < 0) {
-    kcon_puts("fetch failed: no free channel\n");
-    return;
-  }
-
-  /* Conversion happens before the gateway answers, so an image needs a longer
-   * grace period than a plain fetch: decoding and quantising a large JPEG is
-   * seconds of work on the far side. */
-  deadline = (uint16_t)(snos_frames + (want_image ? 1800u : 600u));
-  while (net_state(ch) == NET_ST_OPENING) {
-    if ((int16_t)(snos_frames - deadline) >= 0) {
-      kcon_puts("timeout waiting for the gateway\n");
-      net_close(ch);
-      return;
-    }
-    kbd_idle();
-  }
-
-  st = net_state(ch);
-  if (st == NET_ST_ERROR) {
-    kcon_puts("gateway error ");
-    kcon_putu(net_http_status(ch));
-    kcon_putc('\n');
-    net_close(ch);
-    return;
-  }
-  if (net_http_status(ch) != 200) {
-    kcon_puts("HTTP ");
-    kcon_putu(net_http_status(ch));
-    kcon_puts(" - not saved\n");
-    net_close(ch);
-    return;
-  }
-
-  if (fs_open_write(nm) != 0) {
-    kcon_puts("cannot create ");
-    kcon_puts(nm);
-    kcon_putc('\n');
-    net_close(ch);
-    return;
-  }
-
-  kcon_puts("-> ");
-  kcon_puts(nm);
-  kcon_putc('\n');
-
-  for (;;) {
-    int n, i;
-
-    /* Poll for an abort on EVERY pass, not only when the ring runs dry.
-     *
-     * The obvious placement — beside the state check further down, where `get`
-     * has it — is only reached when no data is waiting. A transfer that streams
-     * steadily never takes that branch, so it becomes uninterruptible exactly
-     * when it is longest, which is the case this exists for. A shell command is
-     * not an application, so START+SELECT cannot rescue it either. */
-    if (kbd_getchar_nonblock() >= 0) {
-      aborted = 1;
-      break;
-    }
-
-    n = net_read(ch, get_buf, (int)sizeof get_buf);
-    if (n > 0) {
-      /* fs_free() cannot fall during a write — the allocator only commits on
-       * close — so the remaining room has to be tracked here. */
-      if ((uint32_t)n > budget) {
-        full = 1;
-        break;
-      }
-      for (i = 0; i < n; i++) {
-        if (fs_putc(get_buf[i]) != 0) {
-          full = 1;
-          break;
-        }
-      }
-      if (full) break;
-      got += (uint32_t)n;
-      budget -= (uint32_t)n;
-      /* One dot per kilobyte, accumulating across the line.
-       *
-       * Not a byte count repainted in place: that costs a vblank every time it
-       * is redrawn, and the link is skipped on any frame the console is still
-       * dirty, so a livelier readout directly slows the transfer it is
-       * reporting. A dot is one character, and a wrapping wall of them still
-       * says "moving, and roughly how far". */
-      while (dots < (got >> 10)) {
-        kcon_putc('.');
-        dots++;
-        con_flush();
-      }
-      continue;
-    }
-    st = net_state(ch);
-    if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
-    kbd_idle();
-  }
-
-  kcon_putc('\n');
-  fs_close();
-
-  if (full) kcon_puts("[volume full - partial file kept]\n");
-  else if (aborted) kcon_puts("[aborted - partial file kept]\n");
+  if (streq(what, "status")) cmd_net_status();
+  else if (streq(what, "test")) cmd_net_test();
   else {
-    kcon_puts("saved ");
-    kcon_puts(nm);
-    kcon_puts(", ");
-    kcon_putu32(got);
-    kcon_puts(" bytes\n");
+    kcon_puts("net status    gateway link and counters\n");
+    kcon_puts("net test      fetch a known URL to prove the path works\n");
   }
-  net_close(ch);
 }
-
-/* `get URL DEST` — one fetch command with an explicit destination.
- *
- * DEST is mandatory and "-" means the console. Previously `get` printed and
- * `download` saved, which meant two commands doing one job and no way to tell
- * from a call site which one you had. Making the destination explicit removes
- * the ambiguity, and it stops `get` being a diagnostic: a command that can write
- * files is a tool, not a probe, which is why it lives at the root rather than
- * under `debug`. */
-static void cmd_get_cmd(char *rest) {
-  char *dest = split_word(rest);
-  if (*rest == 0 || *dest == 0) {
-    kcon_puts("usage: get URL DEST     (DEST of - prints to the console)\n");
-    return;
-  }
-  if (dest[0] == '-' && dest[1] == 0) {
-    cmd_get(rest);
-    return;
-  }
-  /* Re-join so the shared path sees "URL NAME" as it expects. */
-  {
-    char *p = rest;
-    while (*p) p++;
-    *p = ' ';
-  }
-  download_to_volume(rest, 0);
-}
-static void cmd_image(char *rest) { download_to_volume(rest, 1); }
 
 /* ---------------------------------------------------------------- shell */
 
@@ -896,12 +600,27 @@ void shell_run(void) {
     else if (streq(line, "rm")) cmd_rm(rest);
     else if (streq(line, "net")) cmd_net(rest);
     else if (streq(line, "debug")) cmd_debug(rest);
-    else if (streq(line, "get")) cmd_get_cmd(rest);
-    else if (streq(line, "image")) cmd_image(rest);
     else {
-      kcon_puts("unknown command: ");
-      kcon_puts(line);
-      kcon_puts("\ntype 'help'\n");
+      /* Not a builtin? Try an application of that name — this is what lets
+       * `get URL DEST`, `edit FILE` and `view PIC.IMG` work without a `run`
+       * prefix, which is what made moving `get` out of the kernel worthwhile.
+       *
+       * Written inline rather than as a helper on purpose. Factored into
+       * try_run_app(), the launched application crashed before reaching main,
+       * deterministically, with a jump target that varied run to run — the app
+       * pointer itself arriving corrupt. The identical find-then-launch
+       * sequence inside cmd_run() has always worked. Both are far pointers
+       * through Calypsi's shared direct-page scratch, and the extra call frame
+       * is the only difference; keeping the lookup and the launch in one
+       * function is the shape that is known to survive. */
+      const app_entry_t *app = app_find(line);
+      if (app != 0) {
+        run_app_entry(app, rest);
+      } else {
+        kcon_puts("unknown command: ");
+        kcon_puts(line);
+        kcon_puts("\ntype 'help'\n");
+      }
     }
   }
 }

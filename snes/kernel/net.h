@@ -32,11 +32,11 @@
  * server. At the current throughput 1 KB is over half a second of slack. */
 #define NET_RING 1024
 
-#define NET_ST_FREE 0
-#define NET_ST_OPENING 1 /* request sent, gateway has not answered yet */
-#define NET_ST_OPEN 2
-#define NET_ST_EOF 3     /* server finished; drain the ring, then close */
-#define NET_ST_ERROR 4
+/* The NET_ST_* values live in snos_abi.h, because an application receives them
+ * from SYS_NET_STATE and cannot interpret the result without them. Defining
+ * them twice invites the two copies to drift, and the drift would show up as a
+ * state machine that disagrees with itself across the syscall boundary. */
+#include "snos_abi.h"
 
 void net_init(void);
 void net_service(void); /* one link poll; called from the NMI handler */
@@ -50,6 +50,10 @@ int net_image(const char *url);
 int net_read(int ch, uint8_t __far *dst, int max); /* bytes moved, 0 = none yet */
 int net_state(int ch);
 uint16_t net_http_status(int ch);
+/* 1 when the gateway converted the body to Mode 3 tile data. It decides from
+ * the Content-Type, so the caller never has to declare in advance what it is
+ * fetching — but it only knows once the status has arrived. */
+int net_is_image(int ch);
 void net_close(int ch);
 
 /* Counters, purely so tests can assert that the recovery paths actually ran

@@ -87,20 +87,26 @@ $(BUILD)/snos.raw: $(KERNEL_O)
 # Each app is a separate link into its own ROM bank, then dropped into the
 # cartridge image at the byte offset that bank maps to. HiROM makes that
 # arithmetic trivial: SNES $C0:0000+N is ROM byte N, so bank $C8 is 0x080000.
-APPS := hello pad basic edit view
+APPS := hello pad basic edit view get
 APP_BANK_hello := c8
 APP_BANK_pad   := c9
 APP_BANK_basic := ca
 APP_BANK_edit  := cb
 APP_BANK_view  := cc
+APP_BANK_get   := cd
 APP_AT_hello   := 0x080000
 APP_AT_pad     := 0x090000
 APP_AT_basic   := 0x0A0000
 APP_AT_edit    := 0x0B0000
 APP_AT_view    := 0x0C0000
+APP_AT_get     := 0x0D0000
 # The editor needs the ABI-2 full-screen calls and says so in its header, so an
 # older kernel refuses to run it rather than failing on a missing syscall.
 APP_ABI_edit   := 2
+# `get` needs SYS_FS_FREE and the image flag on SYS_NET_STATE. Declaring the
+# minimum here is what makes the kernel refuse to launch it rather than let it
+# call into a syscall that does not exist.
+APP_ABI_get    := 6
 
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)

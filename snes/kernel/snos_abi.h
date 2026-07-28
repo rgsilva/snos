@@ -55,7 +55,7 @@
  * image through SYS_GETC_F would be 43000 traps; and Mode 3 tile data for a
  * full screen is 57 KB of the 64 KB of VRAM, so the console's font and tilemaps
  * cannot coexist with it and something has to arbitrate. */
-#define SNOS_ABI_VERSION 5
+#define SNOS_ABI_VERSION 6
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -120,6 +120,11 @@
  * seconds for a 43 KB picture against a few frames for this.
  * The caller must have forced blank and set the VRAM address first. */
 #define SYS_READ_VRAM 0x38 /* A = byte count -> bytes moved */
+/* ABI 6. Free space on the SRAM volume, in KILOBYTES — 254 KB fits a uint16
+ * where the byte count would not. An application that streams to a file needs
+ * this before it starts: discovering the volume is full after transferring for
+ * a minute wastes the minute. */
+#define SYS_FS_FREE 0x39
 /* $50-$5F  time */
 #define SYS_FRAMES 0x50   /* -> free-running 60 Hz frame counter */
 #define SYS_WAITVBL 0x51
@@ -128,8 +133,20 @@
 #define SYS_NET_UP 0x60    /* -> 1 if a gateway is attached */
 #define SYS_NET_FETCH 0x61 /* p0/p1 = URL -> channel, or SYS_ERR */
 #define SYS_NET_READ 0x62  /* p0/p1 = buffer, p2 = channel, A = max -> count */
-#define SYS_NET_STATE 0x63 /* A = channel -> NET_ST_*; p0 = HTTP status */
+/* A = channel -> NET_ST_*; p0 = HTTP status; p1 = 1 if the gateway converted
+ * the body to Mode 3 tile data (it decides from the Content-Type, so nothing
+ * has to be declared in advance). */
+#define SYS_NET_STATE 0x63
 #define SYS_NET_CLOSE 0x64 /* A = channel */
+
+/* States returned by SYS_NET_STATE. These are ABI, not kernel internals — an
+ * application cannot interpret the return value without them, and net.h is not
+ * on an application's include path. Kept numerically identical to net.h. */
+#define NET_ST_FREE 0
+#define NET_ST_OPENING 1
+#define NET_ST_OPEN 2
+#define NET_ST_EOF 3
+#define NET_ST_ERROR 4
 /* ABI 5. Exactly SYS_NET_FETCH, except the gateway converts the resource to
  * Mode 3 tile data first. Same stream, same states, same reads. */
 #define SYS_NET_IMAGE 0x65 /* p0/p1 = URL -> channel, or SYS_ERR */
@@ -210,6 +227,7 @@ uint16_t sys_net_close(uint16_t ch);
 uint16_t sys_net_image_raw(void);
 uint16_t sys_gfx(uint16_t on);
 uint16_t sys_read_f_raw(uint16_t max);
+uint16_t sys_fs_free(void);
 uint16_t sys_read_vram(uint16_t count);
 
 /* Console character set, as far as an application is concerned.

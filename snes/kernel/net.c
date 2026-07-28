@@ -53,7 +53,13 @@
  * format and its tests are untouched — and because a 200 that will not decode
  * as an image is a genuinely different failure from a 404. */
 #define C2S_IMAGE 0x03 /* [len][ch][url...] */
-#define S2C_OPEN 0x81  /* [3][ch][status_lo][status_hi] */
+/* [3][ch][status_lo][status_hi] or [4][...][flags].
+ *
+ * The flags byte is optional so that a three-byte reply still parses: the
+ * canned gateways in the tests predate it, and a wire format that refuses to
+ * grow is a wire format you cannot change once anything speaks it. */
+#define S2C_OPEN 0x81
+#define S2C_F_IMAGE 0x01 /* the body is Mode 3 tile data, not the resource */
 #define S2C_EOF 0x82   /* [1][ch] */
 #define S2C_ERR 0x83   /* [2][ch][code] */
 
@@ -66,6 +72,7 @@ static uint16_t ring_head[NET_CHANNELS]; /* NMI writes */
 static uint16_t ring_tail[NET_CHANNELS]; /* foreground writes */
 static uint8_t ch_state[NET_CHANNELS];
 static uint16_t ch_http[NET_CHANNELS];
+static uint8_t ch_flags[NET_CHANNELS];
 
 /* Outbound control bytes. Small: the SNES says very little — a URL and the
  * occasional close. */
@@ -186,6 +193,17 @@ uint16_t net_http_status(int ch) {
   return ch_http[ch];
 }
 
+/* Did the gateway convert this body to Mode 3 tile data?
+ *
+ * Only meaningful once the state has left NET_ST_OPENING, because the answer
+ * arrives with the status. Callers therefore have to open first and decide the
+ * filename afterwards — which is the right order anyway, since the extension
+ * depends on what actually came back rather than what was asked for. */
+int net_is_image(int ch) {
+  if (ch < 0 || ch >= NET_CHANNELS) return 0;
+  return (ch_flags[ch] & S2C_F_IMAGE) ? 1 : 0;
+}
+
 /* -------------------------------------------------------- outbound control */
 
 static int txq_space(void) {
@@ -235,6 +253,7 @@ void net_close(int ch) {
   ch_state[ch] = NET_ST_FREE;
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
+  ch_flags[ch] = 0;
 }
 
 /* --------------------------------------------------------- inbound control */
@@ -247,6 +266,7 @@ static void ctrl_message(void) {
       ch = cmsg[0];
       if (ch < NET_CHANNELS && ch_state[ch] == NET_ST_OPENING) {
         ch_http[ch] = (uint16_t)(cmsg[1] | ((uint16_t)cmsg[2] << 8));
+        ch_flags[ch] = (cmsg_got >= 4) ? cmsg[3] : 0;
         ch_state[ch] = NET_ST_OPEN;
       }
     }

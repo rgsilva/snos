@@ -163,6 +163,7 @@ class Gateway:
         the SNES times out waiting for a status it was always going to get."""
         if "://" not in url:
             url = "https://" + url
+        ctype = ""
         try:
             req = urllib.request.Request(
                 url,
@@ -170,6 +171,7 @@ class Gateway:
             )
             with urllib.request.urlopen(req, timeout=20) as resp:
                 status = resp.status
+                ctype = resp.headers.get("Content-Type", "")
                 body = resp.read(MAX_BODY)
                 if resp.headers.get("Content-Encoding", "") == "gzip":
                     try:
@@ -178,11 +180,21 @@ class Gateway:
                         pass
         except urllib.error.HTTPError as e:
             status = e.code
+            ctype = e.headers.get("Content-Type", "") if e.headers else ""
             body = e.read(MAX_BODY) or b""
         except Exception as e:
             print(f"  fetch failed: {e}")
             self.push_ctrl(S2C_ERR, bytes([ch, 1]))
             return
+
+        # Auto-convert on Content-Type. The gateway is the only party that knows
+        # what came back, and it is the only party that could decode it anyway —
+        # so making the caller declare "this is an image" in advance was asking
+        # the user to supply information the system already had. One `get` now
+        # handles everything and the separate `image` command goes away.
+        if not as_image and status == 200 and ctype.split(";")[0].strip().lower().startswith("image/"):
+            as_image = True
+            print(f"  {ctype} -> converting")
 
         if as_image and status == 200:
             try:
@@ -196,8 +208,15 @@ class Gateway:
                 self.push_ctrl(S2C_ERR, bytes([ch, 2]))
                 return
 
-        print(f"  -> {status}, {len(body)} bytes")
-        self.push_ctrl(S2C_OPEN, struct.pack("<BH", ch, status))
+        # The flags byte tells the SNES the body is Mode 3 tile data rather than
+        # whatever was requested. It needs to know: the file has to be saved as
+        # .IMG for `view` to find it, and printing tile bytes to the console
+        # would be noise. Older three-byte S2C_OPEN frames still parse — the
+        # kernel treats a missing flags byte as zero — so the canned frames in
+        # test/net.lua did not all have to change at once.
+        flags = 1 if (as_image and status == 200) else 0
+        print(f"  -> {status}, {len(body)} bytes{' [IMG]' if flags else ''}")
+        self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, status, flags))
         # Chunked so one huge stream cannot monopolise the frame builder.
         for i in range(0, len(body), 512):
             self.push(ch, body[i:i + 512])

@@ -29,6 +29,7 @@
               .public sys_net_up, sys_net_fetch_raw, sys_net_read_raw
               .public sys_net_image_raw, sys_gfx, sys_read_f_raw
               .public sys_read_vram
+              .public sys_fs_free
               .public sys_net_state, sys_net_close
               .public sys_puts_at_raw, sys_screen, sys_pollkey, sys_osk
 
@@ -107,6 +108,9 @@ sys_gfx:        cop     #0x19
                 rtl
 sys_read_f_raw: cop     #0x37
                 rtl
+sys_fs_free:    cop     #0x39
+                rtl
+
 sys_read_vram:  cop     #0x38
                 rtl
 
