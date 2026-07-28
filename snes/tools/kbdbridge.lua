@@ -112,6 +112,12 @@ local CTRL_NAMES = {
 
 local CAPS_NAMES = { "Caps Lock", "CapsLock", "Caps" }
 
+-- Break/attention. F12 because F1-F11 are all bound by Mesen's debugger
+-- shortcuts and would be swallowed before a script ever saw them — the same
+-- trap that made Backspace look broken for two rounds.
+local BREAK_NAMES = { "F12" }
+local MB_BREAK = MB + 0x00E
+
 local SHIFT_NAMES = {
   "Left Shift", "Right Shift", "LeftShift", "RightShift",
   "Shift Left", "Shift Right", "LShift", "RShift", "Shift",
@@ -176,6 +182,8 @@ end
 local shift_names = accepted(SHIFT_NAMES, 1)
 local ctrl_names = accepted(CTRL_NAMES, 1)
 local caps_names = accepted(CAPS_NAMES, 1)
+local break_names = accepted(BREAK_NAMES, 1)
+local break_held = false
 
 -- Everything this build accepts, so the naming scheme is visible.
 local vocabulary = {}
@@ -188,6 +196,7 @@ do
   for _, n in ipairs(SHIFT_NAMES) do add(n) end
   for _, n in ipairs(CTRL_NAMES) do add(n) end
   for _, n in ipairs(CAPS_NAMES) do add(n) end
+  for _, n in ipairs(BREAK_NAMES) do add(n) end
   for _, n in ipairs(EXTRA_VOCAB) do add(n) end
 end
 
@@ -205,6 +214,12 @@ else
 end
 if #caps_names > 0 then
   print("kbdbridge: caps lock = " .. table.concat(caps_names, ", "))
+end
+if #break_names > 0 then
+  print("kbdbridge: break = " .. table.concat(break_names, ", ") ..
+        "  (kills a running app, or aborts a long command)")
+else
+  print("kbdbridge: NO break key accepted - a hung app will need a reset")
 end
 if #missing > 0 then
   print("kbdbridge: no accepted name for -> " .. table.concat(missing, " "))
@@ -274,6 +289,15 @@ emu.addEventCallback(function()
     caps_held = 0
   end
   local caps = caps_is_level and caps_now or caps_toggle
+
+  -- Break goes to a dedicated mailbox byte, NOT into the keystroke stream. A
+  -- hung application never reads the stream, which is precisely the case the
+  -- break exists for; the kernel polls this from NMI instead.
+  local break_now = any_down(break_names)
+  if break_now and not break_held then
+    emu.write16(MB_BREAK, 1, WRAM)
+  end
+  break_held = break_now
 
   local shifted = any_down(shift_names)
   local ctrl = any_down(ctrl_names)

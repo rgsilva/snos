@@ -84,4 +84,15 @@ uint16_t app_exec(void); /* exec.s; args in SNOS_ARGS.p2/p3 */
 
 extern volatile uint16_t snos_frames; /* incremented by the NMI handler */
 
+/* Set by the NMI handler when the host presses the break key (F12) and no
+ * application is running. Long-running shell commands should poll and clear it
+ * so they can be interrupted; the kill switch covers applications already. */
+extern volatile uint16_t snos_break;
+
+static int snos_break_taken(void) {
+  if (!snos_break) return 0;
+  snos_break = 0;
+  return 1;
+}
+
 #endif

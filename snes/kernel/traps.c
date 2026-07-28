@@ -42,6 +42,10 @@
 
 volatile uint16_t snos_frames;
 
+/* Set when a break arrives with no application running, so a long shell
+ * operation (a download, say) can abort itself. Cleared by whoever acts on it. */
+volatile uint16_t snos_break;
+
 static uint8_t frm8(uint16_t sp, uint16_t off) {
   return *(volatile __far uint8_t *)(BANK0M + (uint32_t)(uint16_t)(sp + off));
 }
@@ -80,6 +84,22 @@ void snos_nmi_c(void) {
    * unconditionally, precisely so an application cannot defeat it: a wedged
    * app never has to call anything for this to fire. The shim in header.s
    * checks the flag and unwinds to app_return the moment we set it. */
+  /* Keyboard break (F12). The controller chord below is unusable when the
+   * controller is unplugged, which is how Ricardo actually runs the emulator —
+   * so a keyboard-only escape hatch is not a convenience, it is the only one he
+   * has. Consumed here whether or not an app is running: if one is, it dies; if
+   * not, the flag is left for the foreground so a long-running shell command
+   * can notice it too. */
+  if (MB_BREAK) {
+    MB_BREAK = 0;
+    if (SNOS_EXEC_RUN) {
+      SNOS_EXEC_CODE = SNOS_EXIT_KILLED;
+      SNOS_EXEC_FLAG = 1;
+    } else {
+      snos_break = 1;
+    }
+  }
+
   if (SNOS_EXEC_RUN) {
     if ((pad_held() & (PAD_START | PAD_SELECT)) == (PAD_START | PAD_SELECT)) {
       if (++kill_held >= SNOS_KILL_FRAMES) {
@@ -246,6 +266,35 @@ uint16_t snos_cop_c(uint16_t sp) {
     return fs_delete(nm) == 0 ? 0 : SYS_ERR;
   }
 
+  case SYS_READ_F: {
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    uint16_t n = 0;
+    int c;
+    /* One trap for the whole block. SYS_GETC_F is a trap per byte, which is
+     * fine for a BASIC listing and takes seconds for a 43 KB image. */
+    while (n < a) {
+      c = fs_getc();
+      if (c < 0) break;
+      far_wr(bank, (uint16_t)(off + n), (uint8_t)c);
+      n++;
+    }
+    return n;
+  }
+
+  case SYS_GFX:
+    if (a) {
+      /* Hiding the keyboard is not cosmetic: it disables the HDMA split, which
+       * rewrites the BG tilemap-base and scroll registers every frame and would
+       * tear a Mode 3 picture apart. */
+      osk_hide();
+      osk_lock(1);
+      con_gfx(1);
+    } else {
+      osk_lock(0);
+      con_gfx(0);
+    }
+    return 0;
+
   case SYS_FRAMES:
     return snos_frames;
 
@@ -269,6 +318,19 @@ uint16_t snos_cop_c(uint16_t sp) {
     }
     url[i < 255 ? i : 255] = 0;
     r = net_fetch(url);
+    return r < 0 ? SYS_ERR : (uint16_t)r;
+  }
+
+  case SYS_NET_IMAGE: {
+    char url[256];
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int i, r;
+    for (i = 0; i < 255; i++) {
+      url[i] = (char)far_rd(bank, (uint16_t)(off + i));
+      if (url[i] == 0) break;
+    }
+    url[i < 255 ? i : 255] = 0;
+    r = net_image(url);
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 

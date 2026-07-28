@@ -42,7 +42,19 @@
 #define MB_IN_WINDEX (*(volatile __far uint16_t *)(MB_BASE + 0x006))
 #define MB_IN_RINDEX (*(volatile __far uint16_t *)(MB_BASE + 0x008))
 #define MB_FLIPS (*(volatile __far uint16_t *)(MB_BASE + 0x00A))
-#define MB_VMOPS (*(volatile __far uint32_t *)(MB_BASE + 0x00C))
+/* Was a 32-bit counter in snesmac; here 0x00C is the console scroll state
+ * (console.c) and 0x00E is the break flag, so it is 16 bits wide. */
+#define MB_VMOPS (*(volatile __far uint16_t *)(MB_BASE + 0x00C))
+/* Attention/break, written by the host bridge when F12 is pressed.
+ *
+ * Deliberately NOT a byte in the stdin ring. A hung application never calls
+ * kbd_getchar(), so anything queued in the stream is read by nobody and the one
+ * situation a break exists for is exactly the one where it cannot arrive. This
+ * is polled from NMI instead, which the kernel owns unconditionally and which
+ * an application cannot prevent from running — the same reasoning that puts the
+ * START+SELECT kill switch there. */
+#define MB_BREAK (*(volatile __far uint16_t *)(MB_BASE + 0x00E))
+
 #define MB_RING ((volatile __far uint8_t *)(MB_BASE + 0x010))
 #define MB_IN_RING ((volatile __far uint8_t *)(MB_BASE + 0xE00))
 

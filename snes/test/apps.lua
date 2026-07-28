@@ -54,7 +54,17 @@ emu.addEventCallback(function()
     step = 4
     return
   end
-  if step == 4 then send("debug ver\n", 200); step = 5; return end
+  -- Kill a hung app with the KEYBOARD break rather than the controller chord.
+  -- This is the path that matters: Ricardo runs with the controller unplugged,
+  -- so the chord is not merely inconvenient, it is unavailable.
+  if step == 4 then send("run pad\n", 220); step = 4.5; return end
+  if step == 4.5 then
+    emu.write16(L.MB + 0x00E, 1, emu.memType.snesWorkRam) -- what F12 writes
+    at = frame + 220
+    step = 4.75
+    return
+  end
+  if step == 4.75 then send("debug ver\n", 200); step = 5; return end
 
   local r = L.new_report("apps")
   local text = L.ring_text()
@@ -88,8 +98,11 @@ emu.addEventCallback(function()
   -- 3/4. the kill switch: pad never asks to stop, so this is the kernel
   -- taking the machine back on its own.
   r.check(text:find("PAD-RAN", 1, true) ~= nil, "pad never started")
-  r.check(text:find("[pad killed]", 1, true) ~= nil,
-          "kill switch did not terminate pad - a wedged app would lock the machine")
+  -- Twice: once by the controller chord, once by the keyboard break.
+  local _, kills = text:gsub("%[pad killed%]", "")
+  r.check(kills >= 2,
+          "expected two kills (controller chord and keyboard break), saw " .. kills ..
+          " - a wedged app would lock the machine for whichever path is missing")
 
   -- 5. the shell survived having an app killed out from under it
   -- Version-agnostic on purpose: this asserts the shell still RESPONDS after an
