@@ -64,17 +64,19 @@ print("netbridge: up=" .. UP .. " down=" .. DOWN)
 print("netbridge: start tools/gateway.py, then 'net' in SNOS")
 
 emu.addEventCallback(function()
-  -- Claim the link only after the kernel has zeroed the mailbox, or net_init()
-  -- wipes the magic straight back out.
-  if not claimed then
-    if ru16(0x00) == MAGIC then
-      claimed = true
-    elseif emu.read16(0xF000, WRAM) == 0xCAFE then
-      wu16(0x00, MAGIC)
+  -- Re-assert the magic whenever it is missing, rather than claiming once.
+  --
+  -- link_init() ZEROES this mailbox, and it runs from shell_run() — that is,
+  -- after this script has already started. A one-shot claim therefore gets
+  -- wiped moments later and the SNES reports "no gateway attached" for the rest
+  -- of the session. Rewriting it is idempotent, costs one compare per frame,
+  -- and also survives a console reset.
+  if emu.read16(0xF000, WRAM) ~= 0xCAFE then return end -- kernel not up yet
+  if ru16(0x00) ~= MAGIC then
+    wu16(0x00, MAGIC)
+    if not claimed then
       claimed = true
       print("netbridge: link claimed")
-    else
-      return
     end
   end
 

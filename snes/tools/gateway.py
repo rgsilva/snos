@@ -217,11 +217,19 @@ def main():
             except FileNotFoundError:
                 pass
 
-            # One frame out per frame in, mirroring the synchronous exchange the
-            # real cable performs. Also emit while idle so acks keep flowing.
-            down.write(bytes(gw.next_out()))
-
-            if not moved:
+            # STRICTLY one frame out per frame in. The real link is clocked by
+            # the SNES: the gateway physically cannot transmit unless the SNES
+            # runs an exchange, and the file bridge has to model that or it is
+            # not the same protocol.
+            #
+            # Emitting while idle "so acks keep flowing" seems harmless and is
+            # not: the loop spins at 250 Hz against a console polling at 60, so
+            # the down file grows four times faster than it is consumed. The
+            # bridge falls permanently behind, reads frames from minutes ago,
+            # and the file reaches megabytes in a couple of minutes.
+            if moved:
+                down.write(bytes(gw.next_out()))
+            else:
                 time.sleep(0.004)       # ~1/4 of a video frame
     except KeyboardInterrupt:
         print("\ngateway: stopped")
