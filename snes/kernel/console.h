@@ -29,10 +29,4 @@ void con_row_save(int r, uint8_t *dst);
 void con_row_restore(int r, const uint8_t *src);
 void con_clear(void);
 
-/* True overlay: writes VRAM directly, leaving the shadow buffer (and therefore
- * the text underneath) intact. con_invalidate() schedules a repaint from the
- * shadow, which is how the OSK panel is dismissed. */
-void con_overlay_row(int r, const uint8_t *chars);
-void con_invalidate(int from_row, int to_row);
-
 #endif

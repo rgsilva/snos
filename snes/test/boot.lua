@@ -44,10 +44,12 @@ emu.addEventCallback(function()
   print("--------------------------")
 
   r.check(status ~= L.STATUS_PANIC, "kernel panicked during boot")
-  r.check(screen:find("SNOS 0.1", 1, true) ~= nil,
+  r.check(screen:find("v0.1", 1, true) ~= nil,
           "banner not present in VRAM tilemap - console did not render")
-  r.check(screen:find("mode 5", 1, true) ~= nil,
-          "second banner line missing from VRAM - only one row got flushed?")
+  -- The storage line is measured at boot, not compiled in, so it also proves
+  -- the SRAM probe and the filesystem mount both ran.
+  r.check(screen:find("K sram", 1, true) ~= nil,
+          "boot status line missing - SRAM probe or fs mount did not run")
 
   local low = text:match("STACKLOW (%x+)")
   if low == nil then

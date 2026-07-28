@@ -166,7 +166,21 @@ static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nword
 void con_flush(void) {
     int cell, found = -1;
     uint8_t r;
-    for (r = 0; r < RING; r++) if (dirty[r]) { found = r; break; }
+
+    /* A scroll changes what the hardware displays IMMEDIATELY, but the row
+     * being revealed at the bottom still holds whatever was in that tilemap row
+     * 32 lines ago until we DMA the cleared version over it. Updating the
+     * scroll register in one vblank and the row contents in a later one shows
+     * that stale row for a frame — the flicker on pressing ENTER.
+     *
+     * So when a scroll is pending, the revealed row jumps the queue and goes
+     * out in the SAME vblank as the scroll register. */
+    if (vofs_dirty) {
+        uint8_t nr = (uint8_t)((top + ROWS - 1) % RING);
+        if (dirty[nr]) found = nr;
+    }
+    if (found < 0)
+        for (r = 0; r < RING; r++) if (dirty[r]) { found = r; break; }
     if (found < 0 && !vofs_dirty) return;
 
     if (found >= 0) {                                 /* build buffers (no vblank yet) */
@@ -228,35 +242,4 @@ void con_clear(void) {
     }
     top = 0; row = 0; col = 0;
     vofs_dirty = 1;
-}
-
-/* Draw one row straight into VRAM WITHOUT touching the shadow buffer — a true
- * overlay. The on-screen keyboard panel uses this so the text it covers is
- * preserved: hiding the panel is then just con_invalidate(), and con_flush
- * repaints those rows from the shadow as if nothing had happened.
- *
- * Costs a frame, like con_flush, and for the same reason (it waits for a clean
- * vblank edge and re-uses DMA channels 0/1). The OSK only calls this for rows
- * it has actually changed, so ordinary d-pad navigation repaints a single row.
- */
-void con_overlay_row(int screen_row, const uint8_t *chars) {
-    int cell;
-    uint8_t r;
-    if (screen_row < 0 || screen_row >= ROWS) return;
-    r = (uint8_t)((top + screen_row) % RING);
-    for (cell = 0; cell < 32; cell++) {
-        rowbuf[cell]  = (uint16_t)((chars[cell * 2]     << 1) | 0x2000);
-        rowbuf1[cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
-    }
-    while (R8(0x4212) & 0x80) ;
-    while (!(R8(0x4212) & 0x80)) ;
-    dma_vram(0, (uint16_t)(BG2_MAP + r * 32), rowbuf, 32);
-    dma_vram(1, (uint16_t)(BG1_MAP + r * 32), rowbuf1, 32);
-}
-
-/* Mark screen rows as needing a repaint from the shadow buffer. */
-void con_invalidate(int from_row, int to_row) {
-    int i;
-    for (i = from_row; i <= to_row; i++)
-        if (i >= 0 && i < ROWS) dirty[(top + i) % RING] = 1;
 }

@@ -94,6 +94,47 @@ function M.has_highlight(from_row, to_row)
   return false
 end
 
+-- ----------------------------------------------------------------- sprites
+-- The on-screen keyboard is drawn with sprites, so it is asserted through OAM
+-- rather than the tilemap. That is the whole point of the change: it lives in
+-- absolute screen coordinates and cannot be disturbed by the console scrolling.
+function M.sprites()
+  local list = {}
+  for i = 0, 127 do
+    local y = emu.read(i * 4 + 1, emu.memType.snesSpriteRam)
+    if y < 224 then
+      list[#list + 1] = {
+        x = emu.read(i * 4 + 0, emu.memType.snesSpriteRam),
+        y = y,
+        tile = emu.read(i * 4 + 2, emu.memType.snesSpriteRam),
+        attr = emu.read(i * 4 + 3, emu.memType.snesSpriteRam),
+      }
+    end
+  end
+  table.sort(list, function(a, b)
+    if a.y ~= b.y then return a.y < b.y end
+    return a.x < b.x
+  end)
+  return list
+end
+
+-- Panel glyphs in reading order; '#' stands for the border and fill tiles.
+function M.sprite_text()
+  local out = {}
+  for _, s in ipairs(M.sprites()) do
+    out[#out + 1] = (s.tile < 128) and string.char(s.tile) or "#"
+  end
+  return table.concat(out)
+end
+
+-- True if some sprite uses the selected palette (attr bits 1-3 == 1).
+function M.sprite_has_selection()
+  for _, s in ipairs(M.sprites()) do
+    if ((s.attr >> 1) & 7) == 1 then return true end
+  end
+  return false
+end
+
 -- ------------------------------------------------------------- assertions
 function M.new_report(name)
   local r = { name = name, failures = {} }

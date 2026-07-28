@@ -70,6 +70,8 @@ static void cmd_help(void) {
   kcon_puts("rm NAME   delete a file\n");
   kcon_puts("sram      cartridge SRAM usage\n");
   kcon_puts("fstest    verify SRAM addressing\n");
+  kcon_puts("\nkeyboard: A key, B bksp, X space, Y shift,\n");
+  kcon_puts("          START enter, SELECT show/hide\n");
 }
 
 static void cmd_ver(void) {
@@ -349,7 +351,7 @@ void shell_run(void) {
   kcon_puts("type 'help' for commands\n\n");
   for (;;) {
     char *rest;
-    kcon_puts("snos> ");
+    kcon_puts("> ");
     kbd_readline(line, (int)sizeof line);
     rest = split_word(line);
 

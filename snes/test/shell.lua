@@ -46,7 +46,7 @@ emu.addEventCallback(function()
   print("--- mailbox ---"); print(text); print("---------------")
 
   r.check(L.status() ~= L.STATUS_PANIC, "kernel panicked")
-  r.check(text:find("snos>", 1, true) ~= nil, "no shell prompt")
+  r.check(text:find("v0.1", 1, true) ~= nil, "kernel banner missing")
 
   -- builtins
   r.check(text:find("kernel ABI 1", 1, true) ~= nil, "ver did not report the ABI version")

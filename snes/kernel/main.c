@@ -44,27 +44,15 @@ static void hw_init(void) {
   SNOS_ARGS.p3 = 0;
 }
 
-static void banner(void) {
-  kcon_puts("SNOS " SNOS_VERSION_STR " - 65816 native\n");
-  kcon_puts("64x28 mode 5 console, HiROM fastrom\n");
-  kcon_puts("\n");
-}
+static void banner(void) { kcon_puts("v" SNOS_VERSION_STR "\n"); }
 
-/* The bank-$00 budget is the design's tightest constraint (PLAN.md §2), so
- * every boot reports where the kernel stack actually reached. The Lua harness
- * turns this into a hard assertion. */
+/* The bank-$00 budget is the design's tightest constraint (PLAN.md §2), so the
+ * kernel stack watermark is reported on every boot — but to the test mailbox,
+ * not to the screen. The harness asserts on it; a user has no use for it, and
+ * `mem` shows it on demand. */
 static void report_stack(void) {
-  uint16_t low = stack_low();
-  kcon_puts("kstack low  $");
-  kcon_puthex16(low);
-  kcon_puts("  used ");
-  kcon_putu((uint16_t)(SNOS_KSTACK_HI + 1u - low));
-  kcon_puts("/");
-  kcon_putu((uint16_t)(SNOS_KSTACK_HI + 1u - SNOS_KSTACK_LO));
-  kcon_puts(" bytes\n");
-
   mb_puts("STACKLOW ");
-  mb_puthex32(low);
+  mb_puthex32(stack_low());
   mb_putc('\n');
 }
 
@@ -81,14 +69,20 @@ int main(void) {
 
   {
     uint32_t n = sram_probe();
-    kcon_puts("cart SRAM ");
-    kcon_putu((uint16_t)(n >> 10));
-    kcon_puts(" KB\n");
     mb_puts("SRAMKB ");
     mb_puthex32(n >> 10);
     mb_putc('\n');
   }
   fs_init();
+
+  /* One line of genuinely useful state: how much storage there is, and what is
+   * on it. The SRAM figure is measured at this boot, not compiled in. */
+  kcon_putu((uint16_t)(sram_size() >> 10));
+  kcon_puts("K sram, ");
+  kcon_putu((uint16_t)app_count());
+  kcon_puts(" apps, ");
+  kcon_putu((uint16_t)fs_count());
+  kcon_puts(" files\n");
 
   shell_run(); /* never returns */
   return 0;

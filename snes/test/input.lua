@@ -89,15 +89,18 @@ emu.addEventCallback(function()
   -- command, so the shell rejecting it by name proves the characters arrived.
   r.check(text:find("unknown command: qw", 1, true) ~= nil,
           "OSK did not produce 'qw' - navigation or the A-press is broken")
-  r.check(plain:find("A:key", 1, true) ~= nil, "OSK hint row not visible in VRAM")
-  -- Keys are drawn spaced out and staggered, so match the real layout.
-  r.check(plain:find("q w e r t y u i o p", 1, true) ~= nil,
-          "OSK key rows not visible in VRAM")
-  -- The selected key must actually be highlighted: that is the only cue the
-  -- user gets, and it is the whole reason for the inverse-video font half.
-  r.check(L.has_highlight(23, 27), "no inverse-video key on the OSK panel")
-  r.check(plain:find("SNOS 0.1", 1, true) ~= nil,
-          "banner gone - the OSK overlay corrupted the console shadow buffer")
+  -- The panel is sprites now, so look in OAM, not the tilemap.
+  local spr = L.sprite_text()
+  print("--- osk sprites ---"); print(spr)
+  r.check(spr:find("1234567890-=", 1, true) ~= nil, "OSK number row not in OAM")
+  r.check(spr:find("qwertyuiop[]", 1, true) ~= nil, "OSK key rows not in OAM")
+  r.check(L.sprite_has_selection(), "no key drawn with the selected palette")
+
+  -- And the crucial one: the keyboard must leave the text completely alone.
+  -- The old background-overlay panel scrolled with the console and destroyed
+  -- whatever it drifted over.
+  r.check(plain:find("v0.1", 1, true) ~= nil,
+          "banner gone - the keyboard is corrupting the console again")
 
   local low = text:match("STACKLOW (%x+)")
   if low then
