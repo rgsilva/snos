@@ -46,13 +46,7 @@ static void report_stack(void) {
   mb_putc('\n');
 }
 
-/* M1 stands in for the shell that arrives in M2: read lines, echo them back.
- * Enough to exercise the whole input path end to end. */
-static char line[128];
-
 int main(void) {
-  int i;
-
   hw_init();
   mb_init();
   stack_paint();
@@ -62,16 +56,6 @@ int main(void) {
   report_stack();
   kbd_init();
 
-  for (i = 0; i < 2; i++) {
-    kcon_puts("> ");
-    kbd_readline(line, (int)sizeof line);
-    kcon_puts("got [");
-    kcon_puts(line);
-    kcon_puts("]\n");
-  }
-
-  report_stack();
-  kcon_sync();
-  mb_finish(MB_STATUS_PASS);
+  shell_run(); /* never returns */
   return 0;
 }

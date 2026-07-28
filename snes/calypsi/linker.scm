@@ -9,7 +9,8 @@
 ;;   $0100-$0BFF  2816 B   kernel stack
 ;;   $0C00-$18FF  3328 B   APP stack        <- deliberately NOT described below,
 ;;   $1900-$19FF   256 B   APP direct page  <- so the linker cannot squat on it
-;;   $1A00-$1FFF  1536 B   kernel near data
+;;   $1A00-$1A3F    64 B   SYSCALL PARAMETER BLOCK (fixed, part of the ABI)
+;;   $1A40-$1FFF  1472 B   kernel near data
 ;;
 ;; The app region is reserved by omission: no (memory ...) form covers
 ;; $0C00-$19FF, so ln65816 physically cannot place kernel data there.  M3 hands
@@ -31,8 +32,13 @@
 
     ;; $0C00-$19FF is the app's (stack + direct page). Reserved by omission.
 
+    ;; $1A00-$1A3F is the syscall parameter block. It is at a FIXED address
+    ;; because apps are linked separately from the kernel and cannot be told
+    ;; where a linker-allocated variable ended up; see kernel/snos_abi.h.
+    ;; Reserved by omission, exactly like the app stack region.
+
     (memory LoRAM
-            (address (#x1a00 . #x1fff))
+            (address (#x1a40 . #x1fff))
             (type RAM)
             (qualifier near)
             (section data znear near fastregs))

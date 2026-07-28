@@ -119,6 +119,9 @@ snos_cop:
               plb
               lda     ##0x0000
               tcd
+              tsc                           ; A = frame pointer for the handler:
+                                            ;   sp+1 DB, +2 D, +4 Y, +6 X, +8 A,
+                                            ;   +10 P, +11 PC, +13 PB
               jsl     snos_cop_c            ; syscall result returned in A
               sta     8,s                   ; -> the stacked A, pulled below
               plb
@@ -132,11 +135,15 @@ snos_cop:
 ;;; never collide with syscall signature space.
 snos_brk:
               rep     #0x30
+              pha                           ; same push order as snos_cop, so the
+              phx                           ; panic dump can use one set of frame
+              phy                           ; offsets
               phd
               phb
               phk
               plb
               lda     ##0x0000
               tcd
+              tsc
               jsl     snos_brk_c            ; panics; does not return
 brk_hang:     bra     brk_hang

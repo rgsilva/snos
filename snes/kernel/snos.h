@@ -56,8 +56,11 @@ uint16_t stack_low(void);
 
 /* ---- traps (traps.c, entered from calypsi/header.s) ---- */
 void snos_nmi_c(void);
-uint16_t snos_cop_c(void);
-void snos_brk_c(void);
+uint16_t snos_cop_c(uint16_t sp); /* sp = trap frame pointer; see traps.c */
+void snos_brk_c(uint16_t sp);
+
+/* shell.c */
+void shell_run(void);
 
 extern volatile uint16_t snos_frames; /* incremented by the NMI handler */
 
