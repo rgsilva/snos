@@ -1,0 +1,9 @@
+build/
+*.sfc
+*.raw
+*.srm
+*.o
+*.lst
+*.map
+.DS_Store
+__pycache__/
