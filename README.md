@@ -47,6 +47,22 @@ Override `CALDIR` if the toolchain lives elsewhere:
 make CALDIR=/path/to/calypsi-65816-5.17
 ```
 
+## Typing into it
+
+On a stock SNES the on-screen keyboard is the only way in, which is fine for a
+demo and tedious for development. The kernel's input layer has three
+interchangeable backends behind `kbd_getchar()`, though, and one of them is a
+byte ring in the test mailbox — which is how the automated tests type.
+
+`snes/tools/kbdbridge.lua` puts your own keyboard on the other end of that same
+ring. Open `snos.sfc` in the Mesen **GUI**, then Debug → Script Window → load
+the script → Run, and type into the emulator window. It cannot work under
+`--testrunner`, which never initialises the input subsystem.
+
+Real hardware gets a fourth backend at M7: the USB-keyboard-over-controller-port
+bridge already proven in `../keyboard-test-rom`. Nothing above `kbd_getchar()`
+has to change for any of them.
+
 ## Layout
 
 ```

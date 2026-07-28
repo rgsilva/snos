@@ -49,6 +49,10 @@ static uint8_t top, row, col, vofs_dirty;
  * keyboard panel, so text never scrolls underneath it. */
 static uint8_t text_rows = ROWS;
 
+/* Set while the keyboard's HDMA split is active. con_flush needs it to know
+ * which DMA channels are still its own. */
+static uint8_t split_on;
+
 /* Publish the scroll state to the test mailbox ($7EF00C). A test that wants to
  * assert "screen row 24 is blank" has to map screen rows to tilemap rows, and
  * only the console knows the scroll offset. Without this the harness can say
@@ -189,13 +193,21 @@ void con_putc(int c) {
 void con_puts(const char *s) { while (*s) con_putc(*s++); }
 
 /* A 64-word tilemap row is too many $2118 writes to fit one vblank at -O0, so
- * build the row in a WRAM buffer and DMA it (channel 0) — a row lands in a few
- * hundred cycles, comfortably inside vblank. (The truncated-BG1 bug.) */
-static uint16_t rowbuf[32];
+ * rows are built in WRAM and DMAd. Several rows go out per vblank: draining one
+ * at a time meant a six-row repaint took six frames, which was visible as the
+ * console lazily catching up with itself.
+ *
+ * How many depends on who else wants DMA channels. HDMA and DMA are the same
+ * eight channels, and while the keyboard split is up it holds 3, 4 and 5 — and
+ * reprogramming those for a DMA would overwrite the HDMA table pointer, since
+ * $43x2-4 is shared. So: four rows normally, two while the split is active. */
+#define FLUSH_MAX 4
+static uint16_t rowbuf[FLUSH_MAX][32];
+static uint16_t rowbuf1[FLUSH_MAX][32];
 
-/* ch = 0..7; re-triggering the SAME channel back-to-back drops the 2nd
- * transfer, so the two rows-per-cell use different channels. */
-static uint16_t rowbuf1[32];
+static const uint8_t chan_free[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+static const uint8_t chan_split[4] = {0, 1, 2, 6}; /* 3,4,5 belong to HDMA */
+
 static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nwords) {
     uint16_t base = (uint16_t)(0x4300 + ch * 0x10);
     uint32_t s = (uint32_t)src;
@@ -212,52 +224,59 @@ static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nword
     R8(0x420B) = (uint8_t)(1 << ch);      /* start channel ch */
 }
 
-/* Refill the row buffers OUTSIDE vblank (slow C is fine here), then do only
- * the two fast DMAs inside vblank. One row per call — the console updates far
- * slower than con_flush is polled, so rows drain over successive calls. */
+/* Build the row buffers OUTSIDE vblank (slow C is fine there), then do only the
+ * fast DMAs inside it. */
 void con_flush(void) {
-    int cell, found = -1;
+    uint8_t rows[FLUSH_MAX];
+    const uint8_t *chan;
+    int budget, n = 0, i, cell;
     uint8_t r;
+
+    if (split_on) { chan = chan_split; budget = 2; }
+    else          { chan = chan_free;  budget = FLUSH_MAX; }
 
     /* A scroll changes what the hardware displays IMMEDIATELY, but the row
      * being revealed at the bottom still holds whatever was in that tilemap row
      * 32 lines ago until we DMA the cleared version over it. Updating the
      * scroll register in one vblank and the row contents in a later one shows
-     * that stale row for a frame — the flicker on pressing ENTER.
-     *
-     * So when a scroll is pending, the revealed row jumps the queue and goes
-     * out in the SAME vblank as the scroll register. */
+     * that stale row for a frame — the flicker on pressing ENTER. So when a
+     * scroll is pending, the revealed row goes out first, in the same vblank as
+     * the scroll register. */
     if (vofs_dirty) {
         uint8_t nr = (uint8_t)((top + text_rows - 1) % RING);
-        if (dirty[nr]) found = nr;
+        if (dirty[nr]) rows[n++] = nr;
     }
-    if (found < 0)
-        for (r = 0; r < RING; r++) if (dirty[r]) { found = r; break; }
-    if (found < 0 && !vofs_dirty) return;
+    for (r = 0; r < RING && n < budget; r++) {
+        if (!dirty[r]) continue;
+        if (n > 0 && rows[0] == r) continue;   /* already queued above */
+        rows[n++] = r;
+    }
+    if (n == 0 && !vofs_dirty) return;
 
-    if (found >= 0) {                                 /* build buffers (no vblank yet) */
+    for (i = 0; i < n; i++) {
+        uint8_t rr = rows[i];
         for (cell = 0; cell < 32; cell++)
-            rowbuf[cell]  = (uint16_t)((shadow[found][cell * 2]     << 1) | 0x2000);
+            rowbuf[i][cell]  = (uint16_t)((shadow[rr][cell * 2]     << 1) | 0x2000);
         for (cell = 0; cell < 32; cell++)
-            rowbuf1[cell] = (uint16_t)((shadow[found][cell * 2 + 1] << 1) | 0x2000);
+            rowbuf1[i][cell] = (uint16_t)((shadow[rr][cell * 2 + 1] << 1) | 0x2000);
     }
+
     con_publish();
     while (R8(0x4212) & 0x80) ;
     while (!(R8(0x4212) & 0x80)) ;                    /* into vblank */
     if (vofs_dirty) { set_vofs(); vofs_dirty = 0; }
-    if (found >= 0) {
-        dma_vram(0, (uint16_t)(BG2_MAP + found * 32), rowbuf, 32);
-        dma_vram(1, (uint16_t)(BG1_MAP + found * 32), rowbuf1, 32);
-        dirty[found] = 0;
+    for (i = 0; i < n; i++) {
+        dma_vram(chan[i * 2],     (uint16_t)(BG2_MAP + rows[i] * 32), rowbuf[i], 32);
+        dma_vram(chan[i * 2 + 1], (uint16_t)(BG1_MAP + rows[i] * 32), rowbuf1[i], 32);
+        dirty[rows[i]] = 0;
     }
 }
 
-/* ---- additions for SNOS -------------------------------------------------
+/* ---- random access --------------------------------------------------------
  * The console above is a pure stream device: text goes in, it scrolls. A shell
- * also needs random access (to draw the on-screen keyboard panel over the
- * bottom rows, and to put a cursor where the caret is), plus a way to put back
- * what the panel covered. All of these address the SCREEN row, translating
- * through the scroll ring themselves, so callers never see `top`.
+ * also needs to put a cursor where the caret is, and the keyboard panel needs
+ * to address rows directly. These take SCREEN coordinates and resolve the
+ * scroll ring themselves, so callers never see it.
  */
 
 int con_rows(void) { return ROWS; }
@@ -294,6 +313,7 @@ void con_clear(void) {
         dirty[y] = 1;
     }
     top = 0; row = 0; col = 0;
+    caret_ring = -1;
     vofs_dirty = 1;
 }
 
@@ -337,7 +357,6 @@ void con_clear(void) {
 static uint8_t hdma_sc[HDMA_TBL];
 static uint8_t hdma_v1[HDMA_TBL];
 static uint8_t hdma_v2[HDMA_TBL];
-static uint8_t split_on;
 static uint8_t split_row;
 
 void hdma_refresh(void);
@@ -478,11 +497,11 @@ void con_panel_row(int screen_row, const uint8_t *chars) {
     int cell;
     if (screen_row < 0 || screen_row >= ROWS) return;
     for (cell = 0; cell < 32; cell++) {
-        rowbuf[cell]  = (uint16_t)((chars[cell * 2]     << 1) | 0x2000);
-        rowbuf1[cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
+        rowbuf[0][cell]  = (uint16_t)((chars[cell * 2]     << 1) | 0x2000);
+        rowbuf1[0][cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
     }
     while (R8(0x4212) & 0x80) ;
     while (!(R8(0x4212) & 0x80)) ;
-    dma_vram(0, (uint16_t)(BG2_PANEL + screen_row * 32), rowbuf, 32);
-    dma_vram(1, (uint16_t)(BG1_PANEL + screen_row * 32), rowbuf1, 32);
+    dma_vram(0, (uint16_t)(BG2_PANEL + screen_row * 32), rowbuf[0], 32);
+    dma_vram(1, (uint16_t)(BG1_PANEL + screen_row * 32), rowbuf1[0], 32);
 }
