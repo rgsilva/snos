@@ -21,14 +21,24 @@
 static char line[128];
 
 /* Hand-rolled rather than <string.h>: the kernel stack is 2816 bytes and the
- * point of never linking the C library here is to keep it that way. */
-static int streq(const char *a, const char *b) {
-  while (*a && *b) {
-    if (*a != *b) return 0;
-    a++;
-    b++;
+ * point of never linking the C library here is to keep it that way.
+ *
+ * Case-insensitive, matching filenames and application names (fs.c, app.c).
+ * Typing an uppercase letter on this machine means holding shift on an
+ * on-screen keyboard, so insisting on a particular case is a real cost paid for
+ * nothing. The comparison is against a literal that is always lowercase, so
+ * only the user's side needs folding — one compare and one conditional subtract
+ * per character, on a string that is at most a handful of bytes and is compared
+ * once per typed line. It is not measurable. */
+static int streq(const char *typed, const char *lower) {
+  while (*typed && *lower) {
+    char c = *typed;
+    if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+    if (c != *lower) return 0;
+    typed++;
+    lower++;
   }
-  return *a == *b;
+  return *typed == *lower;
 }
 
 /* Split off the first word in place; returns the rest (may be empty). */

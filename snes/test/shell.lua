@@ -10,6 +10,10 @@ local CMDS = {
   "syscheck\n",
   "bogus\n",
   "help\n",
+  -- Deliberately mangled case: typing uppercase means holding shift on an
+  -- on-screen keyboard, so the shell must not care.
+  "EcHo MIXEDCASE WORKS\n",
+  "LS\n",
 }
 
 local frame = 0
@@ -73,6 +77,13 @@ emu.addEventCallback(function()
   -- The frame counter must be advancing, i.e. NMI is alive under the shell.
   local f = text:match("frames=(%d+)")
   r.check(f ~= nil and tonumber(f) > 0, "SYS_FRAMES returned 0 - is NMI running?")
+
+  -- Commands are case-insensitive, like filenames and application names.
+  r.check(text:find("MIXEDCASE WORKS", 1, true) ~= nil,
+          "mixed-case 'EcHo' was not recognised as a command")
+  r.check(text:find("unknown command: LS", 1, true) == nil,
+          "uppercase 'LS' was rejected")
+  r.check(text:find("README.TXT", 1, true) ~= nil, "uppercase 'LS' did not list files")
 
   r.finish()
 end, emu.eventType.endFrame)
