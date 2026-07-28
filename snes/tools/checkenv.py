@@ -8,7 +8,19 @@ every controller-driven test fails complaining that the on-screen keyboard is
 broken. It is not; the button press never existed.
 
 Two people independently misdiagnosed that as a collision with a running Mesen
-GUI, which is a real and separate problem, and which is why both are checked.
+GUI. That theory was WRONG: the full suite, controller tests included, passes
+with a GUI open once a controller is actually configured. The GUI was innocent
+both times and the missing controller was the whole story, so the GUI check is
+now only a note.
+
+Recorded because it is the interesting failure here: a plausible diagnosis that
+sits adjacent to the truth is worse than none at all. It explained the symptom,
+it had corroborating prior art in emu8086, and it survived two independent
+investigations before the evidence finally contradicted it.
+
+The GUI does have one real effect: exiting it rewrites settings.json, and that
+has twice reset Snes.Port1.Type to None — which is how the actual cause kept
+coming back.
 """
 import json
 import pathlib
