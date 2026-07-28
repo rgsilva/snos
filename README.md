@@ -59,6 +59,10 @@ ring. Open `snos.sfc` in the Mesen **GUI**, then Debug → Script Window → loa
 the script → Run, and type into the emulator window. It cannot work under
 `--testrunner`, which never initialises the input subsystem.
 
+If a key does nothing, check Mesen's own input bindings before suspecting the
+script: Mesen consumes keys bound to a controller button or hotkey before a
+script sees them. Backspace is bound by default.
+
 Real hardware gets a fourth backend at M7: the USB-keyboard-over-controller-port
 bridge already proven in `../keyboard-test-rom`. Nothing above `kbd_getchar()`
 has to change for any of them.

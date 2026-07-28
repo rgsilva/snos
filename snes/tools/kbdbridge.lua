@@ -21,8 +21,16 @@
 -- one your platform actually reports — that is exactly how the first version
 -- ended up with a "Shift" that resolved fine and never fired.
 --
--- If a key still does not work, set LEARN below and press it: the script prints
--- the real name.
+-- ------------------------------------------------------- if a key does nothing
+-- CHECK MESEN'S OWN INPUT BINDINGS FIRST. Mesen consumes a key that is bound to
+-- a controller button or a hotkey before any script sees it, so the key simply
+-- never arrives here and the script cannot tell the difference between that and
+-- a wrong name. Backspace turned out to be bound by default; unbinding it in
+-- Mesen's settings fixed it instantly.
+--
+-- Only if the binding is clear and the key still does nothing is it a naming
+-- problem — the startup report below prints what each named key resolved to,
+-- and every name this build accepts.
 
 local LEARN = false     -- also print the name of every key you press
 local REPEAT_DELAY = 24 -- frames held before auto-repeat starts
@@ -67,13 +75,7 @@ local KEYS = {
   -- On a Mac the key labelled "delete" is what everyone else calls Backspace,
   -- and Mesen may report it under either name. Both are accepted; a Mac has no
   -- separate forward-delete to be confused with.
-  --
-  -- Tab and Escape are deliberate ALTERNATES for backspace. Neither means
-  -- anything to this shell, and having a delete key that definitely works beats
-  -- being unable to correct a typo while we work out what the real one is
-  -- called. The startup report says which of these actually bound.
-  { "\b", "\b", "Backspace", "BackSpace", "Back Space", "Back", "Delete", "Del",
-    "Tab", "Escape", "Esc" },
+  { "\b", "\b", "Backspace", "BackSpace", "Back Space", "Back", "Delete", "Del" },
 
   { "-", "_", "Minus", "OemMinus", "-", "Subtract" },
   { "=", "+", "Equal", "Equals", "OemPlus", "=" },
