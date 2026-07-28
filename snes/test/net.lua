@@ -43,7 +43,10 @@ local gw = {
   tx_seq = 0, rx_next = 0, awaiting = false, inflight = nil, inflight_len = 0,
   last_snes_seq = 0, out = {},            -- queue of {ch=, data=} to send
   cmsg = { state = 0, typ = 0, len = 0, buf = {} },
+  window = {},        -- frames sent but not yet acknowledged
+  stall = 0,          -- polls since the window head last moved
   drop_snes = 0,      -- ignore this many incoming frames (simulates loss)
+  drop_out = 0,       -- discard this many outgoing frames (loss toward the SNES)
   corrupt_out = 0,    -- send this many frames with a broken checksum
   fetches = {},       -- urls seen, for assertions
 }
@@ -105,7 +108,17 @@ local function ctrl_byte(b)
       for i = 2, #c.buf do url = url .. string.char(c.buf[i]) end
       on_fetch(ch, url)
     end
-    -- C2S_CLOSE needs nothing from a canned gateway.
+    -- C2S_CLOSE: drop anything still queued for that channel. A real gateway
+    -- closes the socket and stops reading; a canned one that keeps streaming an
+    -- abandoned body starves every later request of the send window, which is
+    -- exactly what an aborted download does.
+    if c.typ == C2S_CLOSE and #c.buf >= 1 then
+      local ch = c.buf[1]
+      local i = 1
+      while i <= #gw.out do
+        if gw.out[i].ch == ch then table.remove(gw.out, i) else i = i + 1 end
+      end
+    end
   end
 end
 
@@ -151,7 +164,19 @@ local function build()
   return f, any
 end
 
+-- Sequence comparison, modulo 256: is a at or before b?
+local function seq_le(a, b) return ((b - a) & 0xFF) < 128 end
+
 local function write_frame(f)
+  -- Loss in the SNES-bound direction. Distinct from drop_snes, and it is the
+  -- case a window introduces: with stop-and-wait a lost frame simply stalls,
+  -- but a pipelined sender has later frames already on the wire that the
+  -- receiver must refuse until the gap is filled.
+  if gw.drop_out > 0 then
+    gw.drop_out = gw.drop_out - 1
+    wu16(0x04, ru16(0x04) + 1)   -- the exchange still happened; the frame is gone
+    return
+  end
   local corrupt = gw.corrupt_out > 0
   if corrupt then gw.corrupt_out = gw.corrupt_out - 1 end
   for i = 0, FRAME - 1 do
@@ -165,7 +190,14 @@ end
 local function service()
   -- Incoming
   local ss = ru16(0x02)
-  if ss ~= gw.last_snes_seq then
+  -- Has the SNES run an exchange since we last looked? Everything below is
+  -- gated on this. The mailbox holds ONE frame per direction — exactly like the
+  -- cable's single synchronous exchange — so writing again before the SNES has
+  -- polled destroys a frame it never saw. Stop-and-wait hid this by rewriting
+  -- the same frame; a window does not, and the SNES skips polls whenever the
+  -- console is mid-repaint.
+  local polled = (ss ~= gw.last_snes_seq)
+  if polled then
     gw.last_snes_seq = ss
     if gw.drop_snes > 0 then
       gw.drop_snes = gw.drop_snes - 1     -- pretend the frame never arrived
@@ -173,9 +205,10 @@ local function service()
       local f = {}
       for i = 0, FRAME - 1 do f[i] = rb(0x10 + i) end
       if f[SUM] == sum_of(f) then
-        if gw.awaiting and f[ACK] == gw.tx_seq then
-          gw.awaiting = false
-          gw.tx_seq = (gw.tx_seq + 1) & 0xFF
+        -- Cumulative ack: release every window frame up to and including it.
+        while #gw.window > 0 and seq_le(gw.window[1].seq, f[ACK]) do
+          table.remove(gw.window, 1)
+          gw.stall = 0
         end
         if (f[FLAGS] & F_DATA) ~= 0 and f[SEQ] == gw.rx_next then
           deliver(f)
@@ -185,17 +218,54 @@ local function service()
     end
   end
 
-  -- Outgoing
-  if not gw.awaiting then
+  -- Outgoing.
+  --
+  -- A window rather than stop-and-wait. The link is a synchronous exchange, so
+  -- an acknowledgement cannot ride in the exchange that carried the frame it
+  -- acknowledges; a sender that waits for one therefore moves a frame every
+  -- other poll and gives up half the link. The SNES already accepts a pipelined
+  -- sender — it takes frames strictly in order and re-states a cumulative ack
+  -- on every frame it sends — so this is the only side that had to change.
+  --
+  -- Go-back-N: on a gap the receiver refuses everything after it, so the whole
+  -- window is resent from the head.
+  local WIN = 4
+  -- Must exceed the window depth plus the round trip, or normal pipelining
+  -- looks like a stall: with a window of 4 and a 2-poll round trip, a frame
+  -- legitimately sits unacknowledged for ~6 polls while the window fills.
+  -- Resending at 3 fired go-back-N constantly and HALVED throughput.
+  local RESEND_AFTER = 12
+
+  if not polled then return end
+
+  gw.stall = gw.stall + 1
+  if #gw.window > 0 and gw.stall > RESEND_AFTER then
+    gw.stall = 0
+    local head = gw.window[1]
+    head.frame[ACK] = (gw.rx_next - 1) & 0xFF
+    head.frame[SUM] = 0
+    head.frame[SUM] = sum_of(head.frame)
+    write_frame(head.frame)
+  elseif #gw.window < WIN then
     local f, any = build()
-    gw.inflight = f
-    if any then gw.awaiting = true end
+    if any then
+      gw.window[#gw.window + 1] = { seq = gw.tx_seq, frame = f }
+      gw.tx_seq = (gw.tx_seq + 1) & 0xFF
+    end
     write_frame(f)
   else
-    gw.inflight[ACK] = (gw.rx_next - 1) & 0xFF
-    gw.inflight[SUM] = 0
-    gw.inflight[SUM] = sum_of(gw.inflight)
-    write_frame(gw.inflight)
+    -- Window full and nothing due for resend: still answer the exchange so the
+    -- SNES keeps receiving our ack.
+    local f = {}
+    for i = 0, FRAME - 1 do f[i] = 0 end
+    f[SEQ] = gw.tx_seq
+    f[ACK] = (gw.rx_next - 1) & 0xFF
+    f[FLAGS] = 0
+    local o = HDR
+    while o < FRAME do f[o] = CH_PAD; o = o + 1 end
+    f[SUM] = 0
+    f[SUM] = sum_of(f)
+    write_frame(f)
   end
 end
 
@@ -263,8 +333,20 @@ emu.addEventCallback(function()
     return
   end
   if step == 8 then L.feed(" "); at = frame + 300; step = 9; return end
+  -- A gap INSIDE the window: drop two gateway-bound frames mid-transfer. Only a
+  -- pipelined sender can produce this — with stop-and-wait a loss simply stalls,
+  -- whereas here later frames are already on the wire and the receiver must
+  -- refuse them until the hole is filled, then go-back-N repairs it.
+  if step == 9 then
+    gw.drop_out = 2
+    L.feed("download http://example.com/ok WINLOSS.TXT\n")
+    at = frame + 1500
+    step = 10
+    return
+  end
+  if step == 10 then L.feed("cat WINLOSS.TXT\n"); at = frame + 600; step = 11; return end
   -- "partial file kept" is a claim; check the volume actually has it.
-  if step == 9 then L.feed("ls\n"); at = frame + 300; step = 10; return end
+  if step == 11 then L.feed("ls\n"); at = frame + 300; step = 12; return end
 
   local r = L.new_report("net")
   local text = L.ring_text()
@@ -313,6 +395,16 @@ emu.addEventCallback(function()
           "a keypress did not abort the download - a stuck transfer would need a power cycle")
   r.check(text:find("BIG.TXT", 1, true) ~= nil,
           "the aborted download left nothing on the volume, despite saying it kept a partial file")
+
+  -- Loss inside the send window must be repaired, not merely survived: the file
+  -- has to come back byte-identical.
+  r.check(gw.drop_out == 0, "window-loss injection never fired")
+  r.check(text:find("saved WINLOSS.TXT", 1, true) ~= nil,
+          "the download that lost frames mid-window never completed")
+  local _, wl = text:gsub("TLS was terminated on the far side", "")
+  r.check(wl >= 4,
+          "the file downloaded across a window gap did not read back intact (" ..
+          wl .. " copies of the body seen)")
 
   r.finish()
 end, emu.eventType.endFrame)

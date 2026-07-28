@@ -301,7 +301,15 @@ static int frame_fits(const uint8_t *f) {
     uint8_t len = f[o + 1];
     if (ch == LINK_CH_PAD) break;
     if (o + 2 + len > LINK_FRAME) break;
-    if (ch != LINK_CH_CTRL && ch < NET_CHANNELS) need[ch] = (uint16_t)(need[ch] + len);
+    /* Space is only required for channels somebody might still read.
+     *
+     * A CLOSED channel's ring never drains — by definition nothing is reading
+     * it — so demanding room in it means the frame is never acked, the peer
+     * retransmits forever, and the whole link wedges permanently. One aborted
+     * transfer would kill networking until reboot. Data for a closed channel is
+     * discarded in frame_deliver instead, which is what a closed stream means. */
+    if (ch != LINK_CH_CTRL && ch < NET_CHANNELS && ch_state[ch] != NET_ST_FREE)
+      need[ch] = (uint16_t)(need[ch] + len);
     o += 2 + len;
   }
   for (i = 1; i < NET_CHANNELS; i++)
@@ -317,7 +325,10 @@ static void frame_deliver(const uint8_t *f) {
     if (ch == LINK_CH_PAD) break;
     if (o + 2 + len > LINK_FRAME) break;
     if (ch == LINK_CH_CTRL) ctrl_bytes(&f[o + 2], len);
-    else if (ch < NET_CHANNELS) ring_put(ch, &f[o + 2], len);
+    /* Silently drop anything addressed to a closed channel: the sender has not
+     * yet seen our CLOSE, and there is nowhere for it to go. */
+    else if (ch < NET_CHANNELS && ch_state[ch] != NET_ST_FREE)
+      ring_put(ch, &f[o + 2], len);
     o += 2 + len;
   }
 }
