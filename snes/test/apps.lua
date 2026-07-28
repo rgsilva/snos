@@ -5,7 +5,7 @@
 -- give control back — plus the thing that makes it safe to try: the kill
 -- switch, which recovers the machine from an app that never asks to stop.
 --
---   1. `ls`         the ROM is self-describing: apps found by scanning banks
+--   1. `apps`       the ROM is self-describing: apps found by scanning banks
 --   2. `run hello`  exec, syscalls from a separate link, clean exit code 42
 --   3. `run pad`    exec an app that loops forever...
 --   4. START+SELECT ...and take the machine back from it without its help
@@ -41,7 +41,7 @@ emu.addEventCallback(function()
   if at == nil then at = frame + 120 end
   if frame < at then return end
 
-  if step == 1 then send("ls\n", 180); step = 2; return end
+  if step == 1 then send("apps\n", 180); step = 2; return end
   if step == 2 then send("run hello\n", 240); step = 3; return end
   if step == 3 then
     send("run pad\n", 400)

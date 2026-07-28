@@ -9,6 +9,8 @@
 #include "input.h"
 #include "app.h"
 #include "snos_abi.h"
+#include "sram.h"
+#include "fs.h"
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -76,6 +78,17 @@ int main(void) {
   report_stack();
   kbd_init();
   app_scan(); /* walk the ROM banks looking for application headers */
+
+  {
+    uint32_t n = sram_probe();
+    kcon_puts("cart SRAM ");
+    kcon_putu((uint16_t)(n >> 10));
+    kcon_puts(" KB\n");
+    mb_puts("SRAMKB ");
+    mb_puthex32(n >> 10);
+    mb_putc('\n');
+  }
+  fs_init();
 
   shell_run(); /* never returns */
   return 0;

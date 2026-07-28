@@ -10,11 +10,25 @@
 ;;   $0C00-$18FF  3328 B   APP stack        <- deliberately NOT described below,
 ;;   $1900-$19FF   256 B   APP direct page  <- so the linker cannot squat on it
 ;;   $1A00-$1A3F    64 B   SYSCALL PARAMETER BLOCK (fixed, part of the ABI)
-;;   $1A40-$1FFF  1472 B   kernel near data
+;;   $1A40-$1AFF   192 B   (spare)
+;;   $1B00-$1BFF   256 B   INTERRUPT direct page  <- see below
+;;   $1C00-$1FFF  1024 B   kernel near data
 ;;
 ;; The app region is reserved by omission: no (memory ...) form covers
 ;; $0C00-$19FF, so ln65816 physically cannot place kernel data there.  M3 hands
 ;; those addresses to apps; M10 carves them into 512 B per-process slots.
+;;
+;; WHY INTERRUPTS HAVE THEIR OWN DIRECT PAGE
+;; Calypsi's generated C code keeps working values in direct-page "pseudo
+;; registers" (`_Dp`), and the linker assigns each function a slot range from
+;; the STATIC call graph. An interrupt is an edge that graph does not contain,
+;; so a handler's C code is free to reuse slots the interrupted code was in the
+;; middle of using. The symptom is not a crash: it is one wrong byte, now and
+;; then, wherever a pointer was being computed when NMI landed.
+;;
+;; Because `_Dp` is direct-page RELATIVE, giving the trap shims their own D
+;; makes the collision impossible rather than merely unlikely. Three disjoint
+;; direct pages are live: $0000 kernel, $1900 application, $1B00 interrupts.
 ;;
 ;; Test mailbox lives at $7EF000 (out of bank $00 entirely — it is 4 KB, and
 ;; bank $00 is far too expensive to spend on test scaffolding).
@@ -37,8 +51,11 @@
     ;; where a linker-allocated variable ended up; see kernel/snos_abi.h.
     ;; Reserved by omission, exactly like the app stack region.
 
+    ;; $1B00-$1BFF is the interrupt direct page (see above). Reserved by
+    ;; omission, like the app region and the syscall parameter block.
+
     (memory LoRAM
-            (address (#x1a40 . #x1fff))
+            (address (#x1c00 . #x1fff))
             (type RAM)
             (qualifier near)
             (section data znear near fastregs))

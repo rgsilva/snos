@@ -54,6 +54,14 @@
 #define SYS_PUTHEX 0x16   /* A = value, 4 hex digits */
 /* $20-$2F  input */
 #define SYS_PAD 0x20 /* -> held-button bitmask (PAD_* below) */
+/* $30-$3F  files. One file open at a time — enough for SAVE and LOAD. */
+#define SYS_OPEN 0x30   /* p0/p1 = name, A = 0 read / 1 write -> 0 or SYS_ERR */
+#define SYS_GETC_F 0x31 /* -> byte, or SYS_ERR at end of file */
+#define SYS_PUTC_F 0x32 /* A = byte -> 0 or SYS_ERR */
+#define SYS_CLOSE 0x33
+#define SYS_FSIZE 0x34  /* -> size of the open file (low 16 bits) */
+#define SYS_DIR 0x35    /* A = index, p0/p1 = 17-byte buffer -> 1 ok, 0 end */
+#define SYS_UNLINK 0x36 /* p0/p1 = name -> 0 or SYS_ERR */
 /* $50-$5F  time */
 #define SYS_FRAMES 0x50   /* -> free-running 60 Hz frame counter */
 #define SYS_WAITVBL 0x51
@@ -101,6 +109,13 @@ uint16_t sys_puthex(uint16_t v);
 uint16_t sys_frames(void);
 uint16_t sys_waitvbl(void);
 uint16_t sys_pad(void);
+uint16_t sys_open(uint16_t mode);
+uint16_t sys_getc_f(void);
+uint16_t sys_putc_f(uint16_t c);
+uint16_t sys_close(void);
+uint16_t sys_fsize(void);
+uint16_t sys_dir(uint16_t index);
+uint16_t sys_unlink(void);
 uint16_t sys_trace_raw(void);
 
 /* Button bits as returned by SYS_PAD (the auto-joypad read layout). */

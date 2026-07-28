@@ -13,6 +13,11 @@ CC := $(CALDIR)/bin/cc65816
 AS := $(CALDIR)/bin/as65816
 LN := $(CALDIR)/bin/ln65816
 MESEN ?= /Applications/Mesen.app/Contents/MacOS/Mesen
+# Mesen keeps battery saves in its own data directory, NOT next to the ROM.
+# Tests that assert on a fresh filesystem have to delete THIS file; removing a
+# .srm from build/ silently does nothing and the test then inherits whatever the
+# previous run left behind.
+MESEN_SRM ?= $(HOME)/Library/Application Support/Mesen2/Saves/snos.srm
 BUILD := build
 K := kernel
 
@@ -24,12 +29,12 @@ LNFLAGS = calypsi/linker.scm --output-format=raw --rtattr exit=simplified \
           $(CALDIR)/lib/clib-lc-ld-snes-noppu.a
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
-            $(K)/input.c $(K)/shell.c $(K)/app.c
+            $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c
 KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps test test-boot test-input test-shell test-apps clean
+.PHONY: all kernel apps test test-boot test-input test-shell test-apps test-fs clean
 all: kernel
 kernel: $(BUILD)/snos.sfc
 
@@ -66,6 +71,13 @@ APP_AT_pad     := 0x090000
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)
 
+# ROMFS goes in the last bank of the 1 MB image ($CF), leaving $C8-$CE for apps.
+ROMFS_AT := 0x0F0000
+ROMFS_SRC := $(wildcard ../romfs/*)
+
+$(BUILD)/romfs.bin: $(ROMFS_SRC) tools/mkromfs.py | $(BUILD)
+	python3 tools/mkromfs.py ../romfs $@
+
 .PHONY: apps
 apps: $(APP_RAWS)
 
@@ -80,10 +92,10 @@ $(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c ../apps/crt0.s ../apps/app.scm.
 endef
 $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 
-$(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) tools/raw2sfc.py
-	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS)
+$(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
+	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-boot test-input test-shell test-apps
+test: test-boot test-input test-shell test-apps test-fs
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
@@ -96,6 +108,12 @@ test-shell: $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
 
 test-apps: $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
+
+# Mesen persists cart SRAM to a .srm; a stale one from a previous run would
+# make the persistence assertion pass for the wrong reason.
+test-fs: $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
+	rm -f "$(MESEN_SRM)"
+	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
 
 clean:
 	rm -rf $(BUILD)

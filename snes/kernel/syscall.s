@@ -24,6 +24,8 @@
               .public sys_putc, sys_puts_raw, sys_getc, sys_cls
               .public sys_readline_raw, sys_putu, sys_puthex
               .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
+              .public sys_open, sys_getc_f, sys_putc_f, sys_close
+              .public sys_fsize, sys_dir, sys_unlink
 
 sys_exit:       cop     #0x00
                 rtl
@@ -49,6 +51,21 @@ sys_puthex:     cop     #0x16
                 rtl
 
 sys_pad:        cop     #0x20
+                rtl
+
+sys_open:       cop     #0x30
+                rtl
+sys_getc_f:     cop     #0x31
+                rtl
+sys_putc_f:     cop     #0x32
+                rtl
+sys_close:      cop     #0x33
+                rtl
+sys_fsize:      cop     #0x34
+                rtl
+sys_dir:        cop     #0x35
+                rtl
+sys_unlink:     cop     #0x36
                 rtl
 
 sys_frames:     cop     #0x50

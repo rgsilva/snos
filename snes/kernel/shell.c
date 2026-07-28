@@ -15,6 +15,8 @@
 #include "input.h"
 #include "mailbox.h"
 #include "app.h"
+#include "fs.h"
+#include "sram.h"
 
 static char line[128];
 
@@ -60,8 +62,14 @@ static void cmd_help(void) {
   kcon_puts("mem       memory map and stack watermark\n");
   kcon_puts("echo ...  print arguments\n");
   kcon_puts("syscheck  exercise the COP syscall path\n");
-  kcon_puts("ls        list applications\n");
+  kcon_puts("apps      list applications\n");
   kcon_puts("run NAME  run an application\n");
+  kcon_puts("ls        list files\n");
+  kcon_puts("cat NAME  print a file\n");
+  kcon_puts("write N T write text T to file N\n");
+  kcon_puts("rm NAME   delete a file\n");
+  kcon_puts("sram      cartridge SRAM usage\n");
+  kcon_puts("fstest    verify SRAM addressing\n");
 }
 
 static void cmd_ver(void) {
@@ -142,7 +150,7 @@ static void cmd_syscheck(void) {
   kcon_puts("syscheck done\n");
 }
 
-static void cmd_ls(void) {
+static void cmd_apps(void) {
   int i, n = app_count();
   if (n == 0) {
     kcon_puts("no applications in this ROM\n");
@@ -197,6 +205,144 @@ static void cmd_run(const char *name) {
   }
 }
 
+static void cmd_ls(void) {
+  int i, n = fs_count();
+  if (n == 0) {
+    kcon_puts("no files\n");
+    return;
+  }
+  for (i = 0; i < n; i++) {
+    const fs_entry_t *f = fs_get(i);
+    int k = 0;
+    kcon_puts(f->name);
+    while (f->name[k]) k++;
+    while (k++ < 18) kcon_putc(' ');
+    kcon_putu((uint16_t)f->size);
+    kcon_puts(f->ro ? "  rom\n" : "  sram\n");
+  }
+}
+
+static void cmd_cat(const char *name) {
+  const fs_entry_t *f;
+  uint32_t i;
+  if (*name == 0) {
+    kcon_puts("usage: cat NAME\n");
+    return;
+  }
+  f = fs_find(name);
+  if (f == 0) {
+    kcon_puts("no such file: ");
+    kcon_puts(name);
+    kcon_putc('\n');
+    return;
+  }
+  for (i = 0; i < f->size; i++) kcon_putc(fs_read_byte(f, i));
+  kcon_putc('\n');
+}
+
+/* write NAME text... — the simplest possible way to put a file on the SRAM
+ * volume without an editor. */
+static void cmd_write(char *rest) {
+  char *text = split_word(rest);
+  if (*rest == 0) {
+    kcon_puts("usage: write NAME text\n");
+    return;
+  }
+  if (fs_open_write(rest) != 0) {
+    kcon_puts("cannot create ");
+    kcon_puts(rest);
+    kcon_putc('\n');
+    return;
+  }
+  while (*text) fs_putc((uint8_t)*text++);
+  fs_putc('\n');
+  fs_close();
+  kcon_puts("wrote ");
+  kcon_puts(rest);
+  kcon_putc('\n');
+}
+
+static void cmd_rm(const char *name) {
+  if (*name == 0) {
+    kcon_puts("usage: rm NAME\n");
+    return;
+  }
+  if (fs_delete(name) != 0) {
+    kcon_puts("cannot delete ");
+    kcon_puts(name);
+    kcon_puts(" (missing, or it is in ROM)\n");
+    return;
+  }
+  kcon_puts("deleted ");
+  kcon_puts(name);
+  kcon_putc('\n');
+}
+
+static void cmd_sram(void) {
+  kcon_puts("cart SRAM ");
+  kcon_putu((uint16_t)(sram_size() >> 10));
+  kcon_puts(" KB, free ");
+  kcon_putu((uint16_t)(fs_free() >> 10));
+  kcon_puts(" KB\n");
+}
+
+/* Write a known pattern to the SRAM volume and read it back byte for byte.
+ *
+ * This exists because SRAM is not flat memory: it is 8 KB windows in separate
+ * banks, and the linear-offset arithmetic has to cross those boundaries
+ * correctly. 20000 bytes spans three windows, so a mistake in the window or
+ * bank calculation shows up here instead of quietly eating someone's file. */
+#define FSTEST_LEN 20000ul
+
+static uint8_t fstest_byte(uint32_t i) {
+  return (uint8_t)((i * 7u) ^ (uint8_t)(i >> 8));
+}
+
+static void cmd_fstest(void) {
+  const fs_entry_t *f;
+  uint32_t i, bad = 0, first_bad = 0;
+
+  if (fs_open_write("FSTEST.BIN") != 0) {
+    kcon_puts("fstest: cannot create\n");
+    return;
+  }
+  for (i = 0; i < FSTEST_LEN; i++) fs_putc(fstest_byte(i));
+  fs_close();
+
+  f = fs_find("FSTEST.BIN");
+  if (f == 0) {
+    kcon_puts("fstest: file vanished after write\n");
+    return;
+  }
+  if (f->size != FSTEST_LEN) {
+    kcon_puts("fstest: size ");
+    kcon_putu((uint16_t)f->size);
+    kcon_puts(" hi ");
+    kcon_puthex16((uint16_t)(f->size >> 16));
+    kcon_puts(" wrote ");
+    kcon_putu((uint16_t)i);
+    kcon_putc('\n');
+    return;
+  }
+  for (i = 0; i < FSTEST_LEN; i++) {
+    if (fs_read_byte(f, i) != fstest_byte(i)) {
+      if (bad == 0) first_bad = i;
+      bad++;
+    }
+  }
+  fs_delete("FSTEST.BIN");
+
+  if (bad == 0) {
+    kcon_puts("fstest: 20000 bytes across 3 windows OK\n");
+  } else {
+    kcon_puts("fstest: ");
+    kcon_putu((uint16_t)bad);
+    kcon_puts(" bad bytes, first at ");
+    kcon_putu((uint16_t)first_bad);
+    kcon_putc('\n');
+  }
+}
+
 /* ---------------------------------------------------------------- shell */
 
 void shell_run(void) {
@@ -214,8 +360,14 @@ void shell_run(void) {
     else if (streq(line, "mem")) cmd_mem();
     else if (streq(line, "echo")) cmd_echo(rest);
     else if (streq(line, "syscheck")) cmd_syscheck();
-    else if (streq(line, "ls")) cmd_ls();
+    else if (streq(line, "apps")) cmd_apps();
     else if (streq(line, "run")) cmd_run(rest);
+    else if (streq(line, "ls")) cmd_ls();
+    else if (streq(line, "cat")) cmd_cat(rest);
+    else if (streq(line, "write")) cmd_write(rest);
+    else if (streq(line, "rm")) cmd_rm(rest);
+    else if (streq(line, "sram")) cmd_sram();
+    else if (streq(line, "fstest")) cmd_fstest();
     else {
       kcon_puts("unknown command: ");
       kcon_puts(line);

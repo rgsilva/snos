@@ -26,6 +26,7 @@
 #include "input.h"
 #include "mailbox.h"
 #include "farmem.h"
+#include "fs.h"
 
 #define BANK0M 0x7E0000ul
 
@@ -144,6 +145,56 @@ uint16_t snos_cop_c(uint16_t sp) {
 
   case SYS_PAD:
     return pad_held();
+
+  case SYS_OPEN: {
+    char nm[FS_NAME_LEN + 1];
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int i;
+    for (i = 0; i < FS_NAME_LEN; i++) {
+      nm[i] = (char)far_rd(bank, (uint16_t)(off + i));
+      if (nm[i] == 0) break;
+    }
+    nm[i < FS_NAME_LEN ? i : FS_NAME_LEN] = 0;
+    if (a == 0) return fs_open_read(nm) == 0 ? 0 : SYS_ERR;
+    return fs_open_write(nm) == 0 ? 0 : SYS_ERR;
+  }
+
+  case SYS_GETC_F: {
+    int c = fs_getc();
+    return c < 0 ? SYS_ERR : (uint16_t)c;
+  }
+
+  case SYS_PUTC_F:
+    return fs_putc((uint8_t)a) == 0 ? 0 : SYS_ERR;
+
+  case SYS_CLOSE:
+    fs_close();
+    return 0;
+
+  case SYS_FSIZE:
+    return (uint16_t)fs_open_size();
+
+  case SYS_DIR: {
+    const fs_entry_t *e = fs_get((int)a);
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int i;
+    if (e == 0) return 0;
+    for (i = 0; i <= FS_NAME_LEN; i++)
+      far_wr(bank, (uint16_t)(off + i), (uint8_t)e->name[i]);
+    return 1;
+  }
+
+  case SYS_UNLINK: {
+    char nm[FS_NAME_LEN + 1];
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int i;
+    for (i = 0; i < FS_NAME_LEN; i++) {
+      nm[i] = (char)far_rd(bank, (uint16_t)(off + i));
+      if (nm[i] == 0) break;
+    }
+    nm[i < FS_NAME_LEN ? i : FS_NAME_LEN] = 0;
+    return fs_delete(nm) == 0 ? 0 : SYS_ERR;
+  }
 
   case SYS_FRAMES:
     return snos_frames;
