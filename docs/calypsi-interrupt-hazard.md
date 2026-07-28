@@ -6,9 +6,24 @@ number that turns into `00` every few dozen boots. Everything looks correct in
 the source, in the listing, and in the emulator's memory viewer afterwards.
 
 **Cause:** Calypsi's generated code keeps working values in direct-page
-"pseudo registers" (`_Dp`, `_Dp+2`, `_Dp+4`, …). The *linker* assigns each
-function a slot range, and it does so by analysing the **static call graph** —
-that is how two functions that can never be live at once safely share slots.
+"pseudo registers" (`_Dp`, `_Dp+2`, `_Dp+4`, …).
+
+**Correction, 2026-07-28.** This document previously said the linker assigns
+each function its own slot range from the static call graph. That is wrong, and
+the link map says so plainly:
+
+```
+_Dp in section 'registers'  placed at address 000000-000013 of size 000014
+```
+
+**One shared 20-byte block, for every function in the program.** There is no
+per-function partitioning to be defeated. Anything holding a value in `_Dp`
+across a call is relying on the compiler having spilled it, and any second
+context using `_Dp` at the same time collides — always, not occasionally.
+
+That makes the hazard broader than described, and it explains the interrupt case
+better than the original story did: a handler does not "reuse slots the linker
+thought were free", it uses *the same twenty bytes*.
 
 An interrupt is an edge that graph does not contain. When NMI fires, the
 handler's C code is free to reuse exactly the slots the interrupted foreground
@@ -52,6 +67,41 @@ The rule: **every context that can be live simultaneously needs its own direct
 page.** Today that is four. If M10 adds preemptive multitasking, each process
 needs one too — which is another claim on the 8 KB of bank $00, and worth
 remembering when budgeting that milestone.
+
+### It is not only interrupts
+
+Same block, third instance, 2026-07-28. The shell gained a fallback that runs an
+application when a typed word is not a builtin. Written the obvious way —
+
+```c
+static int try_run_app(const char *name, const char *args) {
+  const app_entry_t *a = app_find(name);
+  if (a == 0) return 0;
+  run_app_entry(a, args);          /* one more frame than cmd_run() has */
+  return 1;
+}
+```
+
+— the launched application crashed before reaching `main`, deterministically.
+The panic dump is the giveaway:
+
+```
+PB:0000 PC:0005   D:1900 DB:007F S:18F2
+```
+
+The app's direct page, data bank and stack are all correctly installed, so
+`app_exec` ran; but it jumped to `$00:0005`, meaning it was handed a bank and
+entry of roughly zero. The `app_entry_t *` — a 24-bit pointer, too wide for the
+accumulator and therefore travelling through `_Dp` — arrived corrupt.
+
+The identical find-then-launch sequence inside `cmd_run()` has always worked. It
+has one fewer call frame. Inlining the lookup at the call site fixes it, and
+that is how it ships, with the reasoning attached so nobody "cleans it up".
+
+The lesson generalises past interrupts: **a wide value passed down a call chain
+lives in twenty bytes that everything else is also using.** When a change that
+should be behaviour-neutral produces corruption, suspect an added frame before
+suspecting your logic.
 
 The trap shims in `snes/calypsi/header.s` do:
 
