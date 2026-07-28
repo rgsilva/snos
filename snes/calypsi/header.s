@@ -68,6 +68,13 @@
               .section code, root
               .public snos_stub, snos_nmi, snos_cop, snos_brk
               .extern snos_nmi_c, snos_cop_c, snos_brk_c
+              .extern app_return
+
+;;; Kernel exec state, mirrored from kernel/exec.s. An app terminates by
+;;; setting EXITFLAG; both trap shims below check it and unwind to app_return
+;;; rather than returning into an app that is no longer supposed to be running.
+EXITFLAG      .equ    0x7e1a12
+APPRUNNING    .equ    0x7e1a16
 
 snos_stub:
               rti
@@ -89,9 +96,19 @@ snos_nmi:
               lda     ##0x0000
               tcd                           ; DP = kernel direct page
               sep     #0x20
-              lda     abs:0x4210                ; ack NMI (clears the flag)
+              lda     abs:0x4210            ; ack NMI (clears the flag)
               rep     #0x20
               jsl     snos_nmi_c
+              ;; The kill switch fires from here: if the handler decided the
+              ;; running app has to die, unwind now instead of returning into
+              ;; it. This is what stops a wedged app from taking the machine
+              ;; with it, and it needs no cooperation from the app at all.
+              lda     long:APPRUNNING
+              beq     nmi_ret
+              lda     long:EXITFLAG
+              beq     nmi_ret
+              jmp     long:app_return
+nmi_ret:
               plb
               pld
               ply
@@ -124,6 +141,12 @@ snos_cop:
                                             ;   +10 P, +11 PC, +13 PB
               jsl     snos_cop_c            ; syscall result returned in A
               sta     8,s                   ; -> the stacked A, pulled below
+              ;; SYS_EXIT cannot simply return: the app's stack may be
+              ;; arbitrarily deep by now, so unwind to the kernel instead.
+              lda     long:EXITFLAG
+              beq     cop_ret
+              jmp     long:app_return
+cop_ret:
               plb
               pld
               ply

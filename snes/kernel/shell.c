@@ -14,6 +14,7 @@
 #include "console.h"
 #include "input.h"
 #include "mailbox.h"
+#include "app.h"
 
 static char line[128];
 
@@ -141,6 +142,61 @@ static void cmd_syscheck(void) {
   kcon_puts("syscheck done\n");
 }
 
+static void cmd_ls(void) {
+  int i, n = app_count();
+  if (n == 0) {
+    kcon_puts("no applications in this ROM\n");
+    return;
+  }
+  for (i = 0; i < n; i++) {
+    const app_entry_t *a = app_get(i);
+    kcon_puts(a->name);
+    kcon_puts("  bank $");
+    kcon_puthex16(a->bank);
+    kcon_puts(" entry $");
+    kcon_puthex16(a->entry);
+    kcon_putc('\n');
+  }
+}
+
+static void cmd_run(const char *name) {
+  const app_entry_t *a;
+  uint16_t rc;
+
+  if (*name == 0) {
+    kcon_puts("usage: run NAME\n");
+    return;
+  }
+  a = app_find(name);
+  if (a == 0) {
+    kcon_puts("no such application: ");
+    kcon_puts(name);
+    kcon_putc('\n');
+    return;
+  }
+  if (a->minabi > SNOS_ABI_VERSION) {
+    /* An app built against a newer kernel must be refused rather than run and
+     * allowed to fall over on a syscall that does not exist yet. */
+    kcon_puts("needs kernel ABI ");
+    kcon_putu(a->minabi);
+    kcon_puts(", have ");
+    kcon_putu(SNOS_ABI_VERSION);
+    kcon_putc('\n');
+    return;
+  }
+
+  rc = app_run(a);
+
+  kcon_puts("[");
+  kcon_puts(a->name);
+  if (rc == SNOS_EXIT_KILLED) kcon_puts(" killed]\n");
+  else {
+    kcon_puts(" exited ");
+    kcon_putu(rc);
+    kcon_puts("]\n");
+  }
+}
+
 /* ---------------------------------------------------------------- shell */
 
 void shell_run(void) {
@@ -158,8 +214,8 @@ void shell_run(void) {
     else if (streq(line, "mem")) cmd_mem();
     else if (streq(line, "echo")) cmd_echo(rest);
     else if (streq(line, "syscheck")) cmd_syscheck();
-    else if (streq(line, "ls")) kcon_puts("no applications yet (M3)\n");
-    else if (streq(line, "run")) kcon_puts("no applications yet (M3)\n");
+    else if (streq(line, "ls")) cmd_ls();
+    else if (streq(line, "run")) cmd_run(rest);
     else {
       kcon_puts("unknown command: ");
       kcon_puts(line);

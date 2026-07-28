@@ -25,6 +25,7 @@
 #include "console.h"
 #include "input.h"
 #include "mailbox.h"
+#include "farmem.h"
 
 #define BANK0M 0x7E0000ul
 
@@ -47,22 +48,31 @@ static uint16_t frm16(uint16_t sp, uint16_t off) {
   return (uint16_t)(frm8(sp, off) | ((uint16_t)frm8(sp, off + 1) << 8));
 }
 
-/* Read a byte from an arbitrary bank. Used for the COP signature (which is in
- * the caller's code bank, i.e. an app's ROM bank) and for string arguments. */
-static uint8_t far_rd(uint16_t bank, uint16_t off) {
-  return *(volatile __far uint8_t *)(((uint32_t)bank << 16) | (uint32_t)off);
-}
-
-static void far_wr(uint16_t bank, uint16_t off, uint8_t v) {
-  *(volatile __far uint8_t *)(((uint32_t)bank << 16) | (uint32_t)off) = v;
-}
-
 /* Vblank, 60 Hz, kernel-owned unconditionally (PLAN.md §5). Runs on whatever
  * stack is current — while an app runs that is the APP's stack — so this must
  * stay shallow. No printf, no deep call chains, ever. */
+static uint16_t kill_held;
+
 void snos_nmi_c(void) {
   snos_frames++;
   pad_latch();
+
+  /* The kill switch. It lives here, in the interrupt the kernel owns
+   * unconditionally, precisely so an application cannot defeat it: a wedged
+   * app never has to call anything for this to fire. The shim in header.s
+   * checks the flag and unwinds to app_return the moment we set it. */
+  if (SNOS_EXEC_RUN) {
+    if ((pad_held() & (PAD_START | PAD_SELECT)) == (PAD_START | PAD_SELECT)) {
+      if (++kill_held >= SNOS_KILL_FRAMES) {
+        SNOS_EXEC_CODE = SNOS_EXIT_KILLED;
+        SNOS_EXEC_FLAG = 1;
+      }
+    } else {
+      kill_held = 0;
+    }
+  } else {
+    kill_held = 0;
+  }
 }
 
 /* ----------------------------------------------------------- COP dispatch */
@@ -77,9 +87,14 @@ uint16_t snos_cop_c(uint16_t sp) {
 
   switch (sig) {
   case SYS_EXIT:
-    /* M3 restores the kernel's saved stack pointer here and returns to the
-     * shell. With no apps yet there is nothing to return to. */
-    return 0;
+    /* Only arm the unwind if an app is actually running. A stray COP #0 from
+     * kernel code would otherwise jump to app_return with a stale saved stack
+     * pointer and take the machine down. */
+    if (SNOS_EXEC_RUN) {
+      SNOS_EXEC_CODE = a;
+      SNOS_EXEC_FLAG = 1;
+    }
+    return a;
 
   case SYS_VERSION:
     return SNOS_ABI_VERSION;
@@ -126,6 +141,9 @@ uint16_t snos_cop_c(uint16_t sp) {
   case SYS_PUTHEX:
     kcon_puthex16(a);
     return 0;
+
+  case SYS_PAD:
+    return pad_held();
 
   case SYS_FRAMES:
     return snos_frames;

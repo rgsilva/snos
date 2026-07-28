@@ -16,19 +16,9 @@
 
 #include <stdint.h>
 
-/* Auto-joypad read layout ($4218/$4219 as one 16-bit word). */
-#define PAD_B 0x8000u
-#define PAD_Y 0x4000u
-#define PAD_SELECT 0x2000u
-#define PAD_START 0x1000u
-#define PAD_UP 0x0800u
-#define PAD_DOWN 0x0400u
-#define PAD_LEFT 0x0200u
-#define PAD_RIGHT 0x0100u
-#define PAD_A 0x0080u
-#define PAD_X 0x0040u
-#define PAD_L 0x0020u
-#define PAD_R 0x0010u
+/* Button bits (the auto-joypad read layout) live in snos_abi.h, because apps
+ * need them too via SYS_PAD. */
+#include "snos_abi.h"
 
 void pad_latch(void); /* called from the NMI handler, once per frame */
 uint16_t pad_held(void);

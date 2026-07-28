@@ -19,9 +19,9 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | Milestone | State |
 |---|---|
 | M0 — Scaffold, build system, boot banner | ✅ |
-| M1 — Console + input abstraction | |
-| M2 — Syscall ABI (COP) + shell | |
-| M3 — Apps: exec + return | |
+| M1 — Console + input abstraction | ✅ |
+| M2 — Syscall ABI (COP) + shell | ✅ |
+| M3 — Apps: exec + return | ✅ |
 | M4 — Filesystem (ROMFS + SRAMFS) | |
 | M5 — BASIC | |
 | M6 — Network stack (uIP) | |

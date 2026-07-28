@@ -52,6 +52,8 @@
 #define SYS_READLINE 0x14 /* p0/p1 = buffer, A = size -> length */
 #define SYS_PUTU 0x15     /* A = value, unsigned decimal */
 #define SYS_PUTHEX 0x16   /* A = value, 4 hex digits */
+/* $20-$2F  input */
+#define SYS_PAD 0x20 /* -> held-button bitmask (PAD_* below) */
 /* $50-$5F  time */
 #define SYS_FRAMES 0x50   /* -> free-running 60 Hz frame counter */
 #define SYS_WAITVBL 0x51
@@ -98,6 +100,38 @@ uint16_t sys_putu(uint16_t v);
 uint16_t sys_puthex(uint16_t v);
 uint16_t sys_frames(void);
 uint16_t sys_waitvbl(void);
+uint16_t sys_pad(void);
 uint16_t sys_trace_raw(void);
+
+/* Button bits as returned by SYS_PAD (the auto-joypad read layout). */
+#define PAD_B 0x8000u
+#define PAD_Y 0x4000u
+#define PAD_SELECT 0x2000u
+#define PAD_START 0x1000u
+#define PAD_UP 0x0800u
+#define PAD_DOWN 0x0400u
+#define PAD_LEFT 0x0200u
+#define PAD_RIGHT 0x0100u
+#define PAD_A 0x0080u
+#define PAD_X 0x0040u
+#define PAD_L 0x0020u
+#define PAD_R 0x0010u
+
+/* Pointer arguments: stash a 24-bit pointer in the parameter block. */
+static void snos_set_ptr(const char *s) {
+  uint32_t p = (uint32_t)s;
+  SNOS_ARGS.p0 = (uint16_t)p;
+  SNOS_ARGS.p1 = (uint16_t)(p >> 16);
+}
+
+static uint16_t sys_puts(const char *s) {
+  snos_set_ptr(s);
+  return sys_puts_raw();
+}
+
+static uint16_t sys_trace(const char *s) {
+  snos_set_ptr(s);
+  return sys_trace_raw();
+}
 
 #endif

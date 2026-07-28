@@ -23,7 +23,7 @@
               .public sys_exit, sys_version, sys_yield
               .public sys_putc, sys_puts_raw, sys_getc, sys_cls
               .public sys_readline_raw, sys_putu, sys_puthex
-              .public sys_frames, sys_waitvbl, sys_trace_raw
+              .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
 
 sys_exit:       cop     #0x00
                 rtl
@@ -46,6 +46,9 @@ sys_readline_raw:
 sys_putu:       cop     #0x15
                 rtl
 sys_puthex:     cop     #0x16
+                rtl
+
+sys_pad:        cop     #0x20
                 rtl
 
 sys_frames:     cop     #0x50

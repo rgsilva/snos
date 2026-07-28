@@ -62,6 +62,23 @@ void snos_brk_c(uint16_t sp);
 /* shell.c */
 void shell_run(void);
 
+/* ---- exec state (kernel/exec.s) ----
+ * Fixed addresses inside the block linker.scm reserves at $1A00-$1A3F.
+ * $1A00-$1A0F is the syscall parameter block (ABI); from $1A10 up is
+ * kernel-private. Reached through the $7E mirror so they work from any bank. */
+#define SNOS_EXEC_KSP (*(volatile __far uint16_t *)0x7E1A10ul)
+#define SNOS_EXEC_FLAG (*(volatile __far uint16_t *)0x7E1A12ul)
+#define SNOS_EXEC_CODE (*(volatile __far uint16_t *)0x7E1A14ul)
+#define SNOS_EXEC_RUN (*(volatile __far uint16_t *)0x7E1A16ul)
+
+/* Exit code reported when the kill switch terminates an app. */
+#define SNOS_EXIT_KILLED 0xFFFFu
+/* How long START+SELECT must be held. Long enough not to fire on a chord an
+ * app uses deliberately, short enough to feel like an escape hatch. */
+#define SNOS_KILL_FRAMES 45
+
+uint16_t app_exec(void); /* exec.s; args in SNOS_ARGS.p2/p3 */
+
 extern volatile uint16_t snos_frames; /* incremented by the NMI handler */
 
 #endif
