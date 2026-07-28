@@ -92,7 +92,6 @@ emu.addEventCallback(function()
   -- The keyboard is read from its own tilemap.
   local panel = L.panel_text_plain()
   print("--- keyboard panel ---"); print(panel)
-  r.check(panel:find("keyboard", 1, true) ~= nil, "panel frame/title missing")
   r.check(panel:find("1 2 3 4 5 6 7 8 9 0", 1, true) ~= nil, "number row missing")
   r.check(panel:find("q w e r t y u i o p", 1, true) ~= nil, "key rows missing")
   r.check(panel:find("A type key", 1, true) ~= nil, "controller mapping missing")

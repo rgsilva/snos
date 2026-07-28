@@ -49,6 +49,21 @@ static uint8_t top, row, col, vofs_dirty;
  * keyboard panel, so text never scrolls underneath it. */
 static uint8_t text_rows = ROWS;
 
+/* Publish the scroll state to the test mailbox ($7EF00C). A test that wants to
+ * assert "screen row 24 is blank" has to map screen rows to tilemap rows, and
+ * only the console knows the scroll offset. Without this the harness can say
+ * what text exists but not where it is — which is exactly the distinction the
+ * keyboard-overlap bugs turned on. */
+#define CON_STATE (*(volatile __far uint16_t *)0x7EF00Cul)
+
+static void con_publish(void) {
+    CON_STATE = (uint16_t)(top | ((uint16_t)text_rows << 8));
+}
+
+/* Where the caret was last drawn, as a RING row so it survives scrolling. */
+static int caret_ring = -1;
+static uint8_t caret_col;
+
 /* Box-drawing glyphs, dropped into the unused control-code slots $01-$06 so the
  * panel can draw a real frame with the console's own font. (Public domain, from
  * Daniel Hepper's font8x8, U+2500 block — the same source as font8x8_basic.) */
@@ -226,6 +241,7 @@ void con_flush(void) {
         for (cell = 0; cell < 32; cell++)
             rowbuf1[cell] = (uint16_t)((shadow[found][cell * 2 + 1] << 1) | 0x2000);
     }
+    con_publish();
     while (R8(0x4212) & 0x80) ;
     while (!(R8(0x4212) & 0x80)) ;                    /* into vblank */
     if (vofs_dirty) { set_vofs(); vofs_dirty = 0; }
@@ -371,11 +387,61 @@ void hdma_refresh(void) {
     hdma_v2[4] = (uint8_t)tv; hdma_v2[5] = (uint8_t)(tv >> 8);
 }
 
+/* Resize the scrolling text area, reconciling the rows that move in or out of
+ * view. Both directions need work, and neither is optional:
+ *
+ * Shrinking (the keyboard opens): just clamping the cursor would leave the
+ * lines below it stranded behind the panel, and the cursor would land on top of
+ * existing text. Instead the whole view scrolls up by the difference, so the
+ * cursor line ends up on the last visible row and nothing is lost — the text
+ * moves up out of the keyboard's way, which is what it looks like it should do.
+ *
+ * Growing (the keyboard closes): the rows coming back into view still hold
+ * whatever the ring left there — text from many screens ago, never cleared
+ * because it was never visible. Revealing it puts ancient output at the bottom
+ * of the screen, so those rows are blanked first. */
 void con_set_text_rows(int n) {
+    int i, j;
     if (n < 1) n = 1;
     if (n > ROWS) n = ROWS;
+
+    if (n < text_rows) {
+        if (row >= n) {
+            uint8_t shift = (uint8_t)(row - (n - 1));
+            top = (uint8_t)((top + shift) % RING);
+            row = (uint8_t)(n - 1);
+            vofs_dirty = 1;
+        }
+    } else if (n > text_rows) {
+        for (i = text_rows; i < n; i++) {
+            uint8_t r = (uint8_t)((top + i) % RING);
+            for (j = 0; j < COLS; j++) shadow[r][j] = ' ';
+            dirty[r] = 1;
+        }
+    }
     text_rows = (uint8_t)n;
-    if (row >= text_rows) row = (uint8_t)(text_rows - 1);
+    con_publish();
+}
+
+/* The caret belongs to the console, not to the line editor.
+ *
+ * The editor used to draw it with con_putat() and erase it at the cursor's
+ * CURRENT position — but showing or hiding the keyboard scrolls the view
+ * between those two moments, so the erase missed and left a stray block behind.
+ * Remembering the ring row makes the erase land where the caret actually is, no
+ * matter what the view did in between. */
+void con_caret(int on) {
+    if (caret_ring >= 0) {
+        shadow[caret_ring][caret_col] = ' ';
+        dirty[caret_ring] = 1;
+        caret_ring = -1;
+    }
+    if (on) {
+        caret_ring = (top + row) % RING;
+        caret_col = col;
+        shadow[caret_ring][caret_col] = 0x80 | ' ';
+        dirty[caret_ring] = 1;
+    }
 }
 
 void con_split_enable(int panel_top_row) {

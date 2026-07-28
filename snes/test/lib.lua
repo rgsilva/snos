@@ -68,6 +68,29 @@ function M.screen_row(ring_row)
   return (table.concat(out):gsub("%s+$", ""))
 end
 
+-- Console scroll state, published by con_publish(): low byte = ring offset of
+-- screen row 0, high byte = how many rows the text area currently occupies.
+function M.con_state()
+  local v = M.u16(M.MB + 0x00C)
+  return v & 0xFF, (v >> 8) & 0xFF
+end
+
+-- A row as it actually APPEARS on screen, resolving the scroll ring. The plain
+-- screen_row() above indexes the tilemap directly, which says what exists but
+-- not where it is.
+function M.display_row(r)
+  local top = M.con_state()
+  return M.screen_row((top + r) % M.RING_ROWS)
+end
+
+function M.display_text(from_row, to_row)
+  local out = {}
+  for r = from_row, to_row do out[#out + 1] = M.display_row(r) end
+  return (table.concat(out, "\n"):gsub("[\128-\255]", function(c)
+    return string.char(c:byte() & 0x7F)
+  end))
+end
+
 function M.screen_text(nrows)
   local out = {}
   for r = 0, (nrows or M.RING_ROWS) - 1 do out[#out + 1] = M.screen_row(r) end

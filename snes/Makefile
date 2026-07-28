@@ -34,7 +34,7 @@ KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps test test-boot test-input test-shell test-apps test-fs test-basic clean
+.PHONY: all kernel apps test test-boot test-input test-shell test-apps test-fs test-basic test-panel clean
 all: kernel
 kernel: $(BUILD)/snos.sfc
 
@@ -97,7 +97,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-boot test-input test-shell test-apps test-fs test-basic
+test: test-boot test-input test-shell test-apps test-fs test-basic test-panel
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
@@ -120,6 +120,9 @@ test-fs: $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
 test-basic: $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
 	rm -f "$(MESEN_SRM)"
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
+
+test-panel: $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
+	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
 
 clean:
 	rm -rf $(BUILD)

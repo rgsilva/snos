@@ -33,6 +33,7 @@ void con_clear(void);
  * split, so text scrolls underneath it and it never moves. Box-drawing glyphs
  * are available as characters $01-$06 (h, v, and the four corners). */
 void con_set_text_rows(int n);
+void con_caret(int on);
 void con_split_enable(int panel_top_row);
 void con_split_disable(void);
 void con_panel_row(int screen_row, const uint8_t *chars);

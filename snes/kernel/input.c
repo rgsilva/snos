@@ -131,7 +131,6 @@ static void build_row(uint8_t *b, int prow) {
     for (i = 1; i < 63; i++) b[i] = CON_BOX_H;
     b[0] = CON_BOX_TL;
     b[63] = CON_BOX_TR;
-    put(b, 2, " keyboard ");
     return;
   }
   if (prow == PANEL_ROWS - 1) {
@@ -282,11 +281,10 @@ int kbd_getchar(void) {
 
 /* ------------------------------------------------------------ line editor */
 
-static void caret(int on) {
-  int r, c;
-  con_getpos(&r, &c);
-  con_putat(r, c, on ? (0x80 | ' ') : ' ');
-}
+/* The console owns the caret: showing or hiding the keyboard scrolls the view
+ * between drawing it and erasing it, and only the console knows where it
+ * actually ended up. */
+static void caret(int on) { con_caret(on); }
 
 int kbd_readline(char *buf, int max) {
   int n = 0;
