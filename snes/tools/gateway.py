@@ -25,6 +25,7 @@ WHAT LIVES HERE, AND WHY
     Worth keeping that way.
 """
 import gzip
+import io
 import os
 import struct
 import sys
@@ -42,7 +43,7 @@ SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 F_DATA = 0x01
 CH_CTRL, CH_PAD = 0, 0xFF
 
-C2S_FETCH, C2S_CLOSE = 0x01, 0x02
+C2S_FETCH, C2S_CLOSE, C2S_IMAGE = 0x01, 0x02, 0x03
 S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
 
 USER_AGENT = "SNOS/0.1 (Super Nintendo; via gateway)"
@@ -51,6 +52,88 @@ MAX_BODY = 512 * 1024
 
 def checksum(f):
     return sum(b for i, b in enumerate(f) if i != SUM) & 0xFF
+
+
+SCREEN_W, SCREEN_H = 256, 224
+IMG_MAGIC = b"SIMG"
+
+
+def to_img(data):
+    """Decode any image and render it as SNES Mode 3 tile data.
+
+    Everything expensive happens here rather than on the console, which is the
+    same division of labour that makes TLS possible: a 65816 cannot decode a
+    JPEG, scale it, or quantise a palette in any reasonable time, and all three
+    are a few lines with Pillow.
+
+    Two details matter more than they look:
+
+    Aspect ratio is preserved by fitting INSIDE 256x224 — never stretched, never
+    cropped. A portrait source therefore pillarboxes.
+
+    Colour is reduced to the SNES's 15-bit BGR555 space BEFORE quantising to
+    256, not after. Picking 256 colours in 24-bit and truncating afterwards
+    moves every palette entry by up to seven levels and visibly muddies a photo.
+    """
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(data))
+    if im.mode in ("RGBA", "LA", "P"):
+        # Composite onto black rather than letting Pillow drop the alpha, which
+        # would leave transparent pixels as whatever happened to be underneath.
+        bg = Image.new("RGB", im.size, (0, 0, 0))
+        im = im.convert("RGBA")
+        bg.paste(im, mask=im.split()[-1])
+        im = bg
+    else:
+        im = im.convert("RGB")
+
+    sw, sh = im.size
+    scale = min(SCREEN_W / sw, SCREEN_H / sh)
+    w, h = max(1, round(sw * scale)), max(1, round(sh * scale))
+    im = im.resize((w, h), Image.LANCZOS)
+
+    px = im.load()
+    for y in range(h):
+        for x in range(w):
+            r, g, b = px[x, y]
+            px[x, y] = (r & 0xF8, g & 0xF8, b & 0xF8)
+
+    q = im.quantize(colors=256, method=Image.MEDIANCUT, dither=Image.FLOYDSTEINBERG)
+
+    # Pad to whole tiles and centre on TILE boundaries, so the console builds a
+    # trivial tilemap and never has to transpose anything.
+    tw, th = (w + 7) // 8, (h + 7) // 8
+    canvas = Image.new("P", (tw * 8, th * 8), 0)
+    canvas.putpalette(q.getpalette())
+    canvas.paste(q, ((tw * 8 - w) // 2, (th * 8 - h) // 2))
+
+    pal = list(q.getpalette()[:768])
+    pal += [0] * (768 - len(pal))
+
+    out = bytearray(IMG_MAGIC)
+    out += struct.pack("<HBBHHI", 1, 3, 0, tw, th, 0)
+    for i in range(256):
+        r, g, b = pal[i * 3], pal[i * 3 + 1], pal[i * 3 + 2]
+        out += struct.pack("<H", ((b >> 3) << 10) | ((g >> 3) << 5) | (r >> 3))
+
+    src = canvas.load()
+    for ty in range(th):
+        for tx in range(tw):
+            # 8bpp is PLANE-GROUP major: bytes 0-15 are planes 0 and 1
+            # interleaved across all eight rows, 16-31 are planes 2/3, and so
+            # on. Row-major packing assembles perfectly and renders as
+            # horizontal smear, which is a miserable thing to debug on hardware.
+            for plane in range(0, 8, 2):
+                for row in range(8):
+                    lo = hi = 0
+                    for bit in range(8):
+                        v = src[tx * 8 + bit, ty * 8 + row]
+                        lo = (lo << 1) | ((v >> plane) & 1)
+                        hi = (hi << 1) | ((v >> (plane + 1)) & 1)
+                    out.append(lo)
+                    out.append(hi)
+    return bytes(out)
 
 
 class Gateway:
@@ -75,7 +158,7 @@ class Gateway:
         self.push(CH_CTRL, bytes([typ, len(payload)]) + payload)
 
     # ------------------------------------------------------------- fetching
-    def fetch(self, ch, url):
+    def fetch(self, ch, url, as_image=False):
         """Runs on its own thread: a blocking fetch must not stall the link, or
         the SNES times out waiting for a status it was always going to get."""
         if "://" not in url:
@@ -101,6 +184,18 @@ class Gateway:
             self.push_ctrl(S2C_ERR, bytes([ch, 1]))
             return
 
+        if as_image and status == 200:
+            try:
+                before = len(body)
+                body = to_img(body)
+                print(f"  converted {before} -> {len(body)} bytes of Mode 3 tiles")
+            except Exception as e:
+                # A 200 that will not decode is a distinct failure from a 404,
+                # and the console can do nothing useful with the raw bytes.
+                print(f"  image conversion failed: {e}")
+                self.push_ctrl(S2C_ERR, bytes([ch, 2]))
+                return
+
         print(f"  -> {status}, {len(body)} bytes")
         self.push_ctrl(S2C_OPEN, struct.pack("<BH", ch, status))
         # Chunked so one huge stream cannot monopolise the frame builder.
@@ -124,11 +219,13 @@ class Gateway:
                 self.dispatch()
 
     def dispatch(self):
-        if self.ctype == C2S_FETCH and len(self.cbuf) >= 1:
+        if self.ctype in (C2S_FETCH, C2S_IMAGE) and len(self.cbuf) >= 1:
             ch = self.cbuf[0]
             url = self.cbuf[1:].decode("ascii", "replace")
-            print(f"FETCH ch{ch} {url}")
-            threading.Thread(target=self.fetch, args=(ch, url), daemon=True).start()
+            want_img = self.ctype == C2S_IMAGE
+            print(f"{'IMAGE' if want_img else 'FETCH'} ch{ch} {url}")
+            threading.Thread(target=self.fetch, args=(ch, url, want_img),
+                             daemon=True).start()
         elif self.ctype == C2S_CLOSE and len(self.cbuf) >= 1:
             print(f"CLOSE ch{self.cbuf[0]}")
 

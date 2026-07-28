@@ -27,6 +27,8 @@
               .public sys_open, sys_getc_f, sys_putc_f, sys_close
               .public sys_fsize, sys_dir, sys_unlink
               .public sys_net_up, sys_net_fetch_raw, sys_net_read_raw
+              .public sys_net_image_raw, sys_gfx, sys_read_f_raw
+              .public sys_read_vram
               .public sys_net_state, sys_net_close
               .public sys_puts_at_raw, sys_screen, sys_pollkey, sys_osk
 
@@ -97,6 +99,15 @@ sys_net_read_raw:
 sys_net_state:  cop     #0x63
                 rtl
 sys_net_close:  cop     #0x64
+                rtl
+sys_net_image_raw:
+                cop     #0x65
+                rtl
+sys_gfx:        cop     #0x19
+                rtl
+sys_read_f_raw: cop     #0x37
+                rtl
+sys_read_vram:  cop     #0x38
                 rtl
 
 sys_trace_raw:  cop     #0x70

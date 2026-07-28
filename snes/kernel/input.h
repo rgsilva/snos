@@ -36,6 +36,7 @@ int kbd_readline(char *buf, int max);
 /* On-screen keyboard. Visible by default — on a stock SNES it is the only way
  * to type, so hiding it by default would leave a new user stuck. */
 void osk_show(void);
+void osk_lock(int on); /* while an app owns the PPU, SELECT must not un-hide */
 void osk_hide(void);
 int osk_visible(void);
 void osk_redraw(void);   /* repaint one dirty panel row, if any */

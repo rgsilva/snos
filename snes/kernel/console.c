@@ -53,6 +53,11 @@ static uint8_t text_rows = ROWS;
  * which DMA channels are still its own. */
 static uint8_t split_on;
 
+/* Set while an application owns the PPU (SYS_GFX). con_flush becomes a no-op:
+ * a full-screen image needs all of VRAM, so anything the console wrote would
+ * both corrupt the picture and be corrupted by it. */
+static uint8_t gfx_owned;
+
 /* Publish the scroll state to the test mailbox ($7EF00C). A test that wants to
  * assert "screen row 24 is blank" has to map screen rows to tilemap rows, and
  * only the console knows the scroll offset. Without this the harness can say
@@ -228,6 +233,7 @@ static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nword
  * fast DMAs inside it. */
 void con_flush(void) {
     uint8_t rows[FLUSH_MAX];
+    if (gfx_owned) return;
     const uint8_t *chan;
     int budget, n = 0, i, cell;
     uint8_t r;
@@ -496,6 +502,20 @@ void con_split_disable(void) {
  * during active display, where VRAM writes are ignored. The symptom is not a
  * crash or a glitch: the screen simply stops updating while the mailbox shows
  * everything working perfectly. */
+/* Hand VRAM to an application, or take it back and rebuild.
+ *
+ * Releasing re-runs con_init(), which reuploads the font and both tilemaps and
+ * clears the shadow. Scrollback is lost, which is the honest outcome: the image
+ * genuinely overwrote those bytes. */
+void con_gfx(int acquire) {
+    if (acquire) {
+        gfx_owned = 1;
+        return;
+    }
+    gfx_owned = 0;
+    con_init();
+}
+
 int con_dirty_pending(void) {
     int i;
     if (vofs_dirty) return 1;

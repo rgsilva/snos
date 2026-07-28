@@ -79,6 +79,7 @@ static void cmd_help(void) {
   kcon_puts("rm NAME   delete a file\n");
   kcon_puts("net       gateway status\n");
   kcon_puts("download URL [NAME]   save a URL to a file\n");
+  kcon_puts("image URL [NAME]      save a picture, converted for viewing\n");
   kcon_puts("debug     diagnostics (debug with no argument lists them)\n");
 }
 
@@ -529,6 +530,22 @@ static void cmd_get(const char *url) {
  * emits uppercase and BASIC's SAVE writes uppercase. Matching is
  * case-insensitive so this is cosmetic, but a directory listing that mixes the
  * two looks like a bug. */
+/* Replace (or add) the extension. An .IMG is not the resource that was
+ * requested — it is a Mode 3 rendition of it — so saving a converted photo as
+ * PHOTO.JPG would be a lie the viewer then has to detect by sniffing. */
+static void force_ext(char *name, const char *ext) {
+  int i = 0, dot = -1;
+  while (name[i]) {
+    if (name[i] == '.') dot = i;
+    i++;
+  }
+  if (dot >= 0) i = dot;
+  if (i > FS_NAME_LEN - 4) i = FS_NAME_LEN - 4;
+  name[i++] = '.';
+  while (*ext) name[i++] = *ext++;
+  name[i] = 0;
+}
+
 static void name_from_url(const char *url, char *out) {
   const char *p = url, *seg = url;
   int i = 0;
@@ -563,7 +580,7 @@ static void name_from_url(const char *url, char *out) {
   }
 }
 
-static void cmd_download(char *rest) {
+static void download_to_volume(char *rest, int want_image) {
   char nm[FS_NAME_LEN + 1];
   char *given;
   int ch, st;
@@ -573,7 +590,8 @@ static void cmd_download(char *rest) {
 
   given = split_word(rest);
   if (*rest == 0) {
-    kcon_puts("usage: download URL [NAME]\n");
+    kcon_puts(want_image ? "usage: image URL [NAME]\n"
+                         : "usage: download URL [NAME]\n");
     return;
   }
   if (!net_up()) {
@@ -593,6 +611,7 @@ static void cmd_download(char *rest) {
   } else {
     name_from_url(rest, nm);
   }
+  if (want_image) force_ext(nm, "IMG");
 
   /* Refuse before starting rather than after filling the volume. */
   budget = fs_free();
@@ -601,13 +620,16 @@ static void cmd_download(char *rest) {
     return;
   }
 
-  ch = net_fetch(rest);
+  ch = want_image ? net_image(rest) : net_fetch(rest);
   if (ch < 0) {
     kcon_puts("fetch failed: no free channel\n");
     return;
   }
 
-  deadline = (uint16_t)(snos_frames + 600u);
+  /* Conversion happens before the gateway answers, so an image needs a longer
+   * grace period than a plain fetch: decoding and quantising a large JPEG is
+   * seconds of work on the far side. */
+  deadline = (uint16_t)(snos_frames + (want_image ? 1800u : 600u));
   while (net_state(ch) == NET_ST_OPENING) {
     if ((int16_t)(snos_frames - deadline) >= 0) {
       kcon_puts("timeout waiting for the gateway\n");
@@ -711,6 +733,9 @@ static void cmd_download(char *rest) {
   net_close(ch);
 }
 
+static void cmd_download(char *rest) { download_to_volume(rest, 0); }
+static void cmd_image(char *rest) { download_to_volume(rest, 1); }
+
 /* ---------------------------------------------------------------- shell */
 
 /* Diagnostics live behind `debug` rather than cluttering the root namespace.
@@ -768,6 +793,7 @@ void shell_run(void) {
     else if (streq(line, "net")) cmd_net();
     else if (streq(line, "debug")) cmd_debug(rest);
     else if (streq(line, "download")) cmd_download(rest);
+    else if (streq(line, "image")) cmd_image(rest);
     else {
       kcon_puts("unknown command: ");
       kcon_puts(line);

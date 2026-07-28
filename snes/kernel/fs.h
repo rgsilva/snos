@@ -66,4 +66,8 @@ uint32_t fs_open_size(void);
 
 int fs_delete(const char *name);
 
+/* Stream the open file straight into VRAM by DMA, bypassing C entirely.
+ * The caller sets the VRAM address and forces blank; this only moves bytes. */
+uint16_t fs_read_vram(uint16_t count);
+
 #endif

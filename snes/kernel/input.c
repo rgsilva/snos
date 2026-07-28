@@ -106,6 +106,12 @@ static int osk_shift;
 static int sel_row = 1, sel_col;
 static uint16_t repeat_at;
 
+/* Set while an application owns the PPU. SELECT must not be able to bring the
+ * keyboard back then: showing it re-enables the HDMA split, which rewrites the
+ * BG tilemap-base and scroll registers every scanline and tears a Mode 3
+ * picture apart underneath an app that has no idea it happened. */
+static int osk_locked;
+
 static int keyrow_len(int r) {
   const char *s = osk_shift ? KEYS_HI[r] : KEYS_LO[r];
   int n = 0;
@@ -159,6 +165,8 @@ static void build_row(uint8_t *b, int prow) {
     put(b, HINT_COL, HINTS[krow]);
   }
 }
+
+void osk_lock(int on) { osk_locked = on; }
 
 void osk_show(void) {
   osk_on = 1;
@@ -224,6 +232,7 @@ int osk_poll(void) {
   if (!p) return -1;
 
   if (p & PAD_SELECT) {
+    if (osk_locked) return -1;
     if (osk_on) osk_hide();
     else osk_show();
     return -1;

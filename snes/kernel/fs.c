@@ -2,6 +2,8 @@
 #include "sram.h"
 #include "farmem.h"
 
+#define R8(a) (*(volatile uint8_t *)(a))
+
 static fs_entry_t files[FS_MAX];
 static int nfiles;
 
@@ -264,4 +266,71 @@ int fs_delete(const char *name) {
     }
   }
   return -1;
+}
+
+
+/* ---- straight from storage into VRAM ------------------------------------
+ *
+ * Cartridge SRAM sits on the A-bus and VRAM is reachable through the B-bus at
+ * $2118, so image data never has to travel through WRAM or through C at all.
+ * The per-byte path (fs_getc) measures around 30 KB/s, which is 1.4 seconds for
+ * a 43 KB picture; DMA moves the same bytes in a few frames.
+ *
+ * The caller must have the screen in forced blank and must have set the VRAM
+ * address and $2115 already — this only supplies the bytes.
+ *
+ * Each DMA is clipped to the end of its 8 KB SRAM window (or its ROM bank),
+ * because the DMA controller increments the A-bus address WITHOUT carrying into
+ * the bank: a transfer that ran past $7FFF would wrap to $6000 of the same
+ * window and quietly repeat 8 KB of the picture.
+ */
+static void dma_block(uint16_t bank, uint16_t addr, uint16_t bytes) {
+  R8(0x4300) = 0x01; /* A->B, two registers ($2118/$2119) */
+  R8(0x4301) = 0x18;
+  R8(0x4302) = (uint8_t)addr;
+  R8(0x4303) = (uint8_t)(addr >> 8);
+  R8(0x4304) = (uint8_t)bank;
+  R8(0x4305) = (uint8_t)bytes;
+  R8(0x4306) = (uint8_t)(bytes >> 8);
+  R8(0x420B) = 0x01;
+}
+
+uint16_t fs_read_vram(uint16_t count) {
+  const fs_entry_t *e;
+  uint32_t remain, pos;
+  uint16_t moved = 0;
+
+  if (open_idx < 0 || open_write) return 0;
+  e = &files[open_idx];
+  pos = open_pos;
+  if (pos >= e->size) return 0;
+  remain = e->size - pos;
+  if ((uint32_t)count < remain) remain = count;
+
+  while (remain) {
+    uint16_t bank, addr, chunk;
+    uint32_t space;
+
+    if (e->ro) {
+      uint32_t phys = ROMFS_ADDR + e->off + pos;
+      bank = (uint16_t)(phys >> 16);
+      addr = (uint16_t)phys;
+      space = 0x10000ul - (uint32_t)addr;
+    } else {
+      uint32_t off = e->off + pos;
+      bank = (uint16_t)(SRAM_BANK0 + (uint16_t)(off >> SRAM_WINDOW_BITS));
+      addr = (uint16_t)(0x6000u + ((uint16_t)off & (uint16_t)(SRAM_WINDOW_SIZE - 1)));
+      space = 0x8000ul - (uint32_t)addr;
+    }
+    if (space > remain) space = remain;
+    if (space > 0x2000ul) space = 0x2000ul;
+    chunk = (uint16_t)space;
+
+    dma_block(bank, addr, chunk);
+    pos += chunk;
+    remain -= chunk;
+    moved = (uint16_t)(moved + chunk);
+  }
+  open_pos = pos;
+  return moved;
 }

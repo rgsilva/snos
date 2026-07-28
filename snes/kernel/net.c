@@ -47,6 +47,12 @@
  * already puts the bytes back in order. */
 #define C2S_FETCH 0x01 /* [len][ch][url...]  channel chosen by the SNES */
 #define C2S_CLOSE 0x02 /* [1][ch] */
+/* Same shape as FETCH, and the reply is identical: the stream simply contains
+ * converted Mode 3 tile data instead of the resource's own bytes. A separate
+ * command rather than a flag on FETCH because it is ADDITIVE — FETCH's wire
+ * format and its tests are untouched — and because a 200 that will not decode
+ * as an image is a genuinely different failure from a 404. */
+#define C2S_IMAGE 0x03 /* [len][ch][url...] */
 #define S2C_OPEN 0x81  /* [3][ch][status_lo][status_hi] */
 #define S2C_EOF 0x82   /* [1][ch] */
 #define S2C_ERR 0x83   /* [2][ch][code] */
@@ -191,7 +197,7 @@ static void txq_put(uint8_t b) {
   txq_head = (uint16_t)((txq_head + 1) & (TXQ_SIZE - 1));
 }
 
-int net_fetch(const char *url) {
+static int net_open(const char *url, uint8_t cmd) {
   int ch, n = 0, i;
   if (!net_up()) return -1;
   for (ch = 1; ch < NET_CHANNELS; ch++)
@@ -204,7 +210,7 @@ int net_fetch(const char *url) {
   /* The SNES picks the channel rather than asking for one. It costs nothing and
    * it means net_fetch can return a usable handle immediately instead of the
    * caller having to wait a round trip to find out what it got. */
-  txq_put(C2S_FETCH);
+  txq_put(cmd);
   txq_put((uint8_t)(n + 1));
   txq_put((uint8_t)ch);
   for (i = 0; i < n; i++) txq_put((uint8_t)url[i]);
@@ -215,6 +221,9 @@ int net_fetch(const char *url) {
   ch_state[ch] = NET_ST_OPENING;
   return ch;
 }
+
+int net_fetch(const char *url) { return net_open(url, C2S_FETCH); }
+int net_image(const char *url) { return net_open(url, C2S_IMAGE); }
 
 void net_close(int ch) {
   if (ch < 1 || ch >= NET_CHANNELS) return;

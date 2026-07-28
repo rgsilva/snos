@@ -22,7 +22,7 @@ local F_DATA = 0x01
 local CH_CTRL, CH_PAD = 0, 0xFF
 local WRAM = emu.memType.snesWorkRam
 
-local C2S_FETCH, C2S_CLOSE = 0x01, 0x02
+local C2S_FETCH, C2S_CLOSE, C2S_IMAGE = 0x01, 0x02, 0x03
 local S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
 
 local function rb(o) return emu.read(MB + o, WRAM) end
@@ -48,7 +48,8 @@ local gw = {
   drop_snes = 0,      -- ignore this many incoming frames (simulates loss)
   drop_out = 0,       -- discard this many outgoing frames (loss toward the SNES)
   corrupt_out = 0,    -- send this many frames with a broken checksum
-  fetches = {},       -- urls seen, for assertions
+  fetches = {},
+  images = {},       -- urls seen, for assertions
 }
 
 -- Canned responses. The gateway has already done DNS, TLS, redirects, chunked
@@ -60,6 +61,25 @@ local BODY_OK = table.concat({
   "The SNES saw plain bytes and a status code, and nothing else.",
 }, "\n") .. "\n"
 local BODY_404 = "not found\n"
+
+-- A canned .IMG: two tiles by two, with a palette and tile bytes chosen so a
+-- wrong offset or a transposed copy cannot accidentally look right.
+--   palette entry i = i          -> CGRAM byte 2i is i, 2i+1 is 0
+--   tile byte j     = (j*7) & FF -> VRAM byte j is predictable
+local IMG_TW, IMG_TH = 2, 2
+local BODY_IMG
+do
+  local t = { "SIMG",
+              string.char(1, 0),          -- version
+              string.char(3),             -- BG mode
+              string.char(0),             -- flags
+              string.char(IMG_TW, 0),
+              string.char(IMG_TH, 0),
+              string.char(0, 0, 0, 0) }   -- reserved
+  for i = 0, 255 do t[#t + 1] = string.char(i, 0) end
+  for j = 0, IMG_TW * IMG_TH * 64 - 1 do t[#t + 1] = string.char((j * 7) & 0xFF) end
+  BODY_IMG = table.concat(t)
+end
 
 -- Big enough that a download of it is still in flight several seconds later,
 -- which is what makes the abort path testable at all. At ~1.7 KB/s this is a
@@ -107,6 +127,18 @@ local function ctrl_byte(b)
       local url = ""
       for i = 2, #c.buf do url = url .. string.char(c.buf[i]) end
       on_fetch(ch, url)
+    end
+    -- An image request is the same stream, opened differently: the gateway
+    -- converts and the console receives tile data it can hand straight to the
+    -- PPU. Nothing above the link knows the difference.
+    if c.typ == C2S_IMAGE and #c.buf >= 1 then
+      local ch = c.buf[1]
+      local url = ""
+      for i = 2, #c.buf do url = url .. string.char(c.buf[i]) end
+      gw.images[#gw.images + 1] = url
+      push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, 0))
+      push(ch, BODY_IMG)
+      push_ctrl(S2C_EOF, string.char(ch))
     end
     -- C2S_CLOSE: drop anything still queued for that channel. A real gateway
     -- closes the socket and stops reading; a canned one that keeps streaming an
@@ -272,6 +304,7 @@ end
 -- ------------------------------------------------------------------ test
 local frame, step, at = 0, 1, nil
 local claimed = false
+local img_cg, img_vr
 
 emu.addEventCallback(function()
   frame = frame + 1
@@ -348,6 +381,28 @@ emu.addEventCallback(function()
   -- "partial file kept" is a claim; check the volume actually has it.
   if step == 11 then L.feed("ls\n"); at = frame + 300; step = 12; return end
 
+  -- The image path: fetch a converted picture, store it, and display it. The
+  -- assertions below read CGRAM and VRAM directly, because whether a picture
+  -- actually reached the PPU is not something the console can be asked.
+  if step == 12 then
+    L.feed("image http://example.com/pic TINY\n")
+    at = frame + 1200
+    step = 13
+    return
+  end
+  if step == 13 then L.feed("run view TINY.IMG\n"); at = frame + 400; step = 14; return end
+  if step == 14 then
+    -- Sample while the picture is still on screen; the viewer holds until a key.
+    img_cg = {}
+    img_vr = {}
+    for i = 0, 15 do img_cg[i] = emu.read(i, emu.memType.snesCgRam) end
+    for i = 0, 15 do img_vr[i] = emu.read(i, emu.memType.snesVideoRam) end
+    L.feed(" ")                       -- any key leaves the viewer
+    at = frame + 400
+    step = 15
+    return
+  end
+
   local r = L.new_report("net")
   local text = L.ring_text()
   print("--- mailbox ---"); print(text); print("---------------")
@@ -405,6 +460,40 @@ emu.addEventCallback(function()
   r.check(wl >= 4,
           "the file downloaded across a window gap did not read back intact (" ..
           wl .. " copies of the body seen)")
+
+  -- ---------------------------------------------------------------- image
+  r.check(#gw.images >= 1, "gateway received no image request")
+  r.check(text:find("saved TINY.IMG", 1, true) ~= nil,
+          "the converted picture never reached the volume")
+
+  -- The palette must land in CGRAM verbatim: entry i was encoded as (i, 0).
+  if img_cg then
+    local pal_ok = true
+    for i = 0, 7 do
+      if img_cg[i * 2] ~= i or img_cg[i * 2 + 1] ~= 0 then pal_ok = false end
+    end
+    r.check(pal_ok, "palette did not reach CGRAM intact")
+  else
+    r.check(false, "never sampled CGRAM")
+  end
+
+  -- And the tile bytes must land in VRAM in file order. A transposed or
+  -- mis-offset copy renders as plausible-looking noise, which is exactly the
+  -- failure an on-screen check misses and this one does not.
+  if img_vr then
+    local vr_ok = true
+    for i = 0, 15 do
+      if img_vr[i] ~= ((i * 7) & 0xFF) then vr_ok = false end
+    end
+    r.check(vr_ok, "tile data did not reach VRAM in order")
+  else
+    r.check(false, "never sampled VRAM")
+  end
+
+  -- The console has to come back afterwards: the viewer destroyed the font and
+  -- both tilemaps to make room for the picture.
+  r.check(text:find("viewed TINY.IMG", 1, true) ~= nil,
+          "the viewer never returned to the shell")
 
   r.finish()
 end, emu.eventType.endFrame)

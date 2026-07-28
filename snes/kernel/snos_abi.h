@@ -50,7 +50,12 @@
 /* Version 4 added launch arguments, so `run edit motd.txt` can hand the file
  * name to the application. There was no mechanism at all before it: every app
  * started knowing nothing about why. */
-#define SNOS_ABI_VERSION 4
+/* Version 5 added what a graphics application needs: a block file read, and a
+ * way to take the PPU away from the console and give it back. Reading 43 KB of
+ * image through SYS_GETC_F would be 43000 traps; and Mode 3 tile data for a
+ * full screen is 57 KB of the 64 KB of VRAM, so the console's font and tilemaps
+ * cannot coexist with it and something has to arbitrate. */
+#define SNOS_ABI_VERSION 5
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -74,6 +79,18 @@
  * it drops from 28 to 22 when the on-screen keyboard appears, underneath a
  * running application, so anything drawing a full screen has to ask. */
 #define SYS_SCREEN 0x18
+/* ABI 5. Hand the PPU to the application, or give it back.
+ *
+ * A full-screen image needs essentially all of VRAM, so it necessarily destroys
+ * the console's font and tilemaps. While acquired, the kernel stops touching
+ * VRAM entirely (con_flush becomes a no-op) and the on-screen keyboard is
+ * hidden, which also disables the HDMA split that would otherwise rewrite the
+ * BG registers every frame and tear a Mode 3 display apart.
+ *
+ * Releasing rebuilds the console from scratch. Scrollback does not survive,
+ * which is honest: the pixels were genuinely overwritten.
+ * A = 1 acquire, 0 release. */
+#define SYS_GFX 0x19
 /* $20-$2F  input */
 #define SYS_PAD 0x20 /* -> held-button bitmask (PAD_* below) */
 /* ABI 2. Non-blocking counterpart to SYS_GETC: returns SYS_ERR when nothing is
@@ -93,6 +110,16 @@
 #define SYS_FSIZE 0x34  /* -> size of the open file (low 16 bits) */
 #define SYS_DIR 0x35    /* A = index, p0/p1 = 17-byte buffer -> 1 ok, 0 end */
 #define SYS_UNLINK 0x36 /* p0/p1 = name -> 0 or SYS_ERR */
+/* ABI 5. Block read into a far buffer -> bytes actually read, 0 at end of file.
+ * SYS_GETC_F is one trap per byte, which is fine for a BASIC program and
+ * absurd for a 43 KB image. */
+#define SYS_READ_F 0x37 /* p0/p1 = buffer, A = max -> count */
+/* ABI 5. Stream the open file straight into VRAM by DMA, never touching WRAM
+ * or C. Cartridge SRAM is on the A-bus and VRAM answers on the B-bus, so the
+ * bytes go directly; the per-byte path manages about 30 KB/s, which is 1.4
+ * seconds for a 43 KB picture against a few frames for this.
+ * The caller must have forced blank and set the VRAM address first. */
+#define SYS_READ_VRAM 0x38 /* A = byte count -> bytes moved */
 /* $50-$5F  time */
 #define SYS_FRAMES 0x50   /* -> free-running 60 Hz frame counter */
 #define SYS_WAITVBL 0x51
@@ -103,6 +130,9 @@
 #define SYS_NET_READ 0x62  /* p0/p1 = buffer, p2 = channel, A = max -> count */
 #define SYS_NET_STATE 0x63 /* A = channel -> NET_ST_*; p0 = HTTP status */
 #define SYS_NET_CLOSE 0x64 /* A = channel */
+/* ABI 5. Exactly SYS_NET_FETCH, except the gateway converts the resource to
+ * Mode 3 tile data first. Same stream, same states, same reads. */
+#define SYS_NET_IMAGE 0x65 /* p0/p1 = URL -> channel, or SYS_ERR */
 /* $70-$7F  debug */
 #define SYS_TRACE 0x70 /* p0/p1 = string -> the test mailbox */
 
@@ -177,6 +207,10 @@ uint16_t sys_net_fetch_raw(void); /* URL in the parameter block */
 uint16_t sys_net_read_raw(uint16_t max);
 uint16_t sys_net_state(uint16_t ch);
 uint16_t sys_net_close(uint16_t ch);
+uint16_t sys_net_image_raw(void);
+uint16_t sys_gfx(uint16_t on);
+uint16_t sys_read_f_raw(uint16_t max);
+uint16_t sys_read_vram(uint16_t count);
 
 /* Console character set, as far as an application is concerned.
  *
@@ -259,6 +293,16 @@ static uint16_t sys_trace(const char *s) {
 static uint16_t sys_net_fetch(const char *url) {
   snos_set_ptr(url);
   return sys_net_fetch_raw();
+}
+
+static uint16_t sys_net_image(const char *url) {
+  snos_set_ptr(url);
+  return sys_net_image_raw();
+}
+
+static uint16_t sys_read_f(void *buf, uint16_t max) {
+  snos_set_ptr((const char *)buf);
+  return sys_read_f_raw(max);
 }
 
 static uint16_t sys_net_read(uint16_t ch, void *buf, uint16_t max) {

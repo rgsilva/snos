@@ -281,6 +281,9 @@ uint16_t snos_cop_c(uint16_t sp) {
     return n;
   }
 
+  case SYS_READ_VRAM:
+    return fs_read_vram(a);
+
   case SYS_GFX:
     if (a) {
       /* Hiding the keyboard is not cosmetic: it disables the HDMA split, which
