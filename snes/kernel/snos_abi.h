@@ -192,16 +192,21 @@ uint16_t sys_net_close(uint16_t ch);
  * the editor, so `ESC [ A` would need a timeout to tell an arrow from a bare
  * ESC — and timeout-based key parsing is the sort of thing that passes every
  * test and feels wrong in the hand. Both ends of this link are ours, so
- * unambiguous single codes are simply better. DC1-DC4 are otherwise unused and
- * the line editor already discards everything below $20.
+ * unambiguous single codes are simply better.
+ *
+ * $1C-$1F (the separator codes) and NOT $11-$14. The DC1-DC4 range looks
+ * unused right up until you notice it is precisely ^Q ^R ^S ^T — and the editor
+ * already binds ^Q for Quit and ^S for Save, so arrow-up and Quit would have
+ * been the same byte. Nothing binds ^\ ^] ^^ ^_, and $1C-$1F is the range 8-bit
+ * machines traditionally used for cursor movement anyway.
  *
  * The on-screen keyboard emits these from the d-pad WHEN IT IS HIDDEN, so an
  * application cannot tell a controller from a host keyboard — which is the
  * entire point of the input abstraction. */
-#define SNOS_KEY_UP 0x11
-#define SNOS_KEY_DOWN 0x12
-#define SNOS_KEY_LEFT 0x13
-#define SNOS_KEY_RIGHT 0x14
+#define SNOS_KEY_UP 0x1C
+#define SNOS_KEY_DOWN 0x1D
+#define SNOS_KEY_LEFT 0x1E
+#define SNOS_KEY_RIGHT 0x1F
 
 #define SNOS_INVERSE 0x80u
 #define SNOS_BOX_H 1

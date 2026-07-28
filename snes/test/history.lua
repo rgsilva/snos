@@ -1,6 +1,6 @@
 -- Command history: arrow-up recalls, arrow-down walks forward.
 --
--- Arrows arrive as SNOS_KEY_UP..RIGHT ($11-$14), not ANSI escapes, so the test
+-- Arrows arrive as SNOS_KEY_UP..RIGHT ($1C-$1F), not ANSI escapes, so the test
 -- can feed them as plain bytes through the same mailbox ring a host keyboard
 -- uses. That is the point of choosing unambiguous codes.
 --
@@ -9,7 +9,7 @@
 -- out only the OUTPUT lines, which is what actually proves a command ran.
 local L = dofile("test/lib.lua")
 
-local UP, DOWN = "\17", "\18"
+local UP, DOWN = "\28", "\29"
 
 local SCRIPT = {
   { "echo alpha\n", 180 },

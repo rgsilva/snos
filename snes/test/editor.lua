@@ -18,6 +18,8 @@ local L = dofile("test/lib.lua")
 local CTRL_L = "\012"
 local CTRL_S = "\019"
 local CTRL_Q = "\017"
+local ESC = "\27"
+local DOWN = "\29"   -- SNOS_KEY_DOWN
 
 local SCRIPT = {
   { "run edit\n", 300 },
@@ -28,7 +30,12 @@ local SCRIPT = {
   { CTRL_L, 200 },          -- ...and close it again
   { CTRL_S, 200 },          -- Save: unnamed, so it prompts
   { "NOTE.TXT\n", 300 },    -- ...answered by the modal prompt's line editor
-  { CTRL_Q, 300 },          -- Quit: not dirty any more, so no confirmation
+  -- Quit via the MENU, driven entirely by keys: Escape opens it, six
+  -- arrow-downs walk from New to Quit, Enter confirms. This is the path a
+  -- host-keyboard user takes, and nothing about it involves a controller.
+  { ESC, 250 },
+  { DOWN .. DOWN .. DOWN .. DOWN .. DOWN .. DOWN, 250 },
+  { "\n", 300 },
   { "cat NOTE.TXT\n", 280 },
 
   -- Second pass: reopen the saved file, edit it, and check the unsaved-changes

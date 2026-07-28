@@ -137,10 +137,10 @@ static void draw_status(void) {
 
   /* Both ways in are advertised: the button for someone on a controller, the
    * control key for someone on the host keyboard bridge. */
-  put_run(19, "L/^L menu");
+  put_run(18, "Esc/^L menu");
 
   /* The d-pad is shared with the on-screen keyboard, so say which one has it. */
-  put_run(30, sys_osk(2) ? "type" : "move");
+  put_run(31, sys_osk(2) ? "type" : "move");
 
   c = put_run(36, "ln ");
   c = put_num(c, (uint16_t)(cur_line + 1));
@@ -578,7 +578,7 @@ static int pick_file(void) {
                                  * the console and the list never finishes */
     need = 0;
     pad_row(0);
-    put_at(1, "Open  -  A=open  B=cancel");
+    put_at(1, "Open  -  Enter=open  Esc=cancel");
     invert(0, (int)scr_cols);
     sys_puts_at(0, 0, rowbuf);
 
@@ -598,35 +598,45 @@ static int pick_file(void) {
 
 pick_input:
     sys_yield();
-    drain_keys();
-    e = pad_edges();
 
-    if (e & PAD_UP) {
-      if (pick_sel) {
-        pick_sel--;
-        need = 1;
+    /* Key-driven, like the menu: the kernel reports the d-pad as arrow codes
+     * while the keyboard is hidden, so a controller and a host keyboard arrive
+     * here identically. Reading pad edges as well would move the selection
+     * twice per press. */
+    {
+      int c;
+      while ((c = (int)sys_pollkey()) != (int)SYS_ERR) {
+        if (c == SNOS_KEY_UP) {
+          if (pick_sel) {
+            pick_sel--;
+            need = 1;
+          }
+          continue;
+        }
+        if (c == SNOS_KEY_DOWN) {
+          if (pick_sel + 1 < pick_count) {
+            pick_sel++;
+            need = 1;
+          }
+          continue;
+        }
+        if (c == '\n' || c == '\r') {
+          snos_set_ptr(pickname);
+          sys_dir(pick_sel);
+          if (was_osk) sys_osk(1);
+          if (file_load(pickname) != 0) {
+            setmsg("open failed");
+            return 0;
+          }
+          setmsg("opened");
+          return 1;
+        }
+        if (c == 0x1B || c == '\b') { /* Escape, or B on a controller */
+          if (was_osk) sys_osk(1);
+          setmsg("cancelled");
+          return 0;
+        }
       }
-    }
-    if (e & PAD_DOWN) {
-      if (pick_sel + 1 < pick_count) {
-        pick_sel++;
-        need = 1;
-      }
-    }
-    if (e & PAD_A) {
-      snos_set_ptr(pickname);
-      sys_dir(pick_sel);
-      if (was_osk) sys_osk(1);
-      if (file_load(pickname) != 0) {
-        setmsg("open failed");
-        return 0;
-      }
-      setmsg("opened");
-      return 1;
-    }
-    if (e & (PAD_B | PAD_L)) {
-      if (was_osk) sys_osk(1);
-      return 0;
     }
   }
   }
@@ -698,17 +708,23 @@ static int shortcut(int c) {
 
 static void run_menu(void) {
   int was_osk = (int)sys_osk(2);
+  int need = 1;
 
   /* The keyboard owns the d-pad while it is up, so it has to go away for the
    * menu to be navigable at all. */
   sys_osk(0);
   menu_sel = 0;
-  {
-  int need = 1;
 
+  /* Driven ENTIRELY by keys, including the d-pad.
+   *
+   * With the keyboard hidden the kernel reports the d-pad as SNOS_KEY_UP and
+   * friends, so a controller and a host keyboard deliver exactly the same
+   * codes here and there is nothing device-specific left to write. Reading pad
+   * edges as well — which this used to do — would now move the selection twice
+   * per press, once for the arrow code and once for the button. */
   for (;;) {
-    uint16_t e;
     int c;
+
     /* Redraw ONLY on change. Repainting every frame re-dirties all nine rows
      * while the console drains two per vblank, so the box never finishes
      * appearing — it showed three items and no bottom border, indefinitely. */
@@ -718,54 +734,48 @@ static void run_menu(void) {
     }
     sys_yield();
 
-    /* The menu answers the keyboard as well as the d-pad: ^L or Escape closes
-     * it, and any of the shortcuts printed beside the items just does the
-     * thing. Buttons alone would leave it unusable for anyone typing. */
     while ((c = (int)sys_pollkey()) != (int)SYS_ERR) {
-      if (c == 0x0C || c == 0x1B) {
+      if (c == 0x0C || c == 0x1B) { /* ^L or Escape closes */
         if (was_osk) sys_osk(1);
         return;
       }
+      if (c == SNOS_KEY_UP) {
+        menu_sel = (uint16_t)((menu_sel + MENU_ITEMS - 1) % MENU_ITEMS);
+        need = 1;
+        continue;
+      }
+      if (c == SNOS_KEY_DOWN) {
+        menu_sel = (uint16_t)((menu_sel + 1) % MENU_ITEMS);
+        need = 1;
+        continue;
+      }
+      if (c == '\n' || c == '\r') { /* Enter, or START on a controller */
+        switch (menu_sel) {
+        case 0: act_new(); break;
+        case 1: act_open(); break;
+        case 2: act_save(); break;
+        case 3: act_save_as(); break;
+        case 4: act_delete_line(); break;
+        case 5:
+          cur_line = 0;
+          cur_col = 0;
+          top_line = 0;
+          break;
+        case 6: act_quit(); break;
+        }
+        if (was_osk) sys_osk(1);
+        return;
+      }
+      /* The shortcuts printed beside each item work from inside the menu too,
+       * so there is never a reason to navigate to something you can name. */
       if (shortcut(c)) {
         if (was_osk) sys_osk(1);
         return;
       }
-      /* B and START still emit characters; anything else is swallowed so it
-       * cannot land in the document behind the menu. */
-    }
-
-    e = pad_edges();
-
-    if (e & PAD_UP) {
-      menu_sel = (uint16_t)((menu_sel + MENU_ITEMS - 1) % MENU_ITEMS);
-      need = 1;
-    }
-    if (e & PAD_DOWN) {
-      menu_sel = (uint16_t)((menu_sel + 1) % MENU_ITEMS);
-      need = 1;
-    }
-    if (e & (PAD_B | PAD_L)) break;
-
-    if (e & PAD_A) {
-      switch (menu_sel) {
-      case 0: act_new(); break;
-      case 1: act_open(); break;
-      case 2: act_save(); break;
-      case 3: act_save_as(); break;
-      case 4: act_delete_line(); break;
-      case 5:
-        cur_line = 0;
-        cur_col = 0;
-        top_line = 0;
-        break;
-      case 6: act_quit(); break;
-      }
-      break;
+      /* Anything else is swallowed, so a stray key cannot land in the document
+       * behind the menu. */
     }
   }
-  }
-
-  if (was_osk) sys_osk(1);
 }
 
 /* ------------------------------------------------------------------- main */
@@ -785,6 +795,25 @@ int main(void) {
   refresh_geometry();
   last_rows = scr_rows;
   setmsg("");
+
+  /* ABI 4 launch argument: `run edit motd.txt` opens that file straight away.
+   * A missing file is not an error worth refusing to start over — an empty
+   * buffer under that name is what you wanted anyway, and is how every other
+   * editor behaves. */
+  {
+    char arg[NAMEMAX + 2];
+    if (snos_getargs(arg, (uint16_t)sizeof arg) > 0) {
+      if (file_load(arg) == 0) {
+        setmsg("opened");
+      } else {
+        int i;
+        for (i = 0; arg[i] && i < NAMEMAX; i++) filename[i] = arg[i];
+        filename[i] = 0;
+        setmsg("new file");
+      }
+    }
+  }
+
   sys_trace("EDIT-RAN\n");
   draw_all();
 
@@ -816,39 +845,18 @@ int main(void) {
       if (quit_flag) break;
     }
 
-    /* The d-pad is only ours when the keyboard is not using it. */
-    if (!sys_osk(2)) {
-      if (e & PAD_UP) {
-        if (cur_line) cur_line--;
-        moved = 1;
-      }
-      if (e & PAD_DOWN) {
-        if (cur_line + 1 < nlines) cur_line++;
-        moved = 1;
-      }
-      if (e & PAD_LEFT) {
-        if (cur_col) cur_col--;
-        else if (cur_line) {
-          cur_line--;
-          cur_col = linelen[cur_line];
-        }
-        moved = 1;
-      }
-      if (e & PAD_RIGHT) {
-        if (cur_col < linelen[cur_line]) cur_col++;
-        else if (cur_line + 1 < nlines) {
-          cur_line++;
-          cur_col = 0;
-        }
-        moved = 1;
-      }
-      if (e & PAD_R) { /* page down, the one spare button */
-        uint16_t page = (uint16_t)(scr_rows - 2);
-        cur_line = (uint16_t)(cur_line + page);
-        if (cur_line >= nlines) cur_line = (uint16_t)(nlines - 1);
-        moved = 1;
-      }
-      if (moved && cur_col > linelen[cur_line]) cur_col = linelen[cur_line];
+    /* Cursor movement arrives as arrow KEYS, below, not as pad edges.
+     *
+     * The kernel reports the d-pad as SNOS_KEY_UP..RIGHT whenever the on-screen
+     * keyboard is hidden, so reading the buttons here as well would move the
+     * cursor twice for every press. One path, and a host keyboard and a
+     * controller are indistinguishable by the time they reach it. */
+    if (!sys_osk(2) && (e & PAD_R)) { /* page down, the one spare button */
+      uint16_t page = (uint16_t)(scr_rows - 2);
+      cur_line = (uint16_t)(cur_line + page);
+      if (cur_line >= nlines) cur_line = (uint16_t)(nlines - 1);
+      if (cur_col > linelen[cur_line]) cur_col = linelen[cur_line];
+      moved = 1;
     }
 
     while ((c = (int)sys_pollkey()) != (int)SYS_ERR) {
@@ -859,14 +867,33 @@ int main(void) {
         uint16_t before = cur_line;
         backspace();
         if (cur_line != before) redraw_all = 1;
-      } else if (c == 0x0C) { /* ^L, the keyboard twin of the L button */
+      } else if (c == 0x0C || c == 0x1B) { /* ^L or Escape; L on a controller */
         run_menu();
+        refresh_geometry();
+        last_rows = scr_rows;
         redraw_all = 1;
+      } else if (c == SNOS_KEY_UP) {
+        if (cur_line) cur_line--;
+      } else if (c == SNOS_KEY_DOWN) {
+        if (cur_line + 1 < nlines) cur_line++;
+      } else if (c == SNOS_KEY_LEFT) {
+        if (cur_col) cur_col--;
+        else if (cur_line) {
+          cur_line--;
+          cur_col = linelen[cur_line];
+        }
+      } else if (c == SNOS_KEY_RIGHT) {
+        if (cur_col < linelen[cur_line]) cur_col++;
+        else if (cur_line + 1 < nlines) {
+          cur_line++;
+          cur_col = 0;
+        }
       } else if (shortcut(c)) {
         redraw_all = 1;
       } else if (c >= 0x20 && c <= 0x7E) {
         insert_char((char)c);
       }
+      if (cur_col > linelen[cur_line]) cur_col = linelen[cur_line];
       moved = 1;
       if (quit_flag) break;
     }
