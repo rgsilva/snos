@@ -1,4 +1,4 @@
-﻿-- Type into SNOS with your computer's keyboard.
+-- Type into SNOS with your computer's keyboard.
 --
 -- WHY THIS WORKS AT ALL: the kernel's input layer (kernel/input.h) has always
 -- had interchangeable backends behind kbd_getchar(), and one of them is a byte

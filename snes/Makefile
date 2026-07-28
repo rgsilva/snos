@@ -51,7 +51,7 @@ KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager clean
+.PHONY: all kernel apps bridge test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager clean
 all: kernel
 kernel: $(BUILD)/snos.sfc
 
@@ -181,6 +181,13 @@ test-shadow: $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
+
+# One script for the Mesen Script Window that starts BOTH the host keyboard and
+# the gateway link, since the Script Window runs only one at a time.
+bridge: $(BUILD)/snosbridge.lua
+
+$(BUILD)/snosbridge.lua: tools/kbdbridge.lua tools/netbridge.lua tools/mkbridge.py | $(BUILD)
+	python3 tools/mkbridge.py $@ tools/kbdbridge.lua tools/netbridge.lua
 
 clean:
 	rm -rf $(BUILD)

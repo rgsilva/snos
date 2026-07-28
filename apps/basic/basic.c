@@ -19,7 +19,8 @@
  *
  * Language: line numbers, LET/PRINT/IF-THEN/GOTO/GOSUB/RETURN/FOR-NEXT/INPUT/
  * REM/END/CLS, 26 integer variables A-Z, one array @(), and the usual operators
- * with precedence. Immediate commands: RUN LIST NEW SAVE LOAD FILES HELP BYE.
+ * with precedence. Immediate commands: RUN LIST NEW SAVE LOAD FILES HELP,
+ * and BYE / EXIT / QUIT to leave.
  */
 #include "snos_abi.h"
 
@@ -766,9 +767,10 @@ static void cmd_files(void) {
 static void cmd_help(void) {
   outs("statements: PRINT LET IF/THEN GOTO GOSUB RETURN\n");
   outs("            FOR/TO/STEP NEXT INPUT REM CLS END\n");
-  outs("commands:   RUN LIST NEW SAVE LOAD FILES HELP BYE\n");
+  outs("commands:   RUN LIST NEW SAVE LOAD FILES HELP\n");
+  outs("            BYE / EXIT / QUIT all return to the shell\n");
   outs("vars A-Z, array @(0..63), ops + - * / %% and = <> < > <= >=\n");
-  outs("BYE returns to the shell; START+SELECT kills at any time\n");
+  outs("START+SELECT kills a stuck program at any time\n");
 }
 
 /* ---- the REPL ----------------------------------------------------------- */
@@ -776,7 +778,7 @@ static void cmd_help(void) {
 int main(void) {
   cmd_new();
   outs("SNOS BASIC\n");
-  outs("integer BASIC, type HELP or BYE\n\n");
+  outs("integer BASIC - HELP for commands, QUIT to leave\n\n");
 
   for (;;) {
     outs("] ");

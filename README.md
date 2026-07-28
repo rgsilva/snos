@@ -56,7 +56,9 @@ interchangeable backends behind `kbd_getchar()`, though, and one of them is a
 byte ring in the test mailbox — which is how the automated tests type.
 
 `snes/tools/kbdbridge.lua` puts your own keyboard on the other end of that same
-ring. Open `snos.sfc` in the Mesen **GUI**, then Debug → Script Window → load
+ring, and `make bridge` combines it with the gateway bridge into a single
+`build/snosbridge.lua` — the Script Window runs one script at a time, so loading
+the network bridge would otherwise unload the keyboard. Open `snos.sfc` in the Mesen **GUI**, then Debug → Script Window → load
 the script → Run, and type into the emulator window. It cannot work under
 `--testrunner`, which never initialises the input subsystem.
 

@@ -16,7 +16,7 @@ local SCRIPT = {
   { '40 PRINT "DONE"\n', 60 },
   { "RUN\n", 300 },
   { 'SAVE "PROG.BAS"\n', 240 },
-  { "BYE\n", 200 },          -- clean exit back to the shell
+  { "QUIT\n", 200 },         -- the name the banner advertises
   { "ls\n", 200 },           -- the saved file is really on the SRAM volume
   { "run basic\n", 240 },
   { 'LOAD "PROG.BAS"\n', 300 },
