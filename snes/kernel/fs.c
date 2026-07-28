@@ -129,11 +129,38 @@ const fs_entry_t *fs_get(int i) {
   return &files[i];
 }
 
-const fs_entry_t *fs_find(const char *name) {
-  int i;
-  for (i = 0; i < nfiles; i++)
-    if (name_eq(files[i].name, name)) return &files[i];
+/* Look a name up, preferring the SRAM copy.
+ *
+ * ROMFS is mounted first, so a plain first-match search always returned the ROM
+ * entry and a same-named SRAM file was unreachable — you could `download` over
+ * a stock file, watch it appear in `ls`, and still `cat` the original forever.
+ *
+ * The writable copy wins instead, which is what an overlay filesystem does and
+ * what someone editing a stock file means. The ROM original is not destroyed,
+ * it is shadowed: delete the SRAM copy and it comes back. `ls` marks the pair
+ * so this is visible rather than mysterious. */
+static int fs_index(const char *name) {
+  int i, rom = -1;
+  for (i = 0; i < nfiles; i++) {
+    if (!name_eq(files[i].name, name)) continue;
+    if (!files[i].ro) return i; /* writable copy shadows the ROM one */
+    if (rom < 0) rom = i;
+  }
+  return rom;
+}
+
+/* Is this entry hidden by a writable copy of the same name? */
+int fs_shadowed(int i) {
+  int j;
+  if (i < 0 || i >= nfiles || !files[i].ro) return 0;
+  for (j = 0; j < nfiles; j++)
+    if (!files[j].ro && name_eq(files[j].name, files[i].name)) return 1;
   return 0;
+}
+
+const fs_entry_t *fs_find(const char *name) {
+  int i = fs_index(name);
+  return i < 0 ? 0 : &files[i];
 }
 
 uint8_t fs_read_byte(const fs_entry_t *e, uint32_t off) {
@@ -152,16 +179,12 @@ uint32_t fs_free(void) {
 /* -------------------------------------------------------------- open file */
 
 int fs_open_read(const char *name) {
-  int i;
-  for (i = 0; i < nfiles; i++) {
-    if (name_eq(files[i].name, name)) {
-      open_idx = i;
-      open_write = 0;
-      open_pos = 0;
-      return 0;
-    }
-  }
-  return -1;
+  int i = fs_index(name);
+  if (i < 0) return -1;
+  open_idx = i;
+  open_write = 0;
+  open_pos = 0;
+  return 0;
 }
 
 /* Creating a file: take a directory slot, point it at the top of the bump
@@ -229,8 +252,11 @@ uint32_t fs_open_size(void) {
 
 int fs_delete(const char *name) {
   int i;
-  for (i = 0; i < nfiles; i++) {
-    if (name_eq(files[i].name, name)) {
+  /* fs_index prefers the writable copy, so deleting a shadowed name removes the
+   * SRAM one and reveals the ROM original again rather than failing. */
+  {
+    i = fs_index(name);
+    if (i >= 0) {
       if (files[i].ro) return -1; /* ROM is not negotiable */
       sram_wr(slot_addr(files[i].slot), 0);
       fs_init();

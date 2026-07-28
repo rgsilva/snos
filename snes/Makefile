@@ -51,7 +51,7 @@ KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps test test-boot test-input test-history test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager clean
+.PHONY: all kernel apps test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager clean
 all: kernel
 kernel: $(BUILD)/snos.sfc
 
@@ -126,7 +126,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-boot test-input test-history test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager
+test: test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-net test-pager
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(call check_env)
@@ -176,6 +176,11 @@ test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 	$(call check_env)
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/history.lua
+
+test-shadow: $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
+	$(call check_env)
+	rm -f "$(MESEN_SRM)"
+	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
 
 clean:
 	rm -rf $(BUILD)

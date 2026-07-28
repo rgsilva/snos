@@ -48,6 +48,10 @@ void fs_init(void);
 int fs_count(void);
 const fs_entry_t *fs_get(int i);
 const fs_entry_t *fs_find(const char *name);
+/* True if entry `i` is a ROM file hidden by a writable copy of the same name.
+ * Lookups prefer the SRAM copy, so `ls` needs to show which ROM entries are no
+ * longer what you would get. */
+int fs_shadowed(int i);
 uint8_t fs_read_byte(const fs_entry_t *e, uint32_t off);
 uint32_t fs_free(void);
 

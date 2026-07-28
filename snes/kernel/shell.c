@@ -252,7 +252,9 @@ static void cmd_ls(void) {
     while (f->name[k]) k++;
     while (k++ < 18) kcon_putc(' ');
     kcon_putu((uint16_t)f->size);
-    kcon_puts(f->ro ? "  rom\n" : "  sram\n");
+    if (!f->ro) kcon_puts("  sram\n");
+    else if (fs_shadowed(i)) kcon_puts("  rom (hidden)\n");
+    else kcon_puts("  rom\n");
   }
 }
 
