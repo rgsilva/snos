@@ -10,7 +10,8 @@
 ;;   $0C00-$18FF  3328 B   APP stack        <- deliberately NOT described below,
 ;;   $1900-$19FF   256 B   APP direct page  <- so the linker cannot squat on it
 ;;   $1A00-$1A3F    64 B   SYSCALL PARAMETER BLOCK (fixed, part of the ABI)
-;;   $1A40-$1AFF   192 B   (spare)
+;;   $1A40-$1ABF   128 B   LAUNCH ARGUMENT (fixed, part of the ABI)
+;;   $1AC0-$1AFF    64 B   (spare)
 ;;   $1B00-$1BFF   256 B   SYSCALL (COP/BRK) direct page  <- see below
 ;;   $1C00-$1CFF   256 B   NMI direct page                <- see below
 ;;   $1D00-$1FFF   768 B   kernel near data

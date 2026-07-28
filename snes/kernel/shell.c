@@ -183,12 +183,28 @@ static void cmd_apps(void) {
   }
 }
 
-static void cmd_run(const char *name) {
+/* Hand the rest of the command line to the application it launches.
+ *
+ * Always written, even when empty: an app given no argument must see an empty
+ * string rather than whatever the last one was launched with. */
+static void set_argv(const char *s) {
+  volatile __far char *dst = (volatile __far char *)SNOS_ARGV_ADDR;
+  uint16_t i = 0;
+  while (s && s[i] && i + 1 < SNOS_ARGV_MAX) {
+    dst[i] = s[i];
+    i++;
+  }
+  dst[i] = 0;
+}
+
+static void cmd_run(char *cmdline) {
   const app_entry_t *a;
   uint16_t rc;
+  char *name = cmdline;
+  const char *args = split_word(cmdline);
 
   if (*name == 0) {
-    kcon_puts("usage: run NAME\n");
+    kcon_puts("usage: run NAME [ARGS]\n");
     return;
   }
   a = app_find(name);
@@ -209,6 +225,7 @@ static void cmd_run(const char *name) {
     return;
   }
 
+  set_argv(args);
   rc = app_run(a);
 
   kcon_puts("[");

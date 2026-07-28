@@ -47,7 +47,10 @@
  * is a STREAM and nothing else: the gateway terminates TLS and speaks HTTP, so
  * FETCH and a future raw OPEN differ only in how the stream comes into being.
  * An application never sees an IP packet, a TLS record or a header block. */
-#define SNOS_ABI_VERSION 3
+/* Version 4 added launch arguments, so `run edit motd.txt` can hand the file
+ * name to the application. There was no mechanism at all before it: every app
+ * started knowing nothing about why. */
+#define SNOS_ABI_VERSION 4
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -117,6 +120,19 @@ typedef struct {
 } snos_args_t;
 
 #define SNOS_ARGS (*(volatile __far snos_args_t *)SNOS_ARGS_ADDR)
+
+/* ------------------------------------------------------ launch arguments */
+/* ABI 4. Whatever followed the application name on the shell's command line,
+ * NUL-terminated, at a fixed address in the same reserved bank-$00 block as the
+ * parameter block. Read directly rather than through a syscall, exactly as
+ * SNOS_ARGS is — the convention already exists and this burns no call number.
+ *
+ * The kernel CLEARS it on every launch. An app that is given no argument must
+ * see an empty string, not whatever the previous app was launched with; stale
+ * state read as fresh is the same class of bug as the un-zeroed BSS that made
+ * the editor exit instantly. */
+#define SNOS_ARGV_ADDR 0x7E1A40ul
+#define SNOS_ARGV_MAX 128
 
 /* Convenience for the common "pointer argument" case: a 24-bit pointer split
  * into offset and bank. */
@@ -244,6 +260,18 @@ static uint16_t sys_net_read(uint16_t ch, void *buf, uint16_t max) {
   snos_set_ptr((const char *)buf);
   SNOS_ARGS.p2 = ch;
   return sys_net_read_raw(max);
+}
+
+/* Copy the launch argument out to a local buffer. Returns its length. */
+static uint16_t snos_getargs(char *buf, uint16_t max) {
+  volatile __far char *src = (volatile __far char *)SNOS_ARGV_ADDR;
+  uint16_t i = 0;
+  while (i + 1 < max && src[i]) {
+    buf[i] = (char)src[i];
+    i++;
+  }
+  buf[i] = 0;
+  return i;
 }
 
 static uint16_t sys_puts_at(int row, int col, const char *s) {

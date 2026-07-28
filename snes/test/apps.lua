@@ -43,7 +43,9 @@ emu.addEventCallback(function()
 
   if step == 1 then send("apps\n", 180); step = 2; return end
   -- uppercase on purpose: the app is registered as "hello"
-  if step == 2 then send("run HELLO\n", 240); step = 3; return end
+  if step == 2 then send("run HELLO motd.txt\n", 240); step = 2.5; return end
+  -- launched again with NO argument, to prove the buffer is cleared between runs
+  if step == 2.5 then send("run hello\n", 240); step = 3; return end
   if step == 3 then
     send("run pad\n", 400)
     -- Let pad get going, then hold the kill chord.
@@ -73,6 +75,13 @@ emu.addEventCallback(function()
   r.check(text:find("hello from a SNOS app", 1, true) ~= nil,
           "hello did not run, or SYS_PUTS from an app bank is broken")
   r.check(text:find("HELLO-RAN", 1, true) ~= nil, "hello's SYS_TRACE never arrived")
+
+  -- ABI 4 launch arguments, and the half that is easy to get wrong: an app
+  -- given no argument must see an empty string, not the previous launch's.
+  r.check(text:find("args: [motd.txt]", 1, true) ~= nil,
+          "launch argument did not reach the application")
+  r.check(text:find("args: (none)", 1, true) ~= nil,
+          "argument buffer not cleared between launches - stale argv")
   r.check(text:find("[hello exited 42]", 1, true) ~= nil,
           "hello's exit code did not survive the return to the shell")
 
