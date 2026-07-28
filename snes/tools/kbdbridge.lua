@@ -70,6 +70,11 @@ local KEYS = {
   { "0", ")", "0", "D0", "Number0", "Digit0" },
 
   { " ", " ", "Space", "Spacebar", "Space Bar", "SpaceBar" },
+
+  -- Escape sends $1B. The editor accepts it as an alternative to Ctrl+L for
+  -- opening the menu, which matters because Ctrl combinations are exactly the
+  -- ones a host is most likely to have bound to something else.
+  { "\27", "\27", "Escape", "Esc" },
   { "\n", "\n", "Return", "Enter", "Keypad Enter", "KeypadEnter" },
 
   -- On a Mac the key labelled "delete" is what everyone else calls Backspace,
@@ -92,6 +97,13 @@ local KEYS = {
 
 -- Every plausible spelling, because a name that resolves is not necessarily the
 -- one the platform reports.
+local CTRL_NAMES = {
+  "Left Ctrl", "Right Ctrl", "LeftControl", "RightControl",
+  "Ctrl Left", "Ctrl Right", "LCtrl", "RCtrl", "Ctrl", "Control",
+}
+
+local CAPS_NAMES = { "Caps Lock", "CapsLock", "Caps" }
+
 local SHIFT_NAMES = {
   "Left Shift", "Right Shift", "LeftShift", "RightShift",
   "Shift Left", "Shift Right", "LShift", "RShift", "Shift",
@@ -144,13 +156,18 @@ local bound, missing = {}, {}
 for _, k in ipairs(KEYS) do
   local names = accepted(k, 3)
   if #names > 0 then
-    bound[#bound + 1] = { lower = k[1], upper = k[2], names = names, held = 0 }
+    bound[#bound + 1] = {
+      lower = k[1], upper = k[2], names = names, held = 0,
+      letter = k[1]:match("^%a$") ~= nil,
+    }
   else
     missing[#missing + 1] = string.format("%q", k[1])
   end
 end
 
 local shift_names = accepted(SHIFT_NAMES, 1)
+local ctrl_names = accepted(CTRL_NAMES, 1)
+local caps_names = accepted(CAPS_NAMES, 1)
 
 -- Everything this build accepts, so the naming scheme is visible.
 local vocabulary = {}
@@ -161,6 +178,8 @@ do
   end
   for _, k in ipairs(KEYS) do for i = 3, #k do add(k[i]) end end
   for _, n in ipairs(SHIFT_NAMES) do add(n) end
+  for _, n in ipairs(CTRL_NAMES) do add(n) end
+  for _, n in ipairs(CAPS_NAMES) do add(n) end
   for _, n in ipairs(EXTRA_VOCAB) do add(n) end
 end
 
@@ -169,6 +188,15 @@ if #shift_names > 0 then
   print("kbdbridge: shift = " .. table.concat(shift_names, ", "))
 else
   print("kbdbridge: NO shift key accepted - uppercase will not work")
+end
+if #ctrl_names > 0 then
+  print("kbdbridge: ctrl = " .. table.concat(ctrl_names, ", ") ..
+        "  (ctrl+letter sends a control code, e.g. ctrl+L = $0C)")
+else
+  print("kbdbridge: NO ctrl key accepted - use Escape for the editor menu")
+end
+if #caps_names > 0 then
+  print("kbdbridge: caps lock = " .. table.concat(caps_names, ", "))
 end
 if #missing > 0 then
   print("kbdbridge: no accepted name for -> " .. table.concat(missing, " "))
@@ -208,6 +236,7 @@ if LEARN then
 end
 
 local learn_last = ""
+local caps_toggle, caps_held, caps_is_level = false, 0, false
 
 emu.addEventCallback(function()
   if LEARN then
@@ -223,14 +252,42 @@ emu.addEventCallback(function()
     -- deliberately falls through: diagnosing a key should not stop you typing
   end
 
+  -- Caps Lock reports differently depending on the platform: some report a
+  -- momentary press, others hold the key down for as long as the light is on.
+  -- Rather than guess, learn which: if it is still down well after the press,
+  -- it is a level key and its state IS the caps state; otherwise each press
+  -- toggles.
+  local caps_now = any_down(caps_names)
+  if caps_now then
+    caps_held = caps_held + 1
+    if caps_held == 1 then caps_toggle = not caps_toggle end
+    if caps_held > 20 then caps_is_level = true end
+  else
+    caps_held = 0
+  end
+  local caps = caps_is_level and caps_now or caps_toggle
+
   local shifted = any_down(shift_names)
+  local ctrl = any_down(ctrl_names)
+
   for _, b in ipairs(bound) do
     if any_down(b.names) then
       -- Fire on the press, then auto-repeat: holding backspace to delete a
       -- word should not mean tapping it eight times.
       if b.held == 0 or
          (b.held >= REPEAT_DELAY and ((b.held - REPEAT_DELAY) % REPEAT_RATE) == 0) then
-        push(string.byte(shifted and b.upper or b.lower))
+        local ch
+        if ctrl and b.letter then
+          -- ctrl+letter -> control code. This is what makes the editor's ^L,
+          -- ^N, ^O, ^S, ^Q reachable from a host keyboard at all.
+          ch = string.byte(b.upper) & 0x1F
+        elseif b.letter then
+          -- Caps affects letters only, never digits or symbols.
+          ch = string.byte((shifted ~= caps) and b.upper or b.lower)
+        else
+          ch = string.byte(shifted and b.upper or b.lower)
+        end
+        push(ch)
       end
       b.held = b.held + 1
     else

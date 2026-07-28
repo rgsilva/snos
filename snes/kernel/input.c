@@ -97,9 +97,11 @@ static const char *const HINTS[KEY_ROWS] = {
 
 static uint8_t panel_buf[64];
 static uint8_t panel_dirty;
-static int osk_on = 1;      /* visible by default: on a stock SNES it is the
-                             * only way to type, so starting hidden would leave
-                             * a new user with no way in. */
+/* Starts CLOSED. It costs six rows of screen and most sessions drive SNOS from
+ * a host keyboard through the mailbox, so having it up by default taxes the
+ * common case to serve the rare one. SELECT brings it up, and the boot message
+ * says so. */
+static int osk_on;
 static int osk_shift;
 static int sel_row = 1, sel_col;
 static uint16_t repeat_at;
@@ -254,7 +256,6 @@ int osk_poll(void) {
 
 void kbd_init(void) {
   R8(0x4200) = 0x81; /* NMI + auto-joypad read */
-  osk_show();
 }
 
 int kbd_getchar_nonblock(void) {

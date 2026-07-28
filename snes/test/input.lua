@@ -21,11 +21,13 @@ local press_base = nil
 
 -- Each press is held several frames: the kernel samples the pad once per vblank
 -- through auto-joypad read, so a one-frame press can fall between samples.
+-- The keyboard starts closed now, so the first press has to summon it.
 local SCRIPT = {
-  { 0, "a" },      -- 'q'
-  { 12, "right" }, -- move to 'w'
-  { 24, "a" },     -- 'w'
-  { 40, "start" }, -- submit
+  { 0, "select" }, -- open the keyboard
+  { 20, "a" },     -- 'q'
+  { 32, "right" }, -- move to 'w'
+  { 44, "a" },     -- 'w'
+  { 60, "start" }, -- submit
 }
 local HOLD = 5
 

@@ -12,7 +12,7 @@
 local L = dofile("test/lib.lua")
 
 local PANEL_TOP = 22
-local frame, step, at = 0, 1, nil
+local frame, step, at = 0, 0.5, nil
 local sel_from, sel_to = nil, nil
 local after_close, after_open = nil, nil
 
@@ -35,6 +35,10 @@ emu.addEventCallback(function()
   end
   if at == nil then at = frame + 150 end
   if frame < at then return end
+
+  -- The keyboard starts closed, so open it before the "scroll with it open"
+  -- half of the test means anything.
+  if step == 0.5 then press_select(); at = frame + 200; step = 1; return end
 
   -- A: scroll hard with the keyboard open, then close it.
   if step == 1 then L.feed("help\n"); at = frame + 400; step = 2; return end

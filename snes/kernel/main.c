@@ -79,6 +79,7 @@ int main(void) {
    * on it. The SRAM figure is measured at this boot, not compiled in. */
   kcon_putu((uint16_t)(sram_size() >> 10));
   kcon_puts("K SRAM\n");
+  kcon_puts("SELECT opens the on-screen keyboard\n");
 
   shell_run(); /* never returns */
   return 0;
