@@ -103,9 +103,12 @@ emu.addEventCallback(function()
   -- The crucial one: after all that scrolling, the keyboard must not have
   -- leaked into the TEXT map. The old version scrolled with the console and
   -- destroyed whatever it drifted over.
+  -- Match on something ONLY the panel can produce. "keyboard" alone is not
+  -- specific enough any more: the boot message legitimately mentions it when
+  -- telling the user that SELECT opens one.
   local textmap = L.screen_text_plain(22)
-  r.check(textmap:find("keyboard", 1, true) == nil,
-          "keyboard has leaked into the scrolling text area")
+  r.check(textmap:find("q w e r t y", 1, true) == nil,
+          "keyboard key rows have leaked into the scrolling text area")
   r.check(textmap:find("A type key", 1, true) == nil,
           "keyboard hints have leaked into the scrolling text area")
 

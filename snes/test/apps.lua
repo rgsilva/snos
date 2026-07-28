@@ -83,7 +83,11 @@ emu.addEventCallback(function()
           "kill switch did not terminate pad - a wedged app would lock the machine")
 
   -- 5. the shell survived having an app killed out from under it
-  r.check(text:find("kernel ABI 2", 1, true) ~= nil,
+  -- Version-agnostic on purpose: this asserts the shell still RESPONDS after an
+  -- app was killed out from under it. Pinning the ABI number here means every
+  -- bump breaks a test that has nothing to do with the ABI, which has now
+  -- happened twice.
+  r.check(text:find("kernel ABI ", 1, true) ~= nil,
           "shell is not responding after the kill - the unwind corrupted it")
 
   r.finish()
