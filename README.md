@@ -24,6 +24,7 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M3 — Apps: exec + return | ✅ |
 | M4 — Filesystem (ROMFS + SRAMFS) | ✅ |
 | M5 — BASIC | ✅ |
+| EDIT — menu-driven text editor | ✅ |
 | M6 — Network stack (uIP) | |
 | M7 — Real hardware | |
 | M8 — IRC client | |

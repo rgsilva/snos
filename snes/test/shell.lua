@@ -53,7 +53,7 @@ emu.addEventCallback(function()
   r.check(text:find("v0.1", 1, true) ~= nil, "kernel banner missing")
 
   -- builtins
-  r.check(text:find("kernel ABI 1", 1, true) ~= nil, "ver did not report the ABI version")
+  r.check(text:find("kernel ABI 2", 1, true) ~= nil, "ver did not report the ABI version")
   r.check(text:find("bank $00", 1, true) ~= nil, "mem did not report the bank-$00 map")
   r.check(text:find("hello from the shell", 1, true) ~= nil, "echo did not echo")
   r.check(text:find("unknown command: bogus", 1, true) ~= nil,
@@ -61,7 +61,7 @@ emu.addEventCallback(function()
   r.check(text:find("run NAME", 1, true) ~= nil, "help did not list commands")
 
   -- syscheck: every one of these came back through a COP trap.
-  r.check(text:find("version=1 ok", 1, true) ~= nil,
+  r.check(text:find("version=2 ok", 1, true) ~= nil,
           "SYS_VERSION returned the wrong value - COP signature read-back is broken")
   r.check(text:find("putc=Z", 1, true) ~= nil, "SYS_PUTC did not print")
   r.check(text:find("puts=puts-ok", 1, true) ~= nil,

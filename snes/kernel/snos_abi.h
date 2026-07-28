@@ -37,7 +37,12 @@
 
 #include <stdint.h>
 
-#define SNOS_ABI_VERSION 1
+/* Version 2 added the four calls a FULL-SCREEN application needs. Until then
+ * the console was a stream device to an app — text in, scrolling out — with no
+ * way to address a position, discover the usable height, read input without
+ * blocking, or get the d-pad away from the on-screen keyboard. An editor is not
+ * merely awkward without those; it is impossible. */
+#define SNOS_ABI_VERSION 2
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -52,8 +57,26 @@
 #define SYS_READLINE 0x14 /* p0/p1 = buffer, A = size -> length */
 #define SYS_PUTU 0x15     /* A = value, unsigned decimal */
 #define SYS_PUTHEX 0x16   /* A = value, 4 hex digits */
+/* ABI 2. Writes a string at an absolute screen position, clipped to the row:
+ * it never moves the cursor and never scrolls. That last part is the point —
+ * SYS_PUTS landing on the last column of the last row scrolls the display,
+ * which quietly destroys any full-screen layout. */
+#define SYS_PUTS_AT 0x17 /* p0/p1 = string, A = (row << 8) | col */
+/* ABI 2. -> (usable text rows << 8) | columns. The usable height is NOT fixed:
+ * it drops from 28 to 22 when the on-screen keyboard appears, underneath a
+ * running application, so anything drawing a full screen has to ask. */
+#define SYS_SCREEN 0x18
 /* $20-$2F  input */
 #define SYS_PAD 0x20 /* -> held-button bitmask (PAD_* below) */
+/* ABI 2. Non-blocking counterpart to SYS_GETC: returns SYS_ERR when nothing is
+ * pending, so an app can poll the keyboard and the d-pad in one loop instead of
+ * blocking on one of them. */
+#define SYS_POLLKEY 0x21
+/* ABI 2. Show or hide the on-screen keyboard. An app needs this because the
+ * keyboard OWNS the d-pad while it is visible (that is how you move between
+ * keys), so a menu or a file picker cannot be navigated until it is out of the
+ * way. A = 0 hide, 1 show, anything else queries. -> 1 if visible. */
+#define SYS_OSK 0x22
 /* $30-$3F  files. One file open at a time — enough for SAVE and LOAD. */
 #define SYS_OPEN 0x30   /* p0/p1 = name, A = 0 read / 1 write -> 0 or SYS_ERR */
 #define SYS_GETC_F 0x31 /* -> byte, or SYS_ERR at end of file */
@@ -109,6 +132,10 @@ uint16_t sys_puthex(uint16_t v);
 uint16_t sys_frames(void);
 uint16_t sys_waitvbl(void);
 uint16_t sys_pad(void);
+uint16_t sys_puts_at_raw(uint16_t rowcol); /* ABI 2 */
+uint16_t sys_screen(void);
+uint16_t sys_pollkey(void);
+uint16_t sys_osk(uint16_t mode);
 uint16_t sys_open(uint16_t mode);
 uint16_t sys_getc_f(void);
 uint16_t sys_putc_f(uint16_t c);
@@ -117,6 +144,22 @@ uint16_t sys_fsize(void);
 uint16_t sys_dir(uint16_t index);
 uint16_t sys_unlink(void);
 uint16_t sys_trace_raw(void);
+
+/* Console character set, as far as an application is concerned.
+ *
+ * $80-$FF are the inverse-video twins of $00-$7F — Mode 5 spends both its BG
+ * layers on text columns, so there is no spare layer to highlight with and
+ * inverting the glyph is how selection is shown.
+ *
+ * $01-$06 are box-drawing glyphs, which is what makes a framed menu possible
+ * without an application shipping its own font. */
+#define SNOS_INVERSE 0x80u
+#define SNOS_BOX_H 1
+#define SNOS_BOX_V 2
+#define SNOS_BOX_TL 3
+#define SNOS_BOX_TR 4
+#define SNOS_BOX_BL 5
+#define SNOS_BOX_BR 6
 
 /* Button bits as returned by SYS_PAD (the auto-joypad read layout). */
 #define PAD_B 0x8000u
@@ -147,6 +190,11 @@ static uint16_t sys_puts(const char *s) {
 static uint16_t sys_trace(const char *s) {
   snos_set_ptr(s);
   return sys_trace_raw();
+}
+
+static uint16_t sys_puts_at(int row, int col, const char *s) {
+  snos_set_ptr(s);
+  return sys_puts_at_raw((uint16_t)(((uint16_t)row << 8) | (uint8_t)col));
 }
 
 #endif

@@ -26,6 +26,7 @@
               .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
               .public sys_open, sys_getc_f, sys_putc_f, sys_close
               .public sys_fsize, sys_dir, sys_unlink
+              .public sys_puts_at_raw, sys_screen, sys_pollkey, sys_osk
 
 sys_exit:       cop     #0x00
                 rtl
@@ -50,7 +51,17 @@ sys_putu:       cop     #0x15
 sys_puthex:     cop     #0x16
                 rtl
 
+sys_puts_at_raw:
+                cop     #0x17
+                rtl
+sys_screen:     cop     #0x18
+                rtl
+
 sys_pad:        cop     #0x20
+                rtl
+sys_pollkey:    cop     #0x21
+                rtl
+sys_osk:        cop     #0x22
                 rtl
 
 sys_open:       cop     #0x30

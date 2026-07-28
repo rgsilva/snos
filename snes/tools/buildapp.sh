@@ -6,12 +6,13 @@
 # kernel/syscall.s, which it links its own copy of so its syscall path is
 # byte-identical to the kernel's.
 #
-# Usage: buildapp.sh <name> <bankhex> <caldir> <builddir>
+# Usage: buildapp.sh <name> <bankhex> <caldir> <builddir> [min-kernel-abi]
 set -e
 NAME=$1
 BANK=$2
 CALDIR=$3
 BUILD=$4
+MINABI=${5:-1}
 
 OUT="$BUILD/apps/$NAME"
 SRC="../apps/$NAME"
@@ -22,7 +23,7 @@ CFLAGS="--core=65816 --target=snes $MODEL --no-ppu-mul -O0 -Ikernel"
 AFLAGS="--core=65816 --target=SNES $MODEL"
 
 sed "s/@BANK@/$BANK/g" ../apps/app.scm.in > "$OUT/app.scm"
-python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s"
+python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s" "$MINABI"
 
 "$CALDIR/bin/as65816" -o "$OUT/appinfo.o" "$OUT/appinfo.s" $AFLAGS
 "$CALDIR/bin/as65816" -o "$OUT/crt0.o"    ../apps/crt0.s    $AFLAGS

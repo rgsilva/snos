@@ -8,7 +8,7 @@ app is purely a build-time act.
 
 Layout must match APPHDR_* in snes/kernel/app.h.
 
-Usage: mkappinfo.py <name> <banks> <out.s>
+Usage: mkappinfo.py <name> <banks> <out.s> [min-kernel-abi]
 """
 import os
 import sys
@@ -18,6 +18,7 @@ NAME_LEN = 16
 
 def main(argv):
     name, banks, out_path = argv[0], int(argv[1]), argv[2]
+    minabi = int(argv[3]) if len(argv) > 3 else 1
     if len(name) > NAME_LEN:
         raise SystemExit(f"app name {name!r} exceeds {NAME_LEN} characters")
     padded = name.ljust(NAME_LEN, "\0")
@@ -30,7 +31,7 @@ def main(argv):
         "        .extern app_start",
         '        .ascii  "SNOS"           ; magic',
         "        .word   1                ; app ABI version",
-        "        .word   1                ; minimum kernel ABI required",
+        f"        .word   {minabi}                ; minimum kernel ABI required",
         "        .word   0x0020           ; entry offset: the trampoline below",
         "        .byte   0                ; type: 0 = native 65816",
         f"        .byte   {banks}                ; banks occupied",

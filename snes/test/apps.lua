@@ -83,7 +83,7 @@ emu.addEventCallback(function()
           "kill switch did not terminate pad - a wedged app would lock the machine")
 
   -- 5. the shell survived having an app killed out from under it
-  r.check(text:find("kernel ABI 1", 1, true) ~= nil,
+  r.check(text:find("kernel ABI 2", 1, true) ~= nil,
           "shell is not responding after the kill - the unwind corrupted it")
 
   r.finish()

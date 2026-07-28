@@ -143,6 +143,38 @@ uint16_t snos_cop_c(uint16_t sp) {
     kcon_puthex16(a);
     return 0;
 
+  /* ---- ABI 2: what a full-screen application needs ---- */
+
+  /* Absolute positioning, clipped to the row. Deliberately goes through
+   * con_putat rather than the cursor: it cannot scroll, and a full-screen
+   * layout that can be scrolled out from under itself is not a layout. */
+  case SYS_PUTS_AT: {
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int r = (int)(a >> 8), c = (int)(a & 0xFFu);
+    uint8_t ch;
+    while (c < con_cols() && (ch = far_rd(bank, off)) != 0) {
+      con_putat(r, c, ch);
+      c++;
+      off++;
+    }
+    return 0;
+  }
+
+  case SYS_SCREEN:
+    return (uint16_t)(((uint16_t)con_text_rows() << 8) | (uint8_t)con_cols());
+
+  case SYS_POLLKEY: {
+    int c = kbd_getchar_nonblock();
+    return c < 0 ? SYS_ERR : (uint16_t)c;
+  }
+
+  /* The keyboard owns the d-pad while it is up, so an app that wants to
+   * navigate a menu has to be able to put it away. */
+  case SYS_OSK:
+    if (a == 0) osk_hide();
+    else if (a == 1) osk_show();
+    return (uint16_t)(osk_visible() ? 1 : 0);
+
   case SYS_PAD:
     return pad_held();
 

@@ -80,6 +80,8 @@ static void cmd_help(void) {
   kcon_puts("rm NAME   delete a file\n");
   kcon_puts("sram      cartridge SRAM usage\n");
   kcon_puts("fstest    verify SRAM addressing\n");
+  kcon_puts("\nrun edit  full-screen text editor\n");
+  kcon_puts("run basic integer BASIC\n");
 }
 
 static void cmd_ver(void) {

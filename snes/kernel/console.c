@@ -280,6 +280,7 @@ void con_flush(void) {
  */
 
 int con_rows(void) { return ROWS; }
+int con_text_rows(void) { return text_rows; }
 int con_cols(void) { return COLS; }
 void con_getpos(int *r, int *c) { *r = row; *c = col; }
 

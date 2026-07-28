@@ -13,9 +13,11 @@
 #define SNOS_VERSION_MINOR 1
 #define SNOS_VERSION_STR "0.1"
 
-/* Kernel ABI version. Apps declare the minimum they need in their header;
- * the kernel refuses to exec an app that wants a newer ABI than it provides. */
-#define SNOS_ABI_VERSION 1
+/* The ABI version lives in snos_abi.h, which is the header applications share.
+ * It used to be defined here as well, and two definitions of the one number
+ * that says what the kernel can do is exactly as good an idea as it sounds:
+ * whichever header was included last won, so the kernel could report an ABI it
+ * did not have and refuse to run an application over it. */
 
 /* ---- bank $00 RAM map (PLAN.md §2) — the 8 KB that caps everything ---- */
 #define SNOS_KDP_BASE 0x0000u  /* kernel direct page          256 B */
