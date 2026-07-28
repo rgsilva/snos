@@ -56,9 +56,17 @@ const app_entry_t *app_get(int i) {
   return &apps[i];
 }
 
+/* Case-insensitive, deliberately. Filenames on this system are conventionally
+ * uppercase (that is what the ROM packer emits and what BASIC's SAVE writes),
+ * but typing uppercase on a SNES means holding shift on an on-screen keyboard
+ * for every character. Making the user's case match the disk's is not a
+ * meaningful thing to ask of them. */
 static int name_eq(const char *a, const char *b) {
   while (*a && *b) {
-    if (*a != *b) return 0;
+    char ca = *a, cb = *b;
+    if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 32);
+    if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 32);
+    if (ca != cb) return 0;
     a++;
     b++;
   }

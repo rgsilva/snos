@@ -31,7 +31,8 @@ emu.addEventCallback(function()
 
   if step == 1 then send("fstest\n", 900); step = 2; return end
   if step == 2 then send("ls\n", 220); step = 2.5; return end
-  if step == 2.5 then send("cat MOTD.TXT\n", 220); step = 3; return end
+  -- lowercase on purpose: the file is MOTD.TXT
+  if step == 2.5 then send("cat motd.txt\n", 220); step = 3; return end
   if step == 3 then send("write NOTES.TXT persisted ok\n", 260); step = 4; return end
   if step == 4 then send("cat NOTES.TXT\n", 220); step = 5; return end
   if step == 5 then

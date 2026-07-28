@@ -42,7 +42,8 @@ emu.addEventCallback(function()
   if frame < at then return end
 
   if step == 1 then send("apps\n", 180); step = 2; return end
-  if step == 2 then send("run hello\n", 240); step = 3; return end
+  -- uppercase on purpose: the app is registered as "hello"
+  if step == 2 then send("run HELLO\n", 240); step = 3; return end
   if step == 3 then
     send("run pad\n", 400)
     -- Let pad get going, then hold the kill chord.
