@@ -551,20 +551,12 @@ static void name_from_url(const char *url, char *out) {
   }
 }
 
-/* One updating line, via carriage return. Padded because a shorter number must
- * not leave the tail of a longer one behind. */
-static void dl_progress(uint32_t got) {
-  kcon_putc('\r');
-  kcon_putu32(got);
-  kcon_puts(" bytes   ");
-}
-
 static void cmd_download(char *rest) {
   char nm[FS_NAME_LEN + 1];
   char *given;
   int ch, st;
-  uint32_t got = 0, budget;
-  uint16_t deadline, next_tick;
+  uint32_t got = 0, budget, dots = 0;
+  uint16_t deadline;
   int aborted = 0, full = 0;
 
   given = split_word(rest);
@@ -641,7 +633,6 @@ static void cmd_download(char *rest) {
   kcon_puts(nm);
   kcon_putc('\n');
 
-  next_tick = snos_frames;
   for (;;) {
     int n, i;
 
@@ -674,11 +665,17 @@ static void cmd_download(char *rest) {
       if (full) break;
       got += (uint32_t)n;
       budget -= (uint32_t)n;
-      /* Four times a second: often enough to look alive, rare enough that
-       * redrawing the line does not compete with the transfer for vblanks. */
-      if ((int16_t)(snos_frames - next_tick) >= 0) {
-        dl_progress(got);
-        next_tick = (uint16_t)(snos_frames + 15u);
+      /* One dot per kilobyte, accumulating across the line.
+       *
+       * Not a byte count repainted in place: that costs a vblank every time it
+       * is redrawn, and the link is skipped on any frame the console is still
+       * dirty, so a livelier readout directly slows the transfer it is
+       * reporting. A dot is one character, and a wrapping wall of them still
+       * says "moving, and roughly how far". */
+      while (dots < (got >> 10)) {
+        kcon_putc('.');
+        dots++;
+        con_flush();
       }
       continue;
     }
@@ -687,7 +684,6 @@ static void cmd_download(char *rest) {
     kbd_idle();
   }
 
-  dl_progress(got);
   kcon_putc('\n');
   fs_close();
 
