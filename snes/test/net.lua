@@ -328,15 +328,15 @@ emu.addEventCallback(function()
   if frame < at then return end
 
   if step == 1 then L.feed("net\n"); at = frame + 150; step = 2; return end
-  if step == 2 then L.feed("debug get http://example.com/ok\n"); at = frame + 900; step = 3; return end
-  if step == 3 then L.feed("debug get http://example.com/missing\n"); at = frame + 600; step = 4; return end
+  if step == 2 then L.feed("get http://example.com/ok -\n"); at = frame + 900; step = 3; return end
+  if step == 3 then L.feed("get http://example.com/missing -\n"); at = frame + 600; step = 4; return end
   if step == 4 then
     -- Now the paths a real cable cannot be asked to exercise: lose two frames
     -- from the SNES, and hand it two frames with broken checksums. Both must
     -- recover invisibly and the body must arrive byte-perfect.
     gw.drop_snes = 2
     gw.corrupt_out = 2
-    L.feed("debug get http://example.com/faults\n")
+    L.feed("get http://example.com/faults -\n")
     at = frame + 1200
     step = 5
     return
@@ -344,7 +344,7 @@ emu.addEventCallback(function()
 
   -- The same stream, written to the SRAM volume instead of the screen.
   if step == 5 then
-    L.feed("download http://example.com/ok DLTEST.TXT\n")
+    L.feed("get http://example.com/ok DLTEST.TXT\n")
     at = frame + 1200
     step = 6
     return
@@ -357,7 +357,7 @@ emu.addEventCallback(function()
   -- applications, and a shell command is not one, so without a working abort a
   -- wrong URL means power-cycling the machine.
   if step == 7 then
-    L.feed("download http://example.com/big BIG.TXT\n")
+    L.feed("get http://example.com/big BIG.TXT\n")
     -- Interrupt while it is genuinely still running. At roughly 1.4 KB/s this
     -- lands about a kilobyte into a ten-kilobyte body; the first version aborted
     -- after the transfer had already finished and proved nothing.
@@ -372,7 +372,7 @@ emu.addEventCallback(function()
   -- refuse them until the hole is filled, then go-back-N repairs it.
   if step == 9 then
     gw.drop_out = 2
-    L.feed("download http://example.com/ok WINLOSS.TXT\n")
+    L.feed("get http://example.com/ok WINLOSS.TXT\n")
     at = frame + 1500
     step = 10
     return

@@ -77,8 +77,8 @@ static void cmd_help(void) {
   kcon_puts("cat NAME  print a file\n");
   kcon_puts("write N T write text T to file N\n");
   kcon_puts("rm NAME   delete a file\n");
-  kcon_puts("net       gateway status\n");
-  kcon_puts("download URL [NAME]   save a URL to a file\n");
+  kcon_puts("net [status|test]     gateway status, or prove it works\n");
+  kcon_puts("get URL DEST          fetch; DEST of - prints to the console\n");
   kcon_puts("image URL [NAME]      save a picture, converted for viewing\n");
   kcon_puts("debug     diagnostics (debug with no argument lists them)\n");
 }
@@ -428,7 +428,7 @@ static void cmd_fstest(void) {
   }
 }
 
-static void cmd_net(void) {
+static void cmd_net_status(void) {
   if (!net_up()) {
     kcon_puts("no gateway attached\n");
     kcon_puts("(emulator: run tools/netbridge.lua; hardware: M7)\n");
@@ -441,6 +441,86 @@ static void cmd_net(void) {
   kcon_puts(", resends ");
   kcon_putu(net_stat_resent);
   kcon_putc('\n');
+}
+
+/* `net test` — prove the whole path works, end to end.
+ *
+ * Deliberately accepts ANY response, including an error page. The target is
+ * behind Cloudflare and will refuse most non-browser requests, which is fine:
+ * getting *anything* back means DNS resolved, TCP connected, TLS completed and
+ * the link carried bytes in both directions. Asserting on the content would
+ * test Cloudflare's mood rather than our networking. */
+static const char NET_TEST_URL[] = "https://rgsilva.com/";
+
+static uint8_t net_test_buf[64];
+
+static void cmd_net_test(void) {
+  int ch, st;
+  uint32_t got = 0;
+  uint16_t deadline;
+
+  if (!net_up()) {
+    kcon_puts("no gateway attached\n");
+    return;
+  }
+  kcon_puts("fetching ");
+  kcon_puts(NET_TEST_URL);
+  kcon_putc('\n');
+
+  ch = net_fetch(NET_TEST_URL);
+  if (ch < 0) {
+    kcon_puts("FAIL: no free channel\n");
+    return;
+  }
+
+  deadline = (uint16_t)(snos_frames + 900u);
+  while (net_state(ch) == NET_ST_OPENING) {
+    if ((int16_t)(snos_frames - deadline) >= 0) {
+      kcon_puts("FAIL: timed out waiting for the gateway\n");
+      net_close(ch);
+      return;
+    }
+    kbd_idle();
+  }
+
+  for (;;) {
+    int n = net_read(ch, net_test_buf, (int)sizeof net_test_buf);
+    if (n > 0) {
+      got += (uint32_t)n;
+      continue;
+    }
+    st = net_state(ch);
+    if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
+    if ((int16_t)(snos_frames - deadline) >= 0) break;
+    kbd_idle();
+  }
+
+  kcon_puts("HTTP ");
+  kcon_putu(net_http_status(ch));
+  kcon_puts(", ");
+  kcon_putu((uint16_t)got);
+  kcon_puts(" bytes\n");
+  net_close(ch);
+
+  /* Any reply at all is a pass, including an error page. The target sits behind
+   * Cloudflare and will refuse most non-browser requests; that refusal still
+   * proves DNS resolved, TCP connected, TLS completed and the link carried
+   * bytes both ways. Asserting on the content would test Cloudflare's mood. */
+  if (got > 0) kcon_puts("OK - DNS, TLS and the link all work\n");
+  else kcon_puts("FAIL: connected but received nothing\n");
+}
+
+static void cmd_net(char *rest) {
+  char *what = rest;
+  (void)split_word(rest);
+  if (*what == 0 || streq(what, "status")) {
+    cmd_net_status();
+  } else if (streq(what, "test")) {
+    cmd_net_test();
+  } else {
+    kcon_puts("net status   gateway link and counters\n");
+    kcon_puts("net test     fetch a known URL to prove the path works\n");
+  }
 }
 
 /* Fetch a URL and print the body.
@@ -733,7 +813,32 @@ static void download_to_volume(char *rest, int want_image) {
   net_close(ch);
 }
 
-static void cmd_download(char *rest) { download_to_volume(rest, 0); }
+/* `get URL DEST` — one fetch command with an explicit destination.
+ *
+ * DEST is mandatory and "-" means the console. Previously `get` printed and
+ * `download` saved, which meant two commands doing one job and no way to tell
+ * from a call site which one you had. Making the destination explicit removes
+ * the ambiguity, and it stops `get` being a diagnostic: a command that can write
+ * files is a tool, not a probe, which is why it lives at the root rather than
+ * under `debug`. */
+static void cmd_get_cmd(char *rest) {
+  char *dest = split_word(rest);
+  if (*rest == 0 || *dest == 0) {
+    kcon_puts("usage: get URL DEST     (DEST of - prints to the console)\n");
+    return;
+  }
+  if (dest[0] == '-' && dest[1] == 0) {
+    cmd_get(rest);
+    return;
+  }
+  /* Re-join so the shared path sees "URL NAME" as it expects. */
+  {
+    char *p = rest;
+    while (*p) p++;
+    *p = ' ';
+  }
+  download_to_volume(rest, 0);
+}
 static void cmd_image(char *rest) { download_to_volume(rest, 1); }
 
 /* ---------------------------------------------------------------- shell */
@@ -757,7 +862,6 @@ static void cmd_debug(char *rest) {
   if (streq(what, "ver")) cmd_ver();
   else if (streq(what, "syscheck")) cmd_syscheck();
   else if (streq(what, "fstest")) cmd_fstest();
-  else if (streq(what, "get")) cmd_get(arg);
   else {
     kcon_puts("unknown debug command: ");
     kcon_puts(what);
@@ -790,9 +894,9 @@ void shell_run(void) {
     else if (streq(line, "cat")) cmd_cat(rest);
     else if (streq(line, "write")) cmd_write(rest);
     else if (streq(line, "rm")) cmd_rm(rest);
-    else if (streq(line, "net")) cmd_net();
+    else if (streq(line, "net")) cmd_net(rest);
     else if (streq(line, "debug")) cmd_debug(rest);
-    else if (streq(line, "download")) cmd_download(rest);
+    else if (streq(line, "get")) cmd_get_cmd(rest);
     else if (streq(line, "image")) cmd_image(rest);
     else {
       kcon_puts("unknown command: ");

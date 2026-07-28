@@ -36,9 +36,16 @@ In SNOS:
 
 ```
 net                 gateway status
-get URL             fetch and print
-download URL        fetch and save to the SRAM volume
+net test            fetch a known URL to prove DNS, TLS and the link work
+get URL -           fetch and print to the console
+get URL NAME        fetch and save to the SRAM volume
+image URL [NAME]    fetch a picture, converted for viewing
+run view NAME       display it
 ```
+
+`get` requires a destination. `-` means the console; anything else is a file.
+It used to be two commands (`get` printed, `download` saved), which meant no way
+to tell from a call site which one you had.
 
 ## Why two files instead of a socket or a pipe
 
