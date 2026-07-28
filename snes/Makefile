@@ -18,6 +18,21 @@ MESEN ?= /Applications/Mesen.app/Contents/MacOS/Mesen
 # .srm from build/ silently does nothing and the test then inherits whatever the
 # previous run left behind.
 MESEN_SRM ?= $(HOME)/Library/Application Support/Mesen2/Saves/snos.srm
+
+# A running Mesen GUI and --testrunner collide: emu.setInput goes inert, so any
+# test that presses a controller button fails for a reason that has nothing to
+# do with the code under test. emu8086/snes/test/suite.sh guards against this
+# for the same reason; without the guard the failures look like real bugs and
+# cost an afternoon. Set MESEN_ALLOW_GUI=1 to override.
+define check_no_gui
+	@if [ -z "$(MESEN_ALLOW_GUI)" ] && pgrep -x Mesen >/dev/null 2>&1; then \
+	  echo "ERROR: a Mesen GUI is running (pid $$(pgrep -x Mesen | tr '\n' ' '))."; \
+	  echo "       --testrunner collides with it and emu.setInput stops working,"; \
+	  echo "       so controller-driven tests fail for no real reason."; \
+	  echo "       Close Mesen, or run with MESEN_ALLOW_GUI=1 to skip this check."; \
+	  exit 1; \
+	fi
+endef
 BUILD := build
 K := kernel
 
@@ -112,31 +127,39 @@ $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sf
 test: test-boot test-input test-shell test-apps test-fs test-basic test-panel test-editor
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
+	$(call check_no_gui)
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 
 test-input: $(BUILD)/snos.sfc $(BUILD)/test/input.lua
+	$(call check_no_gui)
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/input.lua
 
 test-shell: $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
+	$(call check_no_gui)
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
 
 test-apps: $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
+	$(call check_no_gui)
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
 
 # Mesen persists cart SRAM to a .srm; a stale one from a previous run would
 # make the persistence assertion pass for the wrong reason.
 test-fs: $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
+	$(call check_no_gui)
 	rm -f "$(MESEN_SRM)"
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
 
 test-basic: $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
+	$(call check_no_gui)
 	rm -f "$(MESEN_SRM)"
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
 
 test-panel: $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
+	$(call check_no_gui)
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
 
 test-editor: $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
+	$(call check_no_gui)
 	rm -f "$(MESEN_SRM)"
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
 
