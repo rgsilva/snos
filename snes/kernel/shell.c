@@ -68,24 +68,18 @@ static void put_kv(const char *k, uint16_t v) {
 
 static void cmd_help(void) {
   kcon_puts("help      this list\n");
-  kcon_puts("ver       version and ABI\n");
   kcon_puts("clear     clear the screen\n");
-  kcon_puts("mem       memory map and stack watermark\n");
+  kcon_puts("mem       memory and cartridge SRAM usage\n");
   kcon_puts("echo ...  print arguments\n");
-  kcon_puts("syscheck  exercise the COP syscall path\n");
   kcon_puts("apps      list applications\n");
-  kcon_puts("run NAME  run an application\n");
+  kcon_puts("run N [A] run an application, with an argument\n");
   kcon_puts("ls        list files\n");
   kcon_puts("cat NAME  print a file\n");
   kcon_puts("write N T write text T to file N\n");
   kcon_puts("rm NAME   delete a file\n");
-  kcon_puts("sram      cartridge SRAM usage\n");
-  kcon_puts("fstest    verify SRAM addressing\n");
-  kcon_puts("net       gateway link status\n");
-  kcon_puts("get URL   fetch a URL and print it\n");
-  kcon_puts("download URL [NAME]   fetch a URL to a file\n");
-  kcon_puts("\nrun edit  full-screen text editor\n");
-  kcon_puts("run basic integer BASIC\n");
+  kcon_puts("net       gateway status\n");
+  kcon_puts("download URL [NAME]   save a URL to a file\n");
+  kcon_puts("debug     diagnostics (debug with no argument lists them)\n");
 }
 
 static void cmd_ver(void) {
@@ -110,6 +104,13 @@ static void cmd_mem(void) {
   kcon_putu((uint16_t)(SNOS_KSTACK_HI + 1u - SNOS_KSTACK_LO));
   kcon_puts(" bytes\n");
   kcon_puts("app arena 64K at $7F0000\n");
+  /* Cartridge SRAM used to be a separate `sram` command. It is the same
+   * question — where does memory go — so it is the same command. */
+  kcon_puts("cart SRAM ");
+  kcon_putu((uint16_t)(sram_size() >> 10));
+  kcon_puts(" KB, free ");
+  kcon_putu((uint16_t)(fs_free() >> 10));
+  kcon_puts(" KB\n");
 }
 
 static void cmd_echo(const char *rest) {
@@ -365,14 +366,6 @@ static void cmd_rm(const char *name) {
   kcon_puts("deleted ");
   kcon_puts(name);
   kcon_putc('\n');
-}
-
-static void cmd_sram(void) {
-  kcon_puts("cart SRAM ");
-  kcon_putu((uint16_t)(sram_size() >> 10));
-  kcon_puts(" KB, free ");
-  kcon_putu((uint16_t)(fs_free() >> 10));
-  kcon_puts(" KB\n");
 }
 
 /* Write a known pattern to the SRAM volume and read it back byte for byte.
@@ -718,6 +711,33 @@ static void cmd_download(char *rest) {
 
 /* ---------------------------------------------------------------- shell */
 
+/* Diagnostics live behind `debug` rather than cluttering the root namespace.
+ *
+ * `get` is here because `download` replaced it for anything real: printing a
+ * URL to the console is now a way to check the network works, not a way to
+ * fetch something you want. */
+static void cmd_debug(char *rest) {
+  char *what = rest;
+  const char *arg = split_word(rest);
+
+  if (*what == 0) {
+    kcon_puts("debug ver       version and ABI\n");
+    kcon_puts("debug syscheck  exercise the COP syscall path\n");
+    kcon_puts("debug fstest    verify SRAM addressing\n");
+    kcon_puts("debug get URL   fetch a URL to the console\n");
+    return;
+  }
+  if (streq(what, "ver")) cmd_ver();
+  else if (streq(what, "syscheck")) cmd_syscheck();
+  else if (streq(what, "fstest")) cmd_fstest();
+  else if (streq(what, "get")) cmd_get(arg);
+  else {
+    kcon_puts("unknown debug command: ");
+    kcon_puts(what);
+    kcon_puts("\ntype 'debug'\n");
+  }
+}
+
 void shell_run(void) {
   /* Started here rather than in main() only because main.c is being edited
    * concurrently; it belongs beside the other subsystem inits. Safe regardless:
@@ -734,21 +754,17 @@ void shell_run(void) {
 
     if (line[0] == 0) continue;
     if (streq(line, "help")) cmd_help();
-    else if (streq(line, "ver")) cmd_ver();
     else if (streq(line, "clear")) con_clear();
     else if (streq(line, "mem")) cmd_mem();
     else if (streq(line, "echo")) cmd_echo(rest);
-    else if (streq(line, "syscheck")) cmd_syscheck();
     else if (streq(line, "apps")) cmd_apps();
     else if (streq(line, "run")) cmd_run(rest);
     else if (streq(line, "ls")) cmd_ls();
     else if (streq(line, "cat")) cmd_cat(rest);
     else if (streq(line, "write")) cmd_write(rest);
     else if (streq(line, "rm")) cmd_rm(rest);
-    else if (streq(line, "sram")) cmd_sram();
-    else if (streq(line, "fstest")) cmd_fstest();
     else if (streq(line, "net")) cmd_net();
-    else if (streq(line, "get")) cmd_get(rest);
+    else if (streq(line, "debug")) cmd_debug(rest);
     else if (streq(line, "download")) cmd_download(rest);
     else {
       kcon_puts("unknown command: ");

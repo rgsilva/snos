@@ -4,10 +4,10 @@
 local L = dofile("test/lib.lua")
 
 local CMDS = {
-  "ver\n",
+  "debug ver\n",
   "mem\n",
   "echo hello from the shell\n",
-  "syscheck\n",
+  "debug syscheck\n",
   "bogus\n",
   "help\n",
   -- Deliberately mangled case: typing uppercase means holding shift on an
@@ -60,7 +60,7 @@ emu.addEventCallback(function()
   r.check(text:find("hello from the shell", 1, true) ~= nil, "echo did not echo")
   r.check(text:find("unknown command: bogus", 1, true) ~= nil,
           "unknown command was not rejected")
-  r.check(text:find("run NAME", 1, true) ~= nil, "help did not list commands")
+  r.check(text:find("debug", 1, true) ~= nil, "help did not list commands")
 
   -- syscheck: every one of these came back through a COP trap.
   -- `syscheck` compares the syscall's answer against the header it was compiled

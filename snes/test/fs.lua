@@ -29,7 +29,7 @@ emu.addEventCallback(function()
   if at == nil then at = frame + 150 end
   if frame < at then return end
 
-  if step == 1 then send("fstest\n", 900); step = 2; return end
+  if step == 1 then send("debug fstest\n", 900); step = 2; return end
   if step == 2 then send("ls\n", 220); step = 2.5; return end
   -- lowercase on purpose: the file is MOTD.TXT
   if step == 2.5 then send("cat motd.txt\n", 220); step = 3; return end

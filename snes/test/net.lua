@@ -295,15 +295,15 @@ emu.addEventCallback(function()
   if frame < at then return end
 
   if step == 1 then L.feed("net\n"); at = frame + 150; step = 2; return end
-  if step == 2 then L.feed("get http://example.com/ok\n"); at = frame + 900; step = 3; return end
-  if step == 3 then L.feed("get http://example.com/missing\n"); at = frame + 600; step = 4; return end
+  if step == 2 then L.feed("debug get http://example.com/ok\n"); at = frame + 900; step = 3; return end
+  if step == 3 then L.feed("debug get http://example.com/missing\n"); at = frame + 600; step = 4; return end
   if step == 4 then
     -- Now the paths a real cable cannot be asked to exercise: lose two frames
     -- from the SNES, and hand it two frames with broken checksums. Both must
     -- recover invisibly and the body must arrive byte-perfect.
     gw.drop_snes = 2
     gw.corrupt_out = 2
-    L.feed("get http://example.com/faults\n")
+    L.feed("debug get http://example.com/faults\n")
     at = frame + 1200
     step = 5
     return

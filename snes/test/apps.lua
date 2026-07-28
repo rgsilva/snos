@@ -54,7 +54,7 @@ emu.addEventCallback(function()
     step = 4
     return
   end
-  if step == 4 then send("ver\n", 200); step = 5; return end
+  if step == 4 then send("debug ver\n", 200); step = 5; return end
 
   local r = L.new_report("apps")
   local text = L.ring_text()
