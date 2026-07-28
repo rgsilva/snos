@@ -83,8 +83,6 @@ static void cmd_help(void) {
   kcon_puts("rm NAME       delete a file\n");
   kcon_puts("net           gateway diagnostics\n");
   kcon_puts("debug         other diagnostics\n");
-  kcon_puts("\nan application's name runs it: get, view, edit, basic\n");
-  kcon_puts("get URL DEST  fetch; DEST of - prints to the console\n");
 }
 
 static void cmd_ver(void) {

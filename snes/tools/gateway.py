@@ -47,7 +47,17 @@ C2S_FETCH, C2S_CLOSE, C2S_IMAGE = 0x01, 0x02, 0x03
 S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
 
 USER_AGENT = "SNOS/0.1 (Super Nintendo; via gateway)"
+# What the SNES will actually receive. It arrives at roughly 600 B/s, so half a
+# megabyte is already fourteen minutes of transfer — the cap is a kindness, not
+# a memory limit.
 MAX_BODY = 512 * 1024
+
+# A source image is a different matter: it gets scaled down to ~43 KB before
+# anything crosses the link, so its original size costs the SNES nothing. A
+# 960 KB PNG was being cut to MAX_BODY and then failing to decode with "image
+# file is truncated", which points at the picture rather than at the cap that
+# damaged it.
+MAX_IMAGE_SOURCE = 16 * 1024 * 1024
 
 
 def checksum(f):
@@ -172,7 +182,19 @@ class Gateway:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 status = resp.status
                 ctype = resp.headers.get("Content-Type", "")
-                body = resp.read(MAX_BODY)
+                # Decide the cap from what came back, before reading it: an
+                # image may be large because it is about to be shrunk, while
+                # anything passed through verbatim has to cross a 600 B/s link.
+                is_img = ctype.split(";")[0].strip().lower().startswith("image/")
+                cap = MAX_IMAGE_SOURCE if (as_image or is_img) else MAX_BODY
+                # One byte past the cap, so "exactly the cap" and "too big" are
+                # distinguishable and truncation is never silent.
+                body = resp.read(cap + 1)
+                if len(body) > cap:
+                    body = body[:cap]
+                    truncated = True
+                else:
+                    truncated = False
                 if resp.headers.get("Content-Encoding", "") == "gzip":
                     try:
                         body = gzip.decompress(body)
@@ -182,6 +204,7 @@ class Gateway:
             status = e.code
             ctype = e.headers.get("Content-Type", "") if e.headers else ""
             body = e.read(MAX_BODY) or b""
+            truncated = False
         except Exception as e:
             print(f"  fetch failed: {e}")
             self.push_ctrl(S2C_ERR, bytes([ch, 1]))
@@ -195,6 +218,12 @@ class Gateway:
         if not as_image and status == 200 and ctype.split(";")[0].strip().lower().startswith("image/"):
             as_image = True
             print(f"  {ctype} -> converting")
+
+        if truncated:
+            # Say so rather than handing on a damaged body. Silently truncating
+            # is how a 960 KB PNG turned into "image file is truncated", a
+            # message that blames the image for the gateway's cap.
+            print(f"  body exceeded {len(body)} bytes and was truncated")
 
         if as_image and status == 200:
             try:

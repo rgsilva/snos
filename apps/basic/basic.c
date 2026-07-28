@@ -780,6 +780,19 @@ int main(void) {
   outs("SNOS BASIC\n");
   outs("integer BASIC - HELP for commands, QUIT to leave\n\n");
 
+  /* ABI 4 launch argument: `basic prog.bas` loads that program before the
+   * prompt appears. Without it a saved program could be listed by the shell and
+   * never opened from it, which is a strange thing for SAVE to leave you with.
+   * A missing file is reported and the interpreter still starts — you asked for
+   * BASIC, not for that file specifically. */
+  {
+    char arg[20];
+    if (snos_getargs(arg, (uint16_t)sizeof arg) > 0) {
+      cur = arg;
+      cmd_load();
+    }
+  }
+
   for (;;) {
     outs("] ");
     snos_set_ptr(line);
