@@ -71,6 +71,14 @@ local KEYS = {
 
   { " ", " ", "Space", "Spacebar", "Space Bar", "SpaceBar" },
 
+  -- Arrows send SNOS_KEY_UP..RIGHT ($11-$14), not ANSI escape sequences: ESC
+  -- already means "open the menu" in the editor, and telling `ESC [ A` from a
+  -- bare ESC would need a timeout. See kernel/snos_abi.h.
+  { "\17", "\17", "Up", "Up Arrow", "UpArrow", "ArrowUp" },
+  { "\18", "\18", "Down", "Down Arrow", "DownArrow", "ArrowDown" },
+  { "\19", "\19", "Left", "Left Arrow", "LeftArrow", "ArrowLeft" },
+  { "\20", "\20", "Right", "Right Arrow", "RightArrow", "ArrowRight" },
+
   -- Escape sends $1B. The editor accepts it as an alternative to Ctrl+L for
   -- opening the menu, which matters because Ctrl combinations are exactly the
   -- ones a host is most likely to have bound to something else.

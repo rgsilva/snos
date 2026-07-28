@@ -170,6 +170,23 @@ uint16_t sys_net_close(uint16_t ch);
  *
  * $01-$06 are box-drawing glyphs, which is what makes a framed menu possible
  * without an application shipping its own font. */
+/* Arrow keys, as delivered by kbd_getchar()/SYS_GETC alongside ASCII.
+ *
+ * Deliberately NOT ANSI escape sequences. ESC already means "open the menu" in
+ * the editor, so `ESC [ A` would need a timeout to tell an arrow from a bare
+ * ESC — and timeout-based key parsing is the sort of thing that passes every
+ * test and feels wrong in the hand. Both ends of this link are ours, so
+ * unambiguous single codes are simply better. DC1-DC4 are otherwise unused and
+ * the line editor already discards everything below $20.
+ *
+ * The on-screen keyboard emits these from the d-pad WHEN IT IS HIDDEN, so an
+ * application cannot tell a controller from a host keyboard — which is the
+ * entire point of the input abstraction. */
+#define SNOS_KEY_UP 0x11
+#define SNOS_KEY_DOWN 0x12
+#define SNOS_KEY_LEFT 0x13
+#define SNOS_KEY_RIGHT 0x14
+
 #define SNOS_INVERSE 0x80u
 #define SNOS_BOX_H 1
 #define SNOS_BOX_V 2

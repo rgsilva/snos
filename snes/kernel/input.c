@@ -232,7 +232,17 @@ int osk_poll(void) {
   if (p & PAD_B) return '\b';
   if (p & PAD_X) return ' ';
 
-  if (!osk_on) return -1;
+  /* With the keyboard hidden the d-pad is nobody's, so hand it to the
+   * application as arrow keys. Above this layer a controller and a host
+   * keyboard then look identical, which is what lets the editor's menu be
+   * driven by either without knowing which is present. */
+  if (!osk_on) {
+    if (p & PAD_UP) return SNOS_KEY_UP;
+    if (p & PAD_DOWN) return SNOS_KEY_DOWN;
+    if (p & PAD_LEFT) return SNOS_KEY_LEFT;
+    if (p & PAD_RIGHT) return SNOS_KEY_RIGHT;
+    return -1;
+  }
 
   if (p & PAD_Y) {
     osk_shift = !osk_shift;
@@ -287,13 +297,77 @@ int kbd_getchar(void) {
  * actually ended up. */
 static void caret(int on) { con_caret(on); }
 
+/* Command history.
+ *
+ * A ring of eight rather than the single entry asked for: it is a handful of
+ * extra lines and the difference between "repeat that" and "where was that
+ * command". Lives in far RAM — 1 KB has no business on a 2816-byte stack.
+ *
+ * Blank lines and exact repeats are not recorded. Holding a key down to walk
+ * back through history otherwise fills the ring with copies of whatever you
+ * were already looking at. */
+#define HIST_N 8
+#define HIST_LEN 128
+
+static char hist[HIST_N][HIST_LEN];
+static uint8_t hist_count; /* how many slots are populated, saturating at N */
+static uint8_t hist_head;  /* where the next entry goes */
+
+static void hist_add(const char *s) {
+  int i;
+  if (s[0] == 0) return;
+  if (hist_count) {
+    const char *prev = hist[(hist_head + HIST_N - 1) % HIST_N];
+    for (i = 0;; i++) {
+      if (prev[i] != s[i]) break;
+      if (s[i] == 0) return; /* identical to the last entry */
+    }
+  }
+  for (i = 0; i < HIST_LEN - 1 && s[i]; i++) hist[hist_head][i] = s[i];
+  hist[hist_head][i] = 0;
+  hist_head = (uint8_t)((hist_head + 1) % HIST_N);
+  if (hist_count < HIST_N) hist_count++;
+}
+
+/* back = 1 is the most recent entry. Returns NULL past the end. */
+static const char *hist_get(int back) {
+  if (back < 1 || back > (int)hist_count) return 0;
+  return hist[(hist_head + HIST_N - back) % HIST_N];
+}
+
+/* Wipe what is on screen and put `src` there instead.
+ *
+ * Erasing with backspaces cannot cross a row boundary — con_putc's backspace
+ * stops at column 0 — so a line that wrapped would leave its first row behind.
+ * Shell commands are far shorter than 64 columns in practice, and the
+ * alternative is repainting the whole row from the shadow buffer, which the
+ * line editor has no business reaching into. Noted rather than solved. */
+static int line_replace(char *buf, int n, const char *src, int max) {
+  int i;
+  while (n) {
+    kcon_putc('\b');
+    kcon_putc(' ');
+    kcon_putc('\b');
+    n--;
+  }
+  for (i = 0; src && src[i] && i < max - 1; i++) {
+    buf[i] = src[i];
+    kcon_putc(src[i]);
+  }
+  buf[i] = 0;
+  return i;
+}
+
 int kbd_readline(char *buf, int max) {
   int n = 0;
+  int back = 0; /* 0 = the line being typed, 1.. = walking back */
+
   for (;;) {
     int c;
     caret(1);
     c = kbd_getchar();
     caret(0);
+
     if (c == '\n' || c == '\r') {
       kcon_putc('\n');
       break;
@@ -307,11 +381,31 @@ int kbd_readline(char *buf, int max) {
       }
       continue;
     }
+    if (c == SNOS_KEY_UP) {
+      const char *h = hist_get(back + 1);
+      if (h) {
+        back++;
+        n = line_replace(buf, n, h, max);
+      }
+      continue;
+    }
+    if (c == SNOS_KEY_DOWN) {
+      if (back > 1) {
+        back--;
+        n = line_replace(buf, n, hist_get(back), max);
+      } else if (back == 1) {
+        back = 0;
+        n = line_replace(buf, n, 0, max); /* back to an empty line */
+      }
+      continue;
+    }
     if (c < 0x20 || c > 0x7E) continue;
     if (n >= max - 1) continue;
     buf[n++] = (char)c;
     kcon_putc(c);
   }
+
   buf[n] = 0;
+  hist_add(buf);
   return n;
 }
