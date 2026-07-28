@@ -207,6 +207,22 @@ def main():
         while True:
             moved = False
             try:
+                # The bridge truncates both files when it starts, so a restarted
+                # emulator leaves this loop reading from an offset past the end
+                # of a brand new file. It then picks up mid-stream once the file
+                # grows back past that point, which desynchronises the protocol
+                # and presents as "timeout waiting for the gateway" — with the
+                # gateway right there, running, looking healthy.
+                #
+                # You restart the emulator far more often than this daemon, so
+                # this is the common case, not an edge one.
+                if os.path.getsize(UP) < up_off:
+                    print("gateway: link restarted, resetting")
+                    up_off = 0
+                    gw = Gateway()
+                    down.close()
+                    down = open(DOWN, "ab", buffering=0)
+
                 with open(UP, "rb") as f:
                     f.seek(up_off)
                     chunk = f.read(FRAME)

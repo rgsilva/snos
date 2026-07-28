@@ -643,8 +643,21 @@ static void cmd_download(char *rest) {
 
   next_tick = snos_frames;
   for (;;) {
-    int n = net_read(ch, get_buf, (int)sizeof get_buf);
-    int i;
+    int n, i;
+
+    /* Poll for an abort on EVERY pass, not only when the ring runs dry.
+     *
+     * The obvious placement — beside the state check further down, where `get`
+     * has it — is only reached when no data is waiting. A transfer that streams
+     * steadily never takes that branch, so it becomes uninterruptible exactly
+     * when it is longest, which is the case this exists for. A shell command is
+     * not an application, so START+SELECT cannot rescue it either. */
+    if (kbd_getchar_nonblock() >= 0) {
+      aborted = 1;
+      break;
+    }
+
+    n = net_read(ch, get_buf, (int)sizeof get_buf);
     if (n > 0) {
       /* fs_free() cannot fall during a write — the allocator only commits on
        * close — so the remaining room has to be tracked here. */
@@ -671,12 +684,6 @@ static void cmd_download(char *rest) {
     }
     st = net_state(ch);
     if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
-    /* A shell command is not an app, so the START+SELECT kill switch does not
-     * reach it. Without this, a stuck transfer means power-cycling. */
-    if (kbd_getchar_nonblock() >= 0) {
-      aborted = 1;
-      break;
-    }
     kbd_idle();
   }
 

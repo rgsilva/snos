@@ -58,6 +58,11 @@ local BODY_OK = table.concat({
 }, "\n") .. "\n"
 local BODY_404 = "not found\n"
 
+-- Big enough that a download of it is still in flight several seconds later,
+-- which is what makes the abort path testable at all. At ~1.7 KB/s this is a
+-- couple of seconds of transfer.
+local BODY_BIG = string.rep("the quick brown fox jumps over the lazy dog 0123\n", 200)
+
 local function push(ch, s)
   gw.out[#gw.out + 1] = { ch = ch, data = s, pos = 1 }
 end
@@ -71,6 +76,9 @@ local function on_fetch(ch, url)
   if url:find("missing") then
     push_ctrl(S2C_OPEN, string.char(ch, 404 & 0xFF, (404 >> 8) & 0xFF))
     push(ch, BODY_404)
+  elseif url:find("big") then
+    push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF))
+    push(ch, BODY_BIG)
   else
     push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF))
     push(ch, BODY_OK)
@@ -231,6 +239,33 @@ emu.addEventCallback(function()
     return
   end
 
+  -- The same stream, written to the SRAM volume instead of the screen.
+  if step == 5 then
+    L.feed("download http://example.com/ok DLTEST.TXT\n")
+    at = frame + 1200
+    step = 6
+    return
+  end
+  -- Read it back off the volume. This is the assertion that matters: it proves
+  -- the bytes reached storage, not merely that they crossed the link.
+  if step == 6 then L.feed("cat DLTEST.TXT\n"); at = frame + 600; step = 7; return end
+
+  -- A download long enough to interrupt. The kill switch only reaches
+  -- applications, and a shell command is not one, so without a working abort a
+  -- wrong URL means power-cycling the machine.
+  if step == 7 then
+    L.feed("download http://example.com/big BIG.TXT\n")
+    -- Interrupt while it is genuinely still running. At roughly 1.4 KB/s this
+    -- lands about a kilobyte into a ten-kilobyte body; the first version aborted
+    -- after the transfer had already finished and proved nothing.
+    at = frame + 90
+    step = 8
+    return
+  end
+  if step == 8 then L.feed(" "); at = frame + 300; step = 9; return end
+  -- "partial file kept" is a claim; check the volume actually has it.
+  if step == 9 then L.feed("ls\n"); at = frame + 300; step = 10; return end
+
   local r = L.new_report("net")
   local text = L.ring_text()
   print("--- mailbox ---"); print(text); print("---------------")
@@ -263,6 +298,21 @@ emu.addEventCallback(function()
   local _, bodies = text:gsub("TLS was terminated on the far side", "")
   r.check(bodies >= 2,
           "body survived " .. bodies .. " times; the fault-injected fetch lost data")
+
+  -- download: the body has to reach the volume, not just the wire.
+  r.check(text:find("-> DLTEST.TXT", 1, true) ~= nil, "download did not name a file")
+  r.check(text:find("saved DLTEST.TXT", 1, true) ~= nil, "download did not report success")
+  -- The body appears once from `get`, twice more from download+cat. If the file
+  -- were empty or truncated the cat would not add an occurrence.
+  local _, all = text:gsub("TLS was terminated on the far side", "")
+  r.check(all >= 3,
+          "cat of the downloaded file did not return the body (" .. all .. " copies seen)")
+
+  -- abort: a long transfer must stop on a keypress and keep what it had.
+  r.check(text:find("[aborted", 1, true) ~= nil,
+          "a keypress did not abort the download - a stuck transfer would need a power cycle")
+  r.check(text:find("BIG.TXT", 1, true) ~= nil,
+          "the aborted download left nothing on the volume, despite saying it kept a partial file")
 
   r.finish()
 end, emu.eventType.endFrame)
