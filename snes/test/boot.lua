@@ -22,26 +22,28 @@ emu.addEventCallback(function()
     return
   end
 
+  -- Deliberately does NOT wait for the kernel to finish. Boot is about coming
+  -- up correctly; from M1 onward main() sits waiting for input and never
+  -- returns, which is the normal state of an OS. Give it a fixed settling
+  -- window (console.c flushes one row per frame) and then assert.
+  if frame < 240 then return end
+
   local status = L.status()
-  if status == L.STATUS_RUNNING then
-    if frame > 1800 then
-      print("RESULT FAIL boot - ran 30s without finishing")
-      print(L.ring_text())
-      emu.stop(1)
-    end
-    return
+  if status == L.STATUS_PANIC then
+    print("RESULT FAIL boot - kernel panicked")
+    print(L.ring_text())
+    emu.stop(1)
   end
 
   local r = L.new_report("boot")
   local text = L.ring_text()
-  local screen = L.screen_text(6)
+  local screen = L.screen_text_plain(6)
 
   print("--- mailbox ---"); print(text)
   print("--- screen (from VRAM) ---"); print(screen)
   print("--------------------------")
 
-  r.check(status == L.STATUS_PASS,
-          string.format("status is %04X, expected PASS", status))
+  r.check(status ~= L.STATUS_PANIC, "kernel panicked during boot")
   r.check(screen:find("SNOS 0.1", 1, true) ~= nil,
           "banner not present in VRAM tilemap - console did not render")
   r.check(screen:find("mode 5", 1, true) ~= nil,

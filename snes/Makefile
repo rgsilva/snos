@@ -23,12 +23,13 @@ AFLAGS := --core=65816 --target=SNES $(MODEL)
 LNFLAGS = calypsi/linker.scm --output-format=raw --rtattr exit=simplified \
           $(CALDIR)/lib/clib-lc-ld-snes-noppu.a
 
-KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c
+KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
+            $(K)/input.c
 KERNEL_S := calypsi/header.s $(K)/stack.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel test test-boot clean
+.PHONY: all kernel test test-boot test-input clean
 all: kernel
 kernel: $(BUILD)/snos.sfc
 
@@ -55,10 +56,13 @@ $(BUILD)/snos.raw: $(KERNEL_O)
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@
 
-test: test-boot
+test: test-boot test-input
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
+
+test-input: $(BUILD)/snos.sfc $(BUILD)/test/input.lua
+	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/input.lua
 
 clean:
 	rm -rf $(BUILD)

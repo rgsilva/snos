@@ -45,6 +45,17 @@ static uint8_t rev(uint8_t b) {  /* font8x8 is LSB-left; SNES wants MSB-left */
     return b;
 }
 
+/* Glyph bitmap row for character `ch`. Characters $80-$FF are the inverse-video
+ * twins of $00-$7F: with a two-colour palette, flipping plane 0 turns "green on
+ * black" into "black on green". That gives the OSK its selection highlight and
+ * the shell its cursor without a second BG layer — which Mode 5 does not have
+ * spare, since BG1 and BG2 are both carrying text columns. */
+static uint16_t glyph_row(int ch, int y) {
+    uint8_t g = rev((uint8_t)font8x8_basic[ch & 0x7F][y]);
+    if (ch & 0x80) g = (uint8_t)~g;
+    return g;
+}
+
 static void set_vofs(void) {
     uint16_t v = (uint16_t)(((top * 8) - 1) & 0x3FF);
     R8(0x210E) = (uint8_t)v; R8(0x210E) = (uint8_t)(v >> 8);   /* BG1VOFS */
@@ -69,16 +80,16 @@ void con_init(void) {
 
     /* BG2 font at $1000, 2bpp: char c -> tile 2c = glyph, 2c+1 = blank */
     vaddr(BG2_CHR);
-    for (ch = 0; ch < 128; ch++) {
-        for (y = 0; y < 8; y++) vdata(rev((uint8_t)font8x8_basic[ch][y]));  /* glyph */
-        for (y = 0; y < 8; y++) vdata(0);                                    /* blank */
+    for (ch = 0; ch < 256; ch++) {
+        for (y = 0; y < 8; y++) vdata(glyph_row(ch, y));  /* glyph */
+        for (y = 0; y < 8; y++) vdata(0);                 /* blank */
     }
     /* BG1 font at $3000, 4bpp: char c -> tile 2c = blank, 2c+1 = glyph */
     vaddr(BG1_CHR);
-    for (ch = 0; ch < 128; ch++) {
-        for (y = 0; y < 16; y++) vdata(0);                                   /* blank tile */
-        for (y = 0; y < 8; y++) vdata(rev((uint8_t)font8x8_basic[ch][y]));   /* glyph plane0/1 */
-        for (y = 0; y < 8; y++) vdata(0);                                    /* glyph plane2/3 */
+    for (ch = 0; ch < 256; ch++) {
+        for (y = 0; y < 16; y++) vdata(0);                /* blank tile */
+        for (y = 0; y < 8; y++) vdata(glyph_row(ch, y));  /* glyph plane0/1 */
+        for (y = 0; y < 8; y++) vdata(0);                 /* glyph plane2/3 */
     }
 
     vaddr(BG2_MAP);                       /* clear both maps to space (0x20) */
@@ -111,7 +122,7 @@ static void newline(void) {
 
 void con_putc(int c) {
     uint8_t r;
-    c &= 0x7F;
+    c &= 0xFF;
     if (c == '\n') { newline(); return; }
     if (c == '\r') { col = 0; return; }
     if (c == '\b') { if (col) col--; return; }
@@ -172,4 +183,80 @@ void con_flush(void) {
         dma_vram(1, (uint16_t)(BG1_MAP + found * 32), rowbuf1, 32);
         dirty[found] = 0;
     }
+}
+
+/* ---- additions for SNOS -------------------------------------------------
+ * The console above is a pure stream device: text goes in, it scrolls. A shell
+ * also needs random access (to draw the on-screen keyboard panel over the
+ * bottom rows, and to put a cursor where the caret is), plus a way to put back
+ * what the panel covered. All of these address the SCREEN row, translating
+ * through the scroll ring themselves, so callers never see `top`.
+ */
+
+int con_rows(void) { return ROWS; }
+int con_cols(void) { return COLS; }
+void con_getpos(int *r, int *c) { *r = row; *c = col; }
+
+void con_putat(int r_, int c_, int ch) {
+    uint8_t r;
+    if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= COLS) return;
+    r = (uint8_t)((top + r_) % RING);
+    shadow[r][c_] = (uint8_t)ch;
+    dirty[r] = 1;
+}
+
+int con_getat(int r_, int c_) {
+    if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= COLS) return ' ';
+    return shadow[(top + r_) % RING][c_];
+}
+
+void con_row_save(int r_, uint8_t *dst) {
+    int i;
+    for (i = 0; i < COLS; i++) dst[i] = (uint8_t)con_getat(r_, i);
+}
+
+void con_row_restore(int r_, const uint8_t *src) {
+    int i;
+    for (i = 0; i < COLS; i++) con_putat(r_, i, src[i]);
+}
+
+void con_clear(void) {
+    int y, i;
+    for (y = 0; y < RING; y++) {
+        for (i = 0; i < COLS; i++) shadow[y][i] = ' ';
+        dirty[y] = 1;
+    }
+    top = 0; row = 0; col = 0;
+    vofs_dirty = 1;
+}
+
+/* Draw one row straight into VRAM WITHOUT touching the shadow buffer — a true
+ * overlay. The on-screen keyboard panel uses this so the text it covers is
+ * preserved: hiding the panel is then just con_invalidate(), and con_flush
+ * repaints those rows from the shadow as if nothing had happened.
+ *
+ * Costs a frame, like con_flush, and for the same reason (it waits for a clean
+ * vblank edge and re-uses DMA channels 0/1). The OSK only calls this for rows
+ * it has actually changed, so ordinary d-pad navigation repaints a single row.
+ */
+void con_overlay_row(int screen_row, const uint8_t *chars) {
+    int cell;
+    uint8_t r;
+    if (screen_row < 0 || screen_row >= ROWS) return;
+    r = (uint8_t)((top + screen_row) % RING);
+    for (cell = 0; cell < 32; cell++) {
+        rowbuf[cell]  = (uint16_t)((chars[cell * 2]     << 1) | 0x2000);
+        rowbuf1[cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
+    }
+    while (R8(0x4212) & 0x80) ;
+    while (!(R8(0x4212) & 0x80)) ;
+    dma_vram(0, (uint16_t)(BG2_MAP + r * 32), rowbuf, 32);
+    dma_vram(1, (uint16_t)(BG1_MAP + r * 32), rowbuf1, 32);
+}
+
+/* Mark screen rows as needing a repaint from the shadow buffer. */
+void con_invalidate(int from_row, int to_row) {
+    int i;
+    for (i = from_row; i <= to_row; i++)
+        if (i >= 0 && i < ROWS) dirty[(top + i) % RING] = 1;
 }

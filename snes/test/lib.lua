@@ -74,6 +74,26 @@ function M.screen_text(nrows)
   return table.concat(out, "\n")
 end
 
+-- Same, with the inverse-video bit stripped. Content assertions should use
+-- this; whether a glyph is highlighted is a separate question from what the
+-- glyph says, and mixing the two makes tests fail for the wrong reason.
+function M.screen_text_plain(nrows)
+  return (M.screen_text(nrows):gsub("[\128-\255]", function(c)
+    return string.char(c:byte() & 0x7F)
+  end))
+end
+
+-- True if any character in the given screen rows is inverse-video, i.e.
+-- something is highlighted.
+function M.has_highlight(from_row, to_row)
+  for r = from_row, to_row do
+    for _, b in ipairs({ M.screen_row(r):byte(1, -1) }) do
+      if b >= 0x80 then return true end
+    end
+  end
+  return false
+end
+
 -- ------------------------------------------------------------- assertions
 function M.new_report(name)
   local r = { name = name, failures = {} }

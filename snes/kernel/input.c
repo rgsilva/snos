@@ -1,0 +1,283 @@
+/* SNOS input layer: controller, on-screen keyboard, line editor.
+ *
+ * The OSK is drawn as TEXT, straight into the console's bottom rows, rather
+ * than on a BG layer of its own the way snesmac's does. That is forced by the
+ * display mode: Mode 5 has exactly two BG layers and console.c is already using
+ * both to get 64 columns (even columns on BG2, odd on BG1). There is no third
+ * layer to put a keyboard on.
+ *
+ * It works out well. The panel is written through con_overlay_row(), which
+ * touches VRAM only — the shadow buffer, and therefore the text scrolled
+ * underneath, is left completely intact. Dismissing the panel is one
+ * con_invalidate() call and the text repaints itself.
+ */
+#include "input.h"
+#include "console.h"
+#include "mailbox.h"
+#include "snos.h"
+
+#define R8(a) (*(volatile uint8_t *)(a))
+
+/* ------------------------------------------------------------------ pad */
+
+static volatile uint16_t pad_cur, pad_edge;
+
+/* Called from the NMI handler.
+ *
+ * The subtle part: NMI fires at the TOP of vblank, but the auto-joypad read
+ * does not begin until H=32.5..95.5 of that first vblank scanline and then
+ * takes 4224 master cycles. So on entry $4212 bit 0 is typically still CLEAR,
+ * and a naive "wait while busy" falls straight through and samples $4218
+ * mid-shift. Wait for the read to START and then to FINISH.
+ *
+ * Both waits are bounded: if auto-joypad read is ever disabled, bit 0 never
+ * sets, and an unbounded spin here would hang the machine inside an NMI. */
+void pad_latch(void) {
+  uint16_t v, prev, guard = 0;
+  while (!(R8(0x4212) & 0x01) && ++guard < 2000u) {
+  }
+  while ((R8(0x4212) & 0x01) && ++guard < 4000u) {
+  }
+  v = (uint16_t)(R8(0x4218) | (R8(0x4219) << 8));
+  MB_FLIPS = v; /* debug: raw pad word, so the harness can see the wire */
+  prev = pad_cur;
+  pad_cur = v;
+  pad_edge |= (uint16_t)(v & ~prev);
+}
+
+uint16_t pad_held(void) { return pad_cur; }
+
+/* Read-and-clear has to be atomic against the NMI that ORs into pad_edge, or a
+ * button press landing in the window is silently dropped. NMI is not maskable
+ * with SEI, so mask it at the source ($4200 bit 7) instead. */
+uint16_t pad_pressed(void) {
+  uint16_t e;
+  R8(0x4200) = 0x01; /* NMI off, auto-joypad still on */
+  e = pad_edge;
+  pad_edge = 0;
+  R8(0x4200) = 0x81;
+  return e;
+}
+
+/* ------------------------------------------------------------------ OSK */
+
+#define PANEL_TOP 23  /* panel occupies screen rows 23..27 */
+#define PANEL_ROWS 5  /* 1 hint row + 4 key rows */
+#define KEY_ROWS 4
+#define KEY_COL0 2
+#define KEY_STEP 2
+
+static const char *const KEYS_LO[KEY_ROWS] = {
+    "1234567890-=",
+    "qwertyuiop[]",
+    "asdfghjkl;'",
+    "zxcvbnm,./",
+};
+static const char *const KEYS_HI[KEY_ROWS] = {
+    "!@#$%^&*()_+",
+    "QWERTYUIOP{}",
+    "ASDFGHJKL:\"",
+    "ZXCVBNM<>?",
+};
+
+static const char HINT[] =
+    "A:key B:bksp X:space Y:shift START:enter SELECT:hide";
+
+static uint8_t panel_buf[64];
+static uint8_t panel_dirty; /* bit i = panel row i needs a repaint */
+static int osk_on = 1;      /* visible by default: on a stock SNES it is the
+                             * only way to type, so starting hidden would leave
+                             * a new user with no way in. */
+static int osk_shift;
+static int sel_row = 1, sel_col;
+static uint16_t repeat_at;
+
+static int keyrow_len(int r) {
+  const char *s = osk_shift ? KEYS_HI[r] : KEYS_LO[r];
+  int n = 0;
+  while (s[n]) n++;
+  return n;
+}
+
+static void clamp_sel(void) {
+  int n = keyrow_len(sel_row);
+  if (sel_col >= n) sel_col = n - 1;
+  if (sel_col < 0) sel_col = 0;
+}
+
+static void build_row(uint8_t *b, int prow) {
+  int i;
+  for (i = 0; i < 64; i++) b[i] = ' ';
+  if (prow == 0) {
+    for (i = 0; HINT[i] && i < 64; i++) b[i] = (uint8_t)HINT[i];
+    return;
+  }
+  {
+    int krow = prow - 1;
+    const char *s = osk_shift ? KEYS_HI[krow] : KEYS_LO[krow];
+    for (i = 0; s[i]; i++) {
+      int c = KEY_COL0 + i * KEY_STEP + krow; /* stagger, like a real keyboard */
+      if (c >= 64) break;
+      /* $80 bit selects the inverse-video twin of the glyph — that is the
+       * selection highlight, since there is no spare layer for a cursor. */
+      b[c] = (uint8_t)(s[i] | ((krow == sel_row && i == sel_col) ? 0x80 : 0x00));
+    }
+  }
+}
+
+void osk_show(void) {
+  osk_on = 1;
+  panel_dirty = (1 << PANEL_ROWS) - 1;
+}
+
+void osk_hide(void) {
+  osk_on = 0;
+  panel_dirty = 0;
+  con_invalidate(PANEL_TOP, PANEL_TOP + PANEL_ROWS - 1);
+}
+
+int osk_visible(void) { return osk_on; }
+
+/* One row per call. A full panel repaint therefore takes 5 frames, but that
+ * only happens on show or shift; moving the selection dirties at most two
+ * rows, so ordinary navigation costs one or two frames. */
+void osk_redraw(void) {
+  int i;
+  if (!osk_on || !panel_dirty) return;
+  for (i = 0; i < PANEL_ROWS; i++) {
+    if (panel_dirty & (1 << i)) {
+      build_row(panel_buf, i);
+      con_overlay_row(PANEL_TOP + i, panel_buf);
+      panel_dirty &= (uint8_t)~(1 << i);
+      return;
+    }
+  }
+}
+
+static void move_sel(int dr, int dc) {
+  int old = sel_row;
+  if (dr) {
+    sel_row = (sel_row + dr + KEY_ROWS) % KEY_ROWS;
+    clamp_sel();
+    panel_dirty |= (uint8_t)((1 << (old + 1)) | (1 << (sel_row + 1)));
+  }
+  if (dc) {
+    int n = keyrow_len(sel_row);
+    sel_col = (sel_col + dc + n) % n;
+    panel_dirty |= (uint8_t)(1 << (sel_row + 1));
+  }
+}
+
+int osk_poll(void) {
+  uint16_t p = pad_pressed();
+  uint16_t h = pad_held();
+
+  /* Auto-repeat: without it, crossing the keyboard one press at a time is
+   * miserable. Hold for ~1/3 s, then repeat every 4 frames. */
+  if (h & (PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT)) {
+    if (repeat_at == 0) {
+      repeat_at = (uint16_t)(snos_frames + 20u);
+    } else if ((int16_t)(snos_frames - repeat_at) >= 0) {
+      repeat_at = (uint16_t)(snos_frames + 4u);
+      p |= (uint16_t)(h & (PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT));
+    }
+  } else {
+    repeat_at = 0;
+  }
+
+  if (!p) return -1;
+
+  if (p & PAD_SELECT) {
+    if (osk_on) osk_hide();
+    else osk_show();
+    return -1;
+  }
+  if (p & PAD_START) return '\n';
+  if (p & PAD_B) return '\b';
+  if (p & PAD_X) return ' ';
+
+  if (!osk_on) return -1;
+
+  if (p & PAD_Y) {
+    osk_shift = !osk_shift;
+    clamp_sel();
+    panel_dirty |= 0x1E; /* all four key rows */
+    return -1;
+  }
+  if (p & PAD_UP) move_sel(-1, 0);
+  if (p & PAD_DOWN) move_sel(1, 0);
+  if (p & PAD_LEFT) move_sel(0, -1);
+  if (p & PAD_RIGHT) move_sel(0, 1);
+
+  if (p & PAD_A) {
+    const char *s = osk_shift ? KEYS_HI[sel_row] : KEYS_LO[sel_row];
+    return (int)(unsigned char)s[sel_col];
+  }
+  return -1;
+}
+
+/* ------------------------------------------------------- keyboard facade */
+
+void kbd_init(void) {
+  R8(0x4200) = 0x81; /* NMI + auto-joypad read */
+  osk_show();
+}
+
+int kbd_getchar_nonblock(void) {
+  int c = mb_getc_nonblock(); /* the harness types here */
+  if (c >= 0) return c;
+  return osk_poll();
+}
+
+void kbd_idle(void) {
+  uint16_t f = snos_frames;
+  while (snos_frames == f) {
+  }
+  osk_redraw();
+  con_flush();
+}
+
+int kbd_getchar(void) {
+  for (;;) {
+    int c = kbd_getchar_nonblock();
+    if (c >= 0) return c;
+    kbd_idle();
+  }
+}
+
+/* ------------------------------------------------------------ line editor */
+
+static void caret(int on) {
+  int r, c;
+  con_getpos(&r, &c);
+  con_putat(r, c, on ? (0x80 | ' ') : ' ');
+}
+
+int kbd_readline(char *buf, int max) {
+  int n = 0;
+  for (;;) {
+    int c;
+    caret(1);
+    c = kbd_getchar();
+    caret(0);
+    if (c == '\n' || c == '\r') {
+      kcon_putc('\n');
+      break;
+    }
+    if (c == '\b') {
+      if (n) {
+        n--;
+        kcon_putc('\b');
+        kcon_putc(' ');
+        kcon_putc('\b');
+      }
+      continue;
+    }
+    if (c < 0x20 || c > 0x7E) continue;
+    if (n >= max - 1) continue;
+    buf[n++] = (char)c;
+    kcon_putc(c);
+  }
+  buf[n] = 0;
+  return n;
+}

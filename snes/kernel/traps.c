@@ -9,13 +9,17 @@
  */
 #include "snos.h"
 #include "mailbox.h"
+#include "input.h"
 
 volatile uint16_t snos_frames;
 
 /* Vblank, 60 Hz, kernel-owned unconditionally (PLAN.md §5). Runs on whatever
  * stack is current — while an app runs that is the APP's stack — so this must
  * stay shallow. No printf, no deep call chains, ever. */
-void snos_nmi_c(void) { snos_frames++; }
+void snos_nmi_c(void) {
+  snos_frames++;
+  pad_latch();
+}
 
 /* Syscall dispatch. Stub until M2: returns 0 for everything. The signature
  * byte lives at [stacked return address - 1]; reading it is M2's job. */

@@ -6,6 +6,7 @@
 #include "snos.h"
 #include "console.h"
 #include "mailbox.h"
+#include "input.h"
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -16,8 +17,8 @@ static void hw_init(void) {
    * (docs/PERF.md item C). */
   R8(0x420D) = 0x01;
 
-  /* No interrupts yet: M0 polls vblank inside con_flush. The kernel takes
-   * ownership of NMI in M3, when the kill switch needs it. */
+  /* NMI is enabled by kbd_init() once the handler has something to do. The
+   * kernel owns it unconditionally from here on (PLAN.md §5). */
   R8(0x4200) = 0x00;
 }
 
@@ -45,7 +46,13 @@ static void report_stack(void) {
   mb_putc('\n');
 }
 
+/* M1 stands in for the shell that arrives in M2: read lines, echo them back.
+ * Enough to exercise the whole input path end to end. */
+static char line[128];
+
 int main(void) {
+  int i;
+
   hw_init();
   mb_init();
   stack_paint();
@@ -53,8 +60,18 @@ int main(void) {
   kcon_init();
   banner();
   report_stack();
-  kcon_sync();
+  kbd_init();
 
+  for (i = 0; i < 2; i++) {
+    kcon_puts("> ");
+    kbd_readline(line, (int)sizeof line);
+    kcon_puts("got [");
+    kcon_puts(line);
+    kcon_puts("]\n");
+  }
+
+  report_stack();
+  kcon_sync();
   mb_finish(MB_STATUS_PASS);
   return 0;
 }
