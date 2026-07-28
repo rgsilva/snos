@@ -54,6 +54,24 @@ void kcon_putu(uint16_t v) {
   }
 }
 
+/* 32-bit decimal. The SRAM volume is 254 KB, so a downloaded file's size does
+ * not fit in the 16-bit kcon_putu and would silently wrap past 65535. */
+void kcon_putu32(uint32_t v) {
+  char buf[11];
+  int i = 0;
+  if (v == 0) {
+    kcon_putc('0');
+    return;
+  }
+  while (v && i < 11) {
+    buf[i++] = (char)('0' + (uint16_t)(v % 10ul));
+    v /= 10ul;
+  }
+  while (i) {
+    kcon_putc(buf[--i]);
+  }
+}
+
 void kcon_puthex16(uint16_t v) {
   static const char digits[] = "0123456789ABCDEF";
   int i;

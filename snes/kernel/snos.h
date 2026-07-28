@@ -45,6 +45,7 @@ void kcon_init(void);
 void kcon_puts(const char *s);
 void kcon_putc(int c);
 void kcon_putu(uint16_t v);      /* unsigned decimal */
+void kcon_putu32(uint32_t v);    /* unsigned decimal, 32-bit */
 void kcon_puthex16(uint16_t v);  /* 4 hex digits */
 void kcon_sync(void);            /* flush every dirty row, not just one */
 

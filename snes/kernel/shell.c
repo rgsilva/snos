@@ -83,6 +83,7 @@ static void cmd_help(void) {
   kcon_puts("fstest    verify SRAM addressing\n");
   kcon_puts("net       gateway link status\n");
   kcon_puts("get URL   fetch a URL and print it\n");
+  kcon_puts("download URL [NAME]   fetch a URL to a file\n");
   kcon_puts("\nrun edit  full-screen text editor\n");
   kcon_puts("run basic integer BASIC\n");
 }
@@ -237,6 +238,22 @@ static void cmd_ls(void) {
   }
 }
 
+/* Wait between pages. Returns 0 if the reader wants out.
+ *
+ * The prompt is drawn and then erased in place with a carriage return, so it
+ * costs no line of its own — otherwise every page would lose a row of the file
+ * to the furniture. */
+static int pager_more(void) {
+  int c;
+  kcon_puts("-- more -- (q quits)");
+  kcon_sync();
+  c = kbd_getchar();
+  kcon_putc('\r');
+  kcon_puts("                    ");
+  kcon_putc('\r');
+  return (c == 'q' || c == 'Q' || c == 0x1B) ? 0 : 1;
+}
+
 static void cmd_cat(const char *name) {
   const fs_entry_t *f;
   uint32_t i;
@@ -251,7 +268,47 @@ static void cmd_cat(const char *name) {
     kcon_putc('\n');
     return;
   }
-  for (i = 0; i < f->size; i++) kcon_putc(fs_read_byte(f, i));
+  {
+    /* Page it. README.TXT is 592 bytes and scrolls most of itself away
+     * unpaged, which makes the one document explaining the system the one you
+     * cannot read.
+     *
+     * Rows consumed are counted here rather than read back from the console,
+     * because once the display starts scrolling the cursor row saturates at the
+     * bottom and stops being a measure of anything. This mirrors con_putc's own
+     * line accounting: newline, carriage return, backspace, and the wrap at the
+     * right margin. */
+    int rows = con_text_rows();
+    int cols = con_cols();
+    int used = 0, col = 0;
+
+    for (i = 0; i < f->size; i++) {
+      uint8_t c = fs_read_byte(f, i);
+      kcon_putc(c);
+
+      if (c == '\n') {
+        col = 0;
+        used++;
+      } else if (c == '\r') {
+        col = 0;
+      } else if (c == '\b') {
+        if (col) col--;
+      } else if (c >= 0x20) {
+        if (++col >= cols) {
+          col = 0;
+          used++;
+        }
+      }
+
+      /* Only prompt when there is genuinely more to show: a file that ends
+       * exactly on a screen boundary should not ask. */
+      if (used >= rows - 1 && i + 1 < f->size) {
+        if (!pager_more()) return;
+        used = 0;
+        col = 0;
+      }
+    }
+  }
   kcon_putc('\n');
 }
 
@@ -454,6 +511,191 @@ static void cmd_get(const char *url) {
   net_close(ch);
 }
 
+/* Derive a filename from a URL's last path segment.
+ *
+ * Uppercased because that is the convention on this volume — the ROM packer
+ * emits uppercase and BASIC's SAVE writes uppercase. Matching is
+ * case-insensitive so this is cosmetic, but a directory listing that mixes the
+ * two looks like a bug. */
+static void name_from_url(const char *url, char *out) {
+  const char *p = url, *seg = url;
+  int i = 0;
+
+  /* Skip the scheme so its "//" is not mistaken for a path separator. */
+  while (*p) {
+    if (p[0] == '/' && p[1] == '/') {
+      p += 2;
+      seg = p;
+      break;
+    }
+    if (*p == '/') break;
+    p++;
+  }
+  for (; *p; p++) {
+    if (*p == '/') seg = p + 1;
+    else if (*p == '?' || *p == '#') break; /* query is not part of the name */
+  }
+
+  for (; seg < p && *seg && i < FS_NAME_LEN; seg++) {
+    char c = *seg;
+    if (c == '?' || c == '#') break;
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    out[i++] = c;
+  }
+  out[i] = 0;
+  /* "example.com" and "example.com/" both have an empty last segment. */
+  if (i == 0) {
+    const char *d = "INDEX.HTM";
+    while (*d) out[i++] = *d++;
+    out[i] = 0;
+  }
+}
+
+/* One updating line, via carriage return. Padded because a shorter number must
+ * not leave the tail of a longer one behind. */
+static void dl_progress(uint32_t got) {
+  kcon_putc('\r');
+  kcon_putu32(got);
+  kcon_puts(" bytes   ");
+}
+
+static void cmd_download(char *rest) {
+  char nm[FS_NAME_LEN + 1];
+  char *given;
+  int ch, st;
+  uint32_t got = 0, budget;
+  uint16_t deadline, next_tick;
+  int aborted = 0, full = 0;
+
+  given = split_word(rest);
+  if (*rest == 0) {
+    kcon_puts("usage: download URL [NAME]\n");
+    return;
+  }
+  if (!net_up()) {
+    kcon_puts("no gateway attached\n");
+    return;
+  }
+
+  if (*given) {
+    int i = 0;
+    while (given[i] && i < FS_NAME_LEN) {
+      char c = given[i];
+      if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+      nm[i] = c;
+      i++;
+    }
+    nm[i] = 0;
+  } else {
+    name_from_url(rest, nm);
+  }
+
+  /* Refuse before starting rather than after filling the volume. */
+  budget = fs_free();
+  if (budget < 1024ul) {
+    kcon_puts("not enough room on the SRAM volume\n");
+    return;
+  }
+
+  ch = net_fetch(rest);
+  if (ch < 0) {
+    kcon_puts("fetch failed: no free channel\n");
+    return;
+  }
+
+  deadline = (uint16_t)(snos_frames + 600u);
+  while (net_state(ch) == NET_ST_OPENING) {
+    if ((int16_t)(snos_frames - deadline) >= 0) {
+      kcon_puts("timeout waiting for the gateway\n");
+      net_close(ch);
+      return;
+    }
+    kbd_idle();
+  }
+
+  st = net_state(ch);
+  if (st == NET_ST_ERROR) {
+    kcon_puts("gateway error ");
+    kcon_putu(net_http_status(ch));
+    kcon_putc('\n');
+    net_close(ch);
+    return;
+  }
+  if (net_http_status(ch) != 200) {
+    kcon_puts("HTTP ");
+    kcon_putu(net_http_status(ch));
+    kcon_puts(" - not saved\n");
+    net_close(ch);
+    return;
+  }
+
+  if (fs_open_write(nm) != 0) {
+    kcon_puts("cannot create ");
+    kcon_puts(nm);
+    kcon_putc('\n');
+    net_close(ch);
+    return;
+  }
+
+  kcon_puts("-> ");
+  kcon_puts(nm);
+  kcon_putc('\n');
+
+  next_tick = snos_frames;
+  for (;;) {
+    int n = net_read(ch, get_buf, (int)sizeof get_buf);
+    int i;
+    if (n > 0) {
+      /* fs_free() cannot fall during a write — the allocator only commits on
+       * close — so the remaining room has to be tracked here. */
+      if ((uint32_t)n > budget) {
+        full = 1;
+        break;
+      }
+      for (i = 0; i < n; i++) {
+        if (fs_putc(get_buf[i]) != 0) {
+          full = 1;
+          break;
+        }
+      }
+      if (full) break;
+      got += (uint32_t)n;
+      budget -= (uint32_t)n;
+      /* Four times a second: often enough to look alive, rare enough that
+       * redrawing the line does not compete with the transfer for vblanks. */
+      if ((int16_t)(snos_frames - next_tick) >= 0) {
+        dl_progress(got);
+        next_tick = (uint16_t)(snos_frames + 15u);
+      }
+      continue;
+    }
+    st = net_state(ch);
+    if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
+    /* A shell command is not an app, so the START+SELECT kill switch does not
+     * reach it. Without this, a stuck transfer means power-cycling. */
+    if (kbd_getchar_nonblock() >= 0) {
+      aborted = 1;
+      break;
+    }
+    kbd_idle();
+  }
+
+  dl_progress(got);
+  kcon_putc('\n');
+  fs_close();
+
+  if (full) kcon_puts("[volume full - partial file kept]\n");
+  else if (aborted) kcon_puts("[aborted - partial file kept]\n");
+  else {
+    kcon_puts("saved ");
+    kcon_puts(nm);
+    kcon_puts(", ");
+    kcon_putu32(got);
+    kcon_puts(" bytes\n");
+  }
+  net_close(ch);
+}
+
 /* ---------------------------------------------------------------- shell */
 
 void shell_run(void) {
@@ -487,6 +729,7 @@ void shell_run(void) {
     else if (streq(line, "fstest")) cmd_fstest();
     else if (streq(line, "net")) cmd_net();
     else if (streq(line, "get")) cmd_get(rest);
+    else if (streq(line, "download")) cmd_download(rest);
     else {
       kcon_puts("unknown command: ");
       kcon_puts(line);
