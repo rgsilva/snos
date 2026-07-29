@@ -267,6 +267,14 @@ page: it parses HTML on the fly and stores only what's on screen, which is exact
 64×28 console with 64 KB of app arena wants.
 **Done when:** fetch and render a real page over the cable.
 
+### M10 — Preemptive multitasking *(the crazy one)*
+NMI-driven round-robin scheduler. Carve `$0800–$18FF` into 8 × 512 B process slots (§2). Context
+switch = push A/X/Y/P/D/DB, `TSC` save, `TCS` load, pop — **under ~40 cycles**. Background
+daemons (network poll, clock). Status bar showing live processes.
+**Done when:** IRC stays connected in the background while BASIC runs in the foreground.
+**Why it's plausible:** the SNES already has a 60 Hz preemption source, and the 65816's whole
+context is 6 registers. The hard part isn't the switch — it's the 8 KB in §2.
+
 ### M11 — Real TCP/IP: the SNES gets an address
 Today the gateway *is* the network — it holds the sockets and the SNES holds a byte stream, so
 the console has no address and nothing on the LAN can reach it except through something the
@@ -287,13 +295,44 @@ configuration. Not designed yet. Deliberately not started.
 
 **Done when:** the SNES answers a ping from another machine on the LAN at its own address.
 
-### M10 — Preemptive multitasking *(the crazy one)*
-NMI-driven round-robin scheduler. Carve `$0800–$18FF` into 8 × 512 B process slots (§2). Context
-switch = push A/X/Y/P/D/DB, `TSC` save, `TCS` load, pop — **under ~40 cycles**. Background
-daemons (network poll, clock). Status bar showing live processes.
-**Done when:** IRC stays connected in the background while BASIC runs in the foreground.
-**Why it's plausible:** the SNES already has a 60 Hz preemption source, and the 65816's whole
-context is 6 registers. The hard part isn't the switch — it's the 8 KB in §2.
+### M12 — Services, not proxies *(follows M11)*
+Once the console has its own address, the gateway stops being a shim everything flows through
+and becomes **an ordinary host offering a service**. The relationship inverts: today every new
+protocol is a gateway change, because the gateway is on the path for every byte. After M11, IRC,
+plain HTTP, gopher, `httpd` and `netecho` are all direct, and the only thing still worth asking a
+helper for is what the 65816 genuinely cannot do.
+
+Which is rendering. There is no version of this machine that lays out modern HTML — Wikipedia's
+SNES article is 735 KB of markup against a 64 KB app arena — so the render service is permanent.
+It just stops being privileged:
+
+```
+GET /render?url=news.ycombinator.com&w=512&h=384   ->   .IMG tiles
+```
+
+A normal HTTP request, from the SNES's own HTTP client, to something that is now just a website.
+It can live on another machine, be shared, be restarted without touching the console, or be
+swapped for a different implementation. `web` becomes a client rather than a thing wired to a
+daemon.
+
+**Images are where it gets interesting**, because one format is genuinely within reach:
+
+- **JPEG — no.** Huffman plus an IDCT over ~900 blocks, on a CPU whose only multiplier is an
+  8×8→16 unsigned unit at `$4202`. And that is before the expensive part: quantising 57,000
+  pixels to 256 colours.
+- **PNG — marginal.** Inflate is slow but possible; it then hands back 24-bit pixels, so the
+  quantisation cost lands anyway.
+- **GIF — plausible, natively.** LZW is a table walk, and the image is **already palettised at
+  ≤256 colours**. The output is indexed pixels plus a palette, which is very nearly Mode 3's 8bpp
+  format already. No DCT, no inflate, and **no colour quantisation at all** — the hard part was
+  done by whoever saved the file. BMP and PCX are trivial for the same reason.
+
+That is a pleasingly period-correct answer: GIF is what the web ran on when a machine this size
+was current, and it is the format this machine can still read for itself.
+
+**Done when:** `web` fetches a rendered page over ordinary TCP from a service it did not have to
+be specially wired to, and the console decodes a GIF without help.
+
 
 ---
 
