@@ -207,12 +207,17 @@ def icmp_checksum(b):
 
 
 def ping(host, count=4):
-    """Real ICMP echo, four times, one result each.
+    """Four real ICMP echoes, sent together, collected against one deadline.
+
+    ping(8) spaces echoes a second apart because it is measuring a link over
+    time. This is answering "is that host reachable", and sequential timeouts
+    made the worst case count x timeout — eight seconds of a console sitting
+    there with nothing to show, and long enough that the SNES gave up on the
+    gateway before the gateway gave up on the host. Sent together the worst case
+    is one timeout, and a lost echo is still a lost echo.
 
     Unprivileged ICMP datagram sockets work on macOS and on Linux with
-    ping_group_range set, so this needs no root and no setuid helper. Each echo
-    is timed independently and reported as it lands, so the SNES draws its dots
-    live rather than showing four at once when it is already over.
+    ping_group_range set, so this needs no root and no setuid helper.
 
     Note what this measures: the GATEWAY's reachability of the target, not the
     SNES's. The SNES has no IP stack — that is the entire premise — so there is
@@ -223,44 +228,50 @@ def ping(host, count=4):
     except (socket.gaierror, IndexError):
         return None, []
 
-    results = []
+    results = [None] * count
     ident = os.getpid() & 0xFFFF
-    for seq in range(1, count + 1):
-        rtt = None
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
-                                 socket.IPPROTO_ICMP)
-            sock.settimeout(PING_TIMEOUT)
-            payload = b"\x42" * PING_PAYLOAD
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
+                             socket.IPPROTO_ICMP)
+        payload = b"\x42" * PING_PAYLOAD
+        sent = {}
+        for seq in range(1, count + 1):
             head = struct.pack("!BBHHH", 8, 0, 0, ident, seq)
             csum = icmp_checksum(head + payload)
             pkt = struct.pack("!BBHHH", 8, 0, csum, ident, seq) + payload
+            sent[seq] = time.time()
+            try:
+                sock.sendto(pkt, (addr, 0))
+            except OSError:
+                sent.pop(seq, None)     # no route: that echo is simply lost
 
-            t0 = time.time()
-            sock.sendto(pkt, (addr, 0))
-            while True:
-                left = PING_TIMEOUT - (time.time() - t0)
-                if left <= 0:
-                    break
-                sock.settimeout(left)
+        deadline = time.time() + PING_TIMEOUT
+        while any(r is None for r in results):
+            left = deadline - time.time()
+            if left <= 0:
+                break
+            sock.settimeout(left)
+            try:
                 data, _ = sock.recvfrom(1024)
-                # macOS hands back the whole IP packet on this socket type,
-                # Linux hands back the ICMP message alone. Skip the IP header
-                # when one is present rather than assuming either.
-                off = 0
-                if len(data) >= 20 and (data[0] >> 4) == 4:
-                    off = (data[0] & 0x0F) * 4
-                if len(data) >= off + 8 and data[off] == 0:      # echo reply
-                    if struct.unpack("!H", data[off + 6:off + 8])[0] == seq:
-                        rtt = int((time.time() - t0) * 1000)
-                        break
-        except (socket.timeout, OSError):
-            pass
-        finally:
-            if sock is not None:
-                sock.close()
-        results.append(rtt)
+            except (socket.timeout, OSError):
+                break
+            # macOS hands back the whole IP packet on this socket type, Linux
+            # hands back the ICMP message alone. Skip an IP header if present
+            # rather than assuming either.
+            off = 0
+            if len(data) >= 20 and (data[0] >> 4) == 4:
+                off = (data[0] & 0x0F) * 4
+            if len(data) < off + 8 or data[off] != 0:       # not an echo reply
+                continue
+            seq = struct.unpack("!H", data[off + 6:off + 8])[0]
+            if seq in sent and 1 <= seq <= count:
+                results[seq - 1] = int((time.time() - sent[seq]) * 1000)
+    except OSError:
+        pass
+    finally:
+        if sock is not None:
+            sock.close()
     return addr, results
 
 
@@ -472,10 +483,10 @@ class Gateway:
         elif self.ctype == C2S_PING and len(self.cbuf) >= 1:
             host = bytes(self.cbuf).decode("ascii", "replace")
             print(f"PING {host}")
-            # On its own thread: four echoes with a two-second timeout each is
-            # eight seconds worst case, and the link must keep running or the
-            # SNES decides the gateway died while it is busy proving something
-            # else did.
+            # On its own thread: even bounded at one timeout this blocks for
+            # up to two seconds, and the link must keep running or the SNES
+            # decides the gateway died while it is busy proving something else
+            # did — which is exactly what happened when echoes were sequential.
             threading.Thread(target=self.do_ping, args=(host, self.gen),
                              daemon=True).start()
 

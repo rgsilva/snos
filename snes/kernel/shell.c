@@ -500,7 +500,14 @@ static void cmd_net_status(void) {
   }
   waited = (uint16_t)(snos_frames - (uint16_t)(deadline - 60u));
 
-  kcon_puts("gateway alive, v");
+  kcon_puts("gateway alive");
+  if (net_text[0]) {
+    /* The SNES has no address of its own, so anything it serves is reached at
+     * the gateway's. This is where you look before pointing a browser at it. */
+    kcon_puts(" @ ");
+    kcon_puts(net_text);
+  }
+  kcon_puts(", v");
   kcon_putu(net_gw_version);
   kcon_puts(", replied in ");
   kcon_putu(waited);
@@ -511,6 +518,87 @@ static void cmd_net_status(void) {
   kcon_putu(net_stat_bad_sum);
   kcon_puts(", resends ");
   kcon_putu(net_stat_resent);
+  kcon_putc('\n');
+}
+
+/* Wait for a counter the NMI bumps when a reply lands. Returns 0 on timeout.
+ * Every one of these is a single round trip the shell blocks on, which is why
+ * they can share net_text without a queue. */
+static int wait_for(volatile uint16_t *counter, uint16_t before, uint16_t frames) {
+  uint16_t deadline = (uint16_t)(snos_frames + frames);
+  while (*counter == before) {
+    if ((int16_t)(snos_frames - deadline) >= 0) return 0;
+    kbd_idle();
+  }
+  return 1;
+}
+
+static void cmd_net_resolve(char *name) {
+  uint16_t before;
+
+  if (*name == 0) {
+    kcon_puts("usage: net resolve NAME\n");
+    return;
+  }
+  if (!net_up()) {
+    kcon_puts("no gateway attached\n");
+    return;
+  }
+  before = net_resolve_seq;
+  if (net_resolve(name) < 0) {
+    kcon_puts("could not send the request\n");
+    return;
+  }
+  if (!wait_for(&net_resolve_seq, before, 600)) {
+    kcon_puts("no answer from the gateway\n");
+    return;
+  }
+  kcon_puts(name);
+  kcon_putc(' ');
+  /* An empty reply is the gateway saying the name has no A record. It is not a
+   * link failure, and saying "not found" is the useful distinction. */
+  kcon_puts(net_text[0] ? net_text : "not found");
+  kcon_putc('\n');
+}
+
+static void cmd_net_ping(char *host) {
+  uint16_t before;
+  uint8_t i, got = 0;
+
+  if (*host == 0) {
+    kcon_puts("usage: net ping HOST\n");
+    return;
+  }
+  if (!net_up()) {
+    kcon_puts("no gateway attached\n");
+    return;
+  }
+  before = net_ping_seq;
+  if (net_ping(host) < 0) {
+    kcon_puts("could not send the request\n");
+    return;
+  }
+  /* The echoes go out together and share one timeout, so the gateway answers
+   * within about two seconds even when nothing replies. This is the patience
+   * for the GATEWAY, not for the host being pinged — an unreachable host is a
+   * perfectly good answer that arrives on time. */
+  if (!wait_for(&net_ping_seq, before, 1200)) {
+    kcon_puts("no answer from the gateway\n");
+    return;
+  }
+  if (!net_ping_ok) {
+    kcon_puts(host);
+    kcon_puts(" not found\n");
+    return;
+  }
+  for (i = 0; i < net_ping_count; i++) {
+    kcon_putc(net_ping_rtt[i] ? '!' : '.');
+    if (net_ping_rtt[i]) got++;
+  }
+  kcon_putc(' ');
+  kcon_putu(got);
+  kcon_putc('/');
+  kcon_putu(net_ping_count);
   kcon_putc('\n');
 }
 
@@ -585,12 +673,16 @@ static void cmd_net_test(void) {
 
 static void cmd_net(char *rest) {
   char *what = rest;
-  (void)split_word(rest);
+  char *arg = split_word(rest);
   if (streq(what, "status")) cmd_net_status();
   else if (streq(what, "test")) cmd_net_test();
+  else if (streq(what, "resolve")) cmd_net_resolve(arg);
+  else if (streq(what, "ping")) cmd_net_ping(arg);
   else {
-    kcon_puts("net status    gateway link and counters\n");
-    kcon_puts("net test      fetch a known URL to prove the path works\n");
+    kcon_puts("net status         the gateway, its address and counters\n");
+    kcon_puts("net test           fetch a known URL to prove the path works\n");
+    kcon_puts("net resolve NAME   look up a name (A records)\n");
+    kcon_puts("net ping HOST      four ICMP echoes through the gateway\n");
   }
 }
 

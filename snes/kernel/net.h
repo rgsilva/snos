@@ -63,6 +63,19 @@ int net_reap(void);
  * happens and a retransmit that works look identical from the outside. */
 extern volatile uint16_t net_stat_rx_frames;
 extern volatile uint16_t net_stat_hello;
+
+/* Four echoes is what `ping` sends and what the shell prints; the cap is here so
+ * a malformed reply cannot walk off the end of the array. */
+#define NET_PING_MAX 8
+#define NET_TEXT_MAX 48   /* four dotted quads and separators, within 64 cols */
+extern volatile uint16_t net_resolve_seq;
+extern volatile uint16_t net_ping_seq;
+extern volatile uint8_t net_ping_ok;
+extern volatile uint8_t net_ping_count;
+extern volatile uint8_t net_ping_rtt[NET_PING_MAX];
+extern char net_text[NET_TEXT_MAX + 1];
+int net_resolve(const char *name);
+int net_ping(const char *host);
 extern volatile uint16_t net_gw_version;
 int net_hello(void);
 extern volatile uint16_t net_stat_bad_sum;

@@ -59,6 +59,8 @@
  * which is exactly what it did while a fetch was timing out. Nothing else in
  * the protocol is unsolicited, so asking is the only way to know. */
 #define C2S_HELLO 0x04 /* [0] */
+#define C2S_RESOLVE 0x05 /* [len][name...] */
+#define C2S_PING 0x06    /* [len][host...] */
 /* [3][ch][status_lo][status_hi] or [4][...][flags].
  *
  * The flags byte is optional so that a three-byte reply still parses: the
@@ -68,10 +70,19 @@
 #define S2C_F_IMAGE 0x01 /* the body is Mode 3 tile data, not the resource */
 #define S2C_EOF 0x82   /* [1][ch] */
 #define S2C_ERR 0x83   /* [2][ch][code] */
-#define S2C_HELLO 0x84 /* [1][version] */
+#define S2C_HELLO 0x84   /* [n][version][gateway ip as text...] */
+#define S2C_RESOLVE 0x85 /* [n][addresses as text, space separated] */
+#define S2C_PING 0x86    /* [1][0] name did not resolve, or
+                          * [2+n][1][count][rtt ms per echo, 0 = lost] */
 
 volatile uint16_t net_stat_rx_frames;
 volatile uint16_t net_stat_hello;
+volatile uint16_t net_resolve_seq;
+volatile uint16_t net_ping_seq;
+volatile uint8_t net_ping_ok;      /* 0 = the name did not resolve */
+volatile uint8_t net_ping_count;
+volatile uint8_t net_ping_rtt[NET_PING_MAX];
+char net_text[NET_TEXT_MAX + 1];   /* gateway ip, or resolved addresses */
 volatile uint16_t net_gw_version;
 volatile uint16_t net_stat_bad_sum;
 volatile uint16_t net_stat_resent;
@@ -168,6 +179,9 @@ void net_init(void) {
   txframe_bytes = 0;
   net_stat_rx_frames = 0;
   net_stat_hello = 0;
+  net_resolve_seq = 0;
+  net_ping_seq = 0;
+  net_text[0] = 0;
   net_gw_version = 0;
   net_stat_bad_sum = 0;
   net_stat_resent = 0;
@@ -302,6 +316,24 @@ int net_reap(void) {
 /* Ask the far end to say something. The reply lands in ctrl_message and bumps
  * net_stat_hello; the caller watches that counter rather than blocking here,
  * because the link is serviced from NMI and this runs in the foreground. */
+/* Both of these carry a name and expect one reply. They share net_text, which
+ * is fine because the shell blocks for the answer before offering a prompt
+ * again — there is no way to have two in flight. */
+static int ctrl_str(uint8_t cmd, const char *arg) {
+  int n = 0, i;
+  if (!net_up()) return -1;
+  while (arg[n] && n < 200) n++;
+  if (n == 0) return -1;
+  if (txq_space() < n + 2) return -1;
+  txq_put(cmd);
+  txq_put((uint8_t)n);
+  for (i = 0; i < n; i++) txq_put((uint8_t)arg[i]);
+  return 0;
+}
+
+int net_resolve(const char *name) { return ctrl_str(C2S_RESOLVE, name); }
+int net_ping(const char *host) { return ctrl_str(C2S_PING, host); }
+
 int net_hello(void) {
   if (!net_up()) return -1;
   if (txq_space() < 2) return -1;
@@ -339,10 +371,41 @@ static void ctrl_message(void) {
       }
     }
     break;
-  case S2C_HELLO:
-    net_stat_hello++;
+  case S2C_HELLO: {
+    /* The version, then the gateway's own address as text. The SNES has no IP,
+     * so anything it ever serves is reached at the gateway's — which makes this
+     * the answer to "what do I point a browser at?" and worth having in the one
+     * command people already run. */
+    uint8_t i, n;
     net_gw_version = (cmsg_got >= 1) ? cmsg[0] : 0;
+    n = (uint8_t)(cmsg_got > 1 ? cmsg_got - 1 : 0);
+    if (n > NET_TEXT_MAX) n = NET_TEXT_MAX;
+    for (i = 0; i < n; i++) net_text[i] = (char)cmsg[1 + i];
+    net_text[n] = 0;
+    net_stat_hello++;                 /* last: the shell watches this to wake */
     break;
+  }
+  case S2C_RESOLVE: {
+    uint8_t i, n = (uint8_t)cmsg_got;
+    if (n > NET_TEXT_MAX) n = NET_TEXT_MAX;
+    for (i = 0; i < n; i++) net_text[i] = (char)cmsg[i];
+    net_text[n] = 0;
+    net_resolve_seq++;
+    break;
+  }
+  case S2C_PING: {
+    uint8_t i;
+    net_ping_ok = (uint8_t)((cmsg_got >= 1) ? cmsg[0] : 0);
+    net_ping_count = 0;
+    if (net_ping_ok && cmsg_got >= 2) {
+      net_ping_count = cmsg[1];
+      if (net_ping_count > NET_PING_MAX) net_ping_count = NET_PING_MAX;
+      for (i = 0; i < net_ping_count; i++)
+        net_ping_rtt[i] = (uint8_t)((2 + i < cmsg_got) ? cmsg[2 + i] : 0);
+    }
+    net_ping_seq++;
+    break;
+  }
   case S2C_EOF:
     if (cmsg_got >= 1) {
       ch = cmsg[0];
