@@ -49,8 +49,11 @@ static uint8_t top, row, col, vofs_dirty;
  * keyboard panel, so text never scrolls underneath it. */
 static uint8_t text_rows = ROWS;
 
-/* Set while the keyboard's HDMA split is active. con_flush needs it to know
- * which DMA channels are still its own. */
+/* Set while the keyboard's HDMA split is active, so con_split_hide() knows
+ * there is something to tear down. con_flush no longer consults it: HDMA
+ * transfers happen during ACTIVE display, not vblank, so the split costs the
+ * flush nothing — measured, the vblank ceiling is the same 10 transfers with
+ * the keyboard up as with it down. */
 static uint8_t split_on;
 
 /* Set while an application owns the PPU (SYS_GFX). con_flush becomes a no-op:
@@ -210,28 +213,10 @@ void con_puts(const char *s) { while (*s) con_putc(*s++); }
  * at a time meant a six-row repaint took six frames, which was visible as the
  * console lazily catching up with itself.
  *
- * How many depends on who else wants DMA channels. HDMA and DMA are the same
- * eight channels, and while the keyboard split is up it holds 3, 4 and 5 — and
- * reprogramming those for a DMA would overwrite the HDMA table pointer, since
- * $43x2-4 is shared. So: four rows normally, two while the split is active. */
-/* Rows per flush.
- *
- * This used to be 4, and 2 while the keyboard split was up, because the code
- * handed every row its own DMA channel and there were only so many to go round.
- * That was never the real limit: dma_vram writes $420B and the CPU stalls until
- * that single transfer finishes, so the channel index buys nothing and the
- * transfers were always sequential. One channel can do all of them.
- *
- * The real limit is how much of vblank there is. NTSC gives roughly 38 blank
- * scanlines, about 51,800 master cycles, and DMA moves a byte every 8 — call it
- * 6.4 KB. A row is 128 bytes across both layers, so the ceiling is around 40
- * rows and the whole 28-row screen would fit.
- *
- * 8 rather than 28 because the budget is shared: NMI fires at the top of the
- * same window and the link poll is not cheap, and a flush that overruns has its
- * DMA land during active display where VRAM writes are ignored. That failure is
- * invisible — the screen simply stops updating. 8 is a quarter of the estimated
- * ceiling, which leaves room for NMI to be wrong about its own cost. */
+ * How many depends on how much of vblank there is — see CON_FLUSH_ROWS in
+ * console.h for the measurement. It is NOT about DMA channels: dma_vram writes
+ * $420B and the CPU stalls until that single transfer finishes, so transfers
+ * are always sequential and one channel does all of them. */
 #define FLUSH_MAX CON_FLUSH_ROWS
 static uint16_t rowbuf[FLUSH_MAX][32];
 static uint16_t rowbuf1[FLUSH_MAX][32];
@@ -303,8 +288,27 @@ void con_flush(void) {
     while (!(R8(0x4212) & 0x80)) ;                    /* into vblank */
     if (vofs_dirty) { set_vofs(); vofs_dirty = 0; }
     for (i = 0; i < n; i++) {
+        /* Stop the moment vblank ends, and leave the row DIRTY when it does.
+         *
+         * VRAM writes outside vblank are silently ignored, so a transfer that
+         * runs past the window paints nothing and the old code still cleared
+         * the dirty flag — the row was then never redrawn, at all, ever. That
+         * is what made overrunning invisible: no assertion, no glitch, just a
+         * row that stays blank or half-painted until something else happens to
+         * dirty it again.
+         *
+         * CON_FLUSH_ROWS is sized so this never triggers in the normal case.
+         * It is here so that when something changes the arithmetic — a costlier
+         * NMI, a slower emulator, PAL's different window — the failure mode is
+         * "this row goes out next frame" rather than "this row is lost". */
+        if (!(R8(0x4212) & 0x80)) break;
         dma_vram(DMA_CH, (uint16_t)(BG2_MAP + rows[i] * 32), rowbuf[i], 32);
         dma_vram(DMA_CH, (uint16_t)(BG1_MAP + rows[i] * 32), rowbuf1[i], 32);
+        /* Checked AFTER both halves: a pair that straddles the end of vblank
+         * lands the BG2 half and drops the BG1 half, which is the "l  s   i e"
+         * shape — every other column updated. The row is rebuilt whole next
+         * time, so leaving it dirty repairs both halves. */
+        if (!(R8(0x4212) & 0x80)) break;
         dirty[rows[i]] = 0;
     }
 }

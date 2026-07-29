@@ -15,10 +15,28 @@
 void con_init(void);
 void con_putc(int c);
 void con_puts(const char *s);
-/* How many rows one con_flush can move. Callers that decide WHEN to flush
- * need this: flushing more often than every CON_FLUSH_ROWS dirty rows pays a
- * whole vblank to move less than a flush is capable of. */
-#define CON_FLUSH_ROWS 8
+/* How many rows one con_flush can move in a single vblank. Callers that decide
+ * WHEN to flush need this too: flushing more often than every CON_FLUSH_ROWS
+ * dirty rows pays a whole vblank to move less than a flush is capable of, and
+ * flushing LESS often leaves rows sitting unpainted until the next batch. The
+ * batch size in kcon.c and the budget in console.c are therefore the same
+ * number, deliberately.
+ *
+ * MEASURED, not estimated. This was briefly 8, on the arithmetic that NTSC
+ * vblank is ~51,800 master cycles and DMA moves a byte every 8, so the 128
+ * bytes of a row across both layers leaves room for around 40. That counts the
+ * bytes and forgets the code: dma_vram is eight far register writes compiled at
+ * -O0, and the setup costs roughly nine times what the transfer does. Counting
+ * $4212 inside the loop with the budget raised, a flush asking for 16 transfers
+ * completed TEN before vblank ended — five rows, not forty. The rest painted
+ * nothing, and `help` came out with rows missing and one row showing only its
+ * even-numbered columns.
+ *
+ * 4 rows = 8 transfers, comfortably inside the measured 10, and it is the value
+ * that was in service for the whole life of the console before the arithmetic
+ * above talked it upwards. con_flush also stops on the vblank flag now, so
+ * being wrong here costs a frame rather than a row. */
+#define CON_FLUSH_ROWS 4
 void con_flush(void); /* copy up to CON_FLUSH_ROWS dirty rows during vblank */
 
 /* SNOS additions: random access, for the on-screen keyboard panel and the

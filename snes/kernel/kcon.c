@@ -1,13 +1,16 @@
-/* Kernel console layer — a thin wrapper over console.c (which is reused
- * verbatim from snespdp11 and deliberately not modified).
+/* Kernel console layer — a thin wrapper over console.c.
+ *
+ * (console.c came from snespdp11 and was long described here as "reused
+ * verbatim and deliberately not modified". It is neither any more: the flush
+ * path has been reworked for this project. Saying otherwise sent at least one
+ * reader looking for a constraint that no longer exists.)
  *
  * Two things console.c does not do that the kernel needs:
  *
- *  1. con_flush() drains exactly ONE dirty row per call and blocks for vblank
- *     while doing it. That is right for a scrolling emulator display, but a
- *     shell that prints a 10-line help text would leave 9 rows unpainted until
- *     something else happened to call flush again. kcon_sync() loops until the
- *     screen is actually clean.
+ *  1. con_flush() moves up to CON_FLUSH_ROWS dirty rows per call and blocks for
+ *     vblank while doing it, so anything printing more than that in one go is
+ *     left partly unpainted until something calls flush again. kcon_sync()
+ *     loops until the screen is actually clean.
  *
  *  2. Number formatting. printf is Calypsi's biggest stack consumer and the
  *     kernel stack is 2816 bytes (PLAN.md §2), so the kernel never links it.
@@ -25,13 +28,17 @@ void kcon_init(void) { con_init(); }
  *
  * This used to flush on EVERY newline, which is why the row budget never
  * mattered: one row was dirty when the flush ran, so a flush capable of moving
- * eight moved one and paid a whole vblank to do it. Measured, `help` painted
- * one line every two frames — thirty frames for fifteen lines.
+ * four moved one and paid a whole vblank to do it. Measured, `help` painted one
+ * line every two frames — thirty frames for fifteen lines.
  *
  * Waiting for a full batch keeps the reason the original flushed at all: a
- * running application still shows its output, just in groups of eight lines
- * instead of one. Anything that stops to wait for input drains completely,
- * because kbd_idle flushes every frame while it waits. */
+ * running application still shows its output, just in groups of CON_FLUSH_ROWS
+ * lines instead of one. Anything that stops to wait for input drains
+ * completely, because kbd_idle flushes every frame while it waits.
+ *
+ * The batch size is CON_FLUSH_ROWS and not a number of its own: batching MORE
+ * than a flush can move leaves the surplus sitting unpainted until the next
+ * batch trips, which is its own version of the bug this replaced. */
 static uint8_t pending_rows;
 
 void kcon_putc(int c) {
