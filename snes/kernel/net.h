@@ -17,12 +17,20 @@
 
 #include <stdint.h>
 
-/* Four channels, because that is comfortably more than the two or three
- * simultaneous streams anything here will want, and the cost is per-channel
- * ring buffers. */
-#define NET_CHANNELS 4
+/* Eight. The number is set by what fits, and 1536 bytes per channel against
+ * ~35 KB of free far WRAM means it was never memory that limited this — 4 was a
+ * guess made when the question was "can it do two or three at once" and it
+ * simply never got revisited. Eight covers a server listening, a shell session
+ * and a download at the same time, with spare.
+ *
+ * It does NOT make a browser work. Listening is one connection at a time by
+ * design — the gateway blocks in pump() for the life of each — so a browser's
+ * six parallel connections still queue no matter how many channels exist. That
+ * needs the listener handing each accept a different channel, which is a
+ * protocol change and dubious value on a 615 B/s link. */
+#define NET_CHANNELS 8
 
-/* 1 KB per channel, 4 KB in total out of HiRAM's 52 KB.
+/* 1 KB per channel out of HiRAM's 52 KB.
  *
  * Deliberately small. When a ring fills, the receiver simply stops acking, so
  * the sender retransmits and stops making progress — which is backpressure, and
