@@ -27,6 +27,8 @@ WHAT LIVES HERE, AND WHY
 import gzip
 import io
 import os
+import faulthandler
+import signal
 import socket
 import struct
 
@@ -1126,6 +1128,10 @@ class Gateway:
 
 
 def main():
+    # SIGUSR1 dumps every thread's stack: the only way to see WHERE a wedged
+    # daemon is wedged without guessing.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+
     # Do NOT truncate here. The bridge owns the length of both files — it
     # truncates them when the emulator starts a session — and a second truncator
     # silently invalidates the offset the OTHER end is reading from. That was a

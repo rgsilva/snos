@@ -101,7 +101,6 @@ static void vaddr(uint16_t w) {
  * desynchronise it permanently. */
 static int rd(uint8_t *dst, uint16_t n) {
   uint16_t got = 0;
-  uint16_t stalls = 0;
   while (got < n) {
     uint16_t k = sys_net_read(ch, dst + got, (uint16_t)(n - got));
     if (k > 0 && k != SYS_ERR) {
@@ -113,29 +112,6 @@ static int rd(uint8_t *dst, uint16_t n) {
     if (sys_pollkey() == 0x1B) { /* ESC aborts a stalled read */
       quit = 1;
       return 0;
-    }
-    if (++stalls == 600u) {
-      /* Capture the whole parameter block BEFORE printing anything: say() is
-       * itself a syscall and overwrites p0/p1/p2 with its string pointer. The
-       * first version of this probe printed a string address as a byte count
-       * and sent me looking for a kernel bug that was not there. */
-      uint16_t st = sys_net_state(ch);
-      uint16_t sp = sys_net_wspace(ch);
-      uint16_t fr = sys_net_stats();
-      uint16_t dh = SNOS_ARGS.p0, dr = SNOS_ARGS.p1, db = SNOS_ARGS.p2;
-      say("[stalled: state ");
-      sys_putu(st);
-      say(", wspace ");
-      sys_putu(sp);
-      say(", frames ");
-      sys_putu(fr);
-      say(", have ");
-      sys_putu(dh);
-      say(" room ");
-      sys_putu(dr);
-      say(" builds ");
-      sys_putu(db);
-      say("]");
     }
     sys_yield();
   }
@@ -435,9 +411,6 @@ static int read_update(void) {
 
   if (!rd(hdr, 3)) return 0;               /* padding + rect count */
   nrects = be16(hdr + 1);
-  say("[rects=");
-  sys_putu(nrects);
-  say("]");
 
   for (i = 0; i < nrects; i++) {
     uint16_t x, y, w, h, row;
@@ -454,13 +427,6 @@ static int read_update(void) {
     if ((uint16_t)(x + w) > FB_W) w = (uint16_t)(FB_W - x);
     if ((uint16_t)(y + h) > FB_H) h = (uint16_t)(FB_H - y);
 
-    say("[r ");
-    sys_putu(w);
-    sys_putc('x');
-    sys_putu(h);
-    say(" enc ");
-    sys_putu((uint16_t)enc);
-    say("]");
     if (enc == ENC_RAW) {
       /* Straight into the shadow, a row at a time. No intermediate buffer:
        * a single rectangle can be 26 KB and there is nowhere to put it. */
@@ -496,7 +462,6 @@ static int read_update(void) {
 
 /* Read one server message, handling the ones that are not updates. */
 static int pump(void) {
-  say("[pump]");
   if (!rd(hdr, 1)) return 0;
   if (hdr[0] == MSG_UPDATE) return read_update();
   if (hdr[0] == MSG_BELL) return 1;
@@ -601,30 +566,20 @@ int main(void) {
   }
   say("\nESC quits\n");
 
-  say("[clr]");
   for (i = 0; i < NTILES; i++) dirty[i] = 0;
-  say("[gfx]");
   sys_gfx(1);
-  say("[pal]");
   R8(0x2100) = 0x8F;
   load_palette();
-  say("[spr]");
   hide_sprites();
   load_cursor();
   place_cursor();
-  say("[map]");
   setup_ppu();
-  say("[ppu]");
 
   while (!quit) {
-    say("[req]");
-    if (!request(first ? 0 : 1)) { say("[req failed]"); break; }
-    say("[sent]");
+    if (!request(first ? 0 : 1)) break;
     first = 0;
-    if (!pump()) { say("[pump failed]"); break; }
-    say("[painting]");
+    if (!pump()) break;
     flush_dirty();
-    say("[painted]");
 
     /* Drain the keys that arrived while a screenful was being read. The cursor
      * moves locally with no round trip, which is the whole reason it is a

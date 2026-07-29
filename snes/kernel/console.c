@@ -553,6 +553,17 @@ void con_gfx(int acquire) {
 
 int con_dirty_pending(void) {
     int i;
+    /* An application owning the PPU owes VRAM nothing, so it must never look
+     * busy. con_flush() is a no-op while gfx_owned, which means dirty rows can
+     * never be cleared — and NMI defers the network on exactly this answer. Say
+     * "busy" here and the link dies for the entire life of the application.
+     *
+     * That is not hypothetical: `vnc` printed two lines, took the PPU, and the
+     * link stopped mid-handshake and never restarted. It took a thread dump of
+     * the gateway to see it, because from the far side the console had simply
+     * gone quiet. Every earlier app downloaded FIRST and displayed AFTER, so
+     * nothing had ever needed the network while holding the screen. */
+    if (gfx_owned) return 0;
     if (vofs_dirty) return 1;
     for (i = 0; i < RING; i++)
         if (dirty[i]) return 1;
