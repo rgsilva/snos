@@ -42,6 +42,7 @@ In SNOS:
 ```
 net status          probe the gateway (HELLO round trip), its address, counters
 net test            fetch a known URL to prove DNS, TLS and the link work
+get render:URL NAME fetch a PICTURE of a web page
 netecho [PORT]      echo server (default 7777)
 httpd [PORT]        serve the volume over HTTP (default 8080)
 get URL -           fetch and print to the console
@@ -209,3 +210,47 @@ It **refuses while bytes are still queued**, and the caller retries. That is not
 politeness: `build_frame` packs the control queue *before* channel data, so a
 hangup queued next to a half-sent response would overtake it and the client
 would get a truncated page.
+
+## Looking at the web: `render:`
+
+```
+get render:news.ycombinator.com HN
+view HN.IMG
+```
+
+The SNES cannot lay out HTML — Wikipedia's SNES article is 735 KB against a
+64 KB app arena, which is not a tuning problem — but it is genuinely good at
+displaying a 256-colour bitmap, and the image path already exists for
+photographs. So `render:` is the same division of labour as TLS and JPEG
+decoding: the far side does what the 65816 cannot, and the console does what it
+is good at. **No SNES code was written for this.** The bytes arriving are
+ordinary Mode 3 tiles and `view` has no idea a browser was involved.
+
+**512x448, not 256x224.** Rendering at the console's own resolution turns body
+text into a grey smear. Rendering at double and letting `to_img` downscale 2:1
+keeps the greyscale antialiasing that makes 4-pixel-wide glyphs readable —
+supersampling, and it is the difference between "you can tell those are words"
+and "you can read them". 512x448 is exactly twice 256x224, so the Lanczos step
+is a clean 2:1 with no aspect correction.
+
+Chrome is **optional**. Everything else here runs on the standard library plus
+Pillow; missing Chrome gives "no renderer configured" rather than a traceback.
+Set `SNOS_CHROME` to override the binary.
+
+### Two things that cost an hour, worth keeping
+
+**A throwaway `--user-data-dir` is not optional.** Without it Chrome uses the
+real profile — rendering pages with the user's live cookies, sending their
+logged-in session to whatever the SNES asked for, and fighting their own running
+browser for the profile lock.
+
+**But with it, Chrome writes the PNG and then never exits.** So the renderer
+waits for the FILE to appear and stabilise and then kills the process itself.
+Waiting on the process hangs forever, which is exactly what the first version
+did.
+
+### What it costs
+
+A screenful is ~57 KB of tiles: **94 seconds at 615 B/s, about 3 seconds at
+M7's 20 KB/s.** Rendering itself is 2.5-4 s. This is a demo that wants the
+cable.

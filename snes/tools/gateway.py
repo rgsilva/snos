@@ -29,6 +29,8 @@ import io
 import os
 import socket
 import struct
+import subprocess
+import tempfile
 import traceback
 import sys
 import threading
@@ -174,6 +176,122 @@ def local_ip():
         return "0.0.0.0"                # no route at all: offline, and say so
     finally:
         s.close()
+
+
+# ---------------------------------------------------------------- rendering
+#
+# `render:URL` hands the SNES a PICTURE of a web page instead of its bytes.
+#
+# The console cannot lay out HTML — 735 KB of Wikipedia against a 64 KB app
+# arena is not a tuning problem — but it is genuinely good at showing a 256
+# colour bitmap, and the image path to do that already exists for photographs.
+# So the browser is the same trick as TLS and JPEG: the far side does the part
+# the 65816 cannot, and the SNES does the part it is good at.
+#
+# 512x448 and not 256x224. Rendering at the console's own resolution produces a
+# grey smear where body text should be; rendering at double and letting to_img
+# downscale 2:1 keeps the greyscale antialiasing that makes 4-pixel-wide glyphs
+# readable. 512x448 is exactly twice 256x224, so the Lanczos step is a clean 2:1
+# with no aspect correction. This is supersampling, and it is the difference
+# between "you can tell those are words" and "you can read them".
+RENDER_W, RENDER_H = 512, 448
+RENDER_TIMEOUT = 30
+
+CHROME_PATHS = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+]
+
+
+def find_chrome():
+    """Chrome is OPTIONAL. Everything else in this daemon runs on the standard
+    library plus Pillow, and a headless browser is a different weight class of
+    dependency — so its absence has to be a clean message rather than a
+    traceback in a thread nobody is watching."""
+    env = os.environ.get("SNOS_CHROME")
+    if env:
+        return env if os.path.exists(env) else None
+    for path in CHROME_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def render_page(url, width=RENDER_W, height=RENDER_H):
+    """Screenshot a page. Returns PNG bytes, or raises with a usable message.
+
+    One invocation per page, no persistent session: this renders the current
+    window and nothing else, which is all the SNES can show at once anyway.
+    Following a link means rendering again — the page does not have to be held
+    open between requests, and not holding it open is what keeps this a
+    subprocess call rather than a browser-automation dependency.
+
+    Two things learned the hard way, both worth keeping:
+
+    A throwaway --user-data-dir is not optional. Without it Chrome uses the
+    real profile, which means rendering pages with the user's live cookies —
+    their logged-in session sent to whatever the SNES asked for — and fighting
+    their own running browser for the profile lock.
+
+    But with it, Chrome writes the PNG and then NEVER EXITS. So this waits for
+    the file rather than for the process, and kills the process itself. Waiting
+    on exit hangs forever; that is what it did the first time."""
+    chrome = find_chrome()
+    if chrome is None:
+        raise RuntimeError("no renderer configured (set SNOS_CHROME to a "
+                           "Chrome or Chromium binary)")
+    if "://" not in url:
+        url = "https://" + url
+
+    with tempfile.TemporaryDirectory() as tmp:
+        shot = os.path.join(tmp, "page.png")
+        cmd = [
+            chrome, "--headless", "--no-sandbox", "--disable-gpu",
+            f"--screenshot={shot}",
+            f"--window-size={width},{height}",
+            "--hide-scrollbars",
+            "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={os.path.join(tmp, 'profile')}",
+            url,
+        ]
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE)
+        deadline = time.time() + RENDER_TIMEOUT
+        size = -1
+        try:
+            while time.time() < deadline:
+                if os.path.exists(shot):
+                    now = os.path.getsize(shot)
+                    # Stable across two polls means the write finished. Reading
+                    # the instant it appears can catch a partial PNG.
+                    if now > 0 and now == size:
+                        break
+                    size = now
+                elif proc.poll() is not None:
+                    break               # died without producing anything
+                time.sleep(0.1)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+        if not os.path.exists(shot) or os.path.getsize(shot) == 0:
+            err = (proc.stderr.read() or b"").decode("utf-8", "replace")
+            # Chrome logs two harmless task_policy_set complaints on macOS every
+            # single run; they are not the failure and must not be reported as
+            # one.
+            lines = [l for l in err.splitlines()
+                     if l.strip() and "task_policy_set" not in l]
+            raise RuntimeError("render produced no image: "
+                               + (lines[-1] if lines else "timed out"))
+        with open(shot, "rb") as f:
+            return f.read()
 
 
 class Gateway:
@@ -379,6 +497,38 @@ class Gateway:
             print(f"  [{time.time() - t0:5.1f}s] {what}")
 
         mark("thread started")
+
+        # A rendered page never touches the HTTP path below: Chrome does the
+        # fetching, so there is no response to read and no Content-Type to
+        # believe. It rejoins at the image conversion, which is the whole point
+        # — the bytes that reach the SNES are the same Mode 3 tiles a photograph
+        # would have produced, and `view` needs no idea any of this happened.
+        if url.startswith("render:"):
+            target = url[len("render:"):]
+            print(f"  rendering {target} at {RENDER_W}x{RENDER_H}")
+            try:
+                body = render_page(target)
+            except Exception as e:
+                print(f"  render failed: {e}")
+                self.push_ctrl(S2C_ERR, bytes([ch, 4]), gen)
+                return
+            mark(f"rendered: {len(body)} bytes of PNG")
+            try:
+                before = len(body)
+                body = to_img(body)
+                print(f"  converted {before} -> {len(body)} bytes of Mode 3 tiles")
+            except Exception as e:
+                print(f"  image conversion failed: {e}")
+                self.push_ctrl(S2C_ERR, bytes([ch, 2]), gen)
+                return
+            mark("replying")
+            print(f"  -> 200, {len(body)} bytes [IMG]")
+            self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, 200, 1), gen)
+            for i in range(0, len(body), 512):
+                self.push(ch, body[i:i + 512], gen)
+            self.push_ctrl(S2C_EOF, bytes([ch]), gen)
+            return
+
         if "://" not in url:
             url = "https://" + url
         ctype = ""
