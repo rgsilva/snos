@@ -636,6 +636,21 @@ int main(void) {
    * which paints the console's own font back at you, scrambled. `view` has
    * always set this; copying its VRAM layout without its VMAIN was the bug. */
   R8(0x2115) = 0x80;
+  /* Stop all HDMA before touching the display.
+   *
+   * The keyboard panel drives HDMA on channels 3/4/5 and rewrites the BG
+   * tilemap-base and scroll registers EVERY SCANLINE. Left running, the PPU
+   * fetches tilemap entries from the wrong address part-way down the frame, so
+   * arbitrary tile indices select arbitrary tile data and the screen fills with
+   * scattered noise that flickers as HDMA re-triggers — on top of a picture that
+   * is otherwise perfectly correct in VRAM.
+   *
+   * sys_gfx(1) is supposed to tear the split down, and under the test runner it
+   * does, because no keys are bound there and the panel never existed. That is
+   * exactly the configuration this was verified in, and exactly why the failure
+   * only ever appeared on Ricardo's screen. One register write costs nothing and
+   * does not depend on that teardown having happened. */
+  R8(0x420C) = 0x00;
   load_palette();
   hide_sprites();
   load_cursor();
