@@ -85,6 +85,18 @@ def checksum(f):
     return sum(b for i, b in enumerate(f) if i != SUM) & 0xFF
 
 
+def ctrl_channel(rec):
+    """Which channel a queued control record is about, or None if it is about
+    the session rather than a stream.
+
+    push_ctrl queues exactly one whole message per record, so the payload
+    starts at byte 2 and — for every per-channel type there is — its first byte
+    is the channel. S2C_HELLO belongs to nobody and answers None."""
+    if len(rec) >= 3 and rec[0] in (S2C_OPEN, S2C_EOF, S2C_ERR):
+        return rec[2]
+    return None
+
+
 SCREEN_W, SCREEN_H = 256, 224
 IMG_MAGIC = b"SIMG"
 
@@ -335,8 +347,25 @@ class Gateway:
         self.socks = {}
         self.listeners = {}      # channel -> listening socket
         self.pages = {}          # channel -> browser.Session
+        # `pages` is written by the frame loop (a close arrives) and by every
+        # web worker (a page opens), so it needs a lock of its own — separate
+        # from the send queue's, because a thread holding one must never be
+        # waiting on the other.
+        self.plock = threading.Lock()
+        # Per channel, bumped every time the SNES closes one. `gen` is the same
+        # idea for the whole session; this is the same idea for one channel, and
+        # it is needed because forgetting what is QUEUED does not stop a worker
+        # that has not queued anything yet. A `web` cancelled while Chrome was
+        # still starting up went on to register its page and push 49 KB into a
+        # channel the console had already given back. Captured when the request
+        # is accepted, checked before anything is claimed or sent.
+        self.chgen = {}
         self.inflight = None
         self.out = []            # [ch, bytearray] queued for the SNES
+        # True when out[0] has already had bytes taken from it. Only the head
+        # can be part-sent, and knowing whether it is decides two things: where
+        # a HELLO may safely jump to, and which records forget() may throw away.
+        self.out_started = False
         self.lock = threading.Lock()
         self.cstate = 0
         self.ctype = 0
@@ -353,6 +382,131 @@ class Gateway:
     def push_ctrl(self, typ, payload, gen=None):
         self.push(CH_CTRL, bytes([typ, len(payload)]) + payload, gen)
 
+    def push_hello(self, payload):
+        """Answer a HELLO ahead of whatever bulk data is queued.
+
+        A HELLO names no channel and terminates nothing, so nothing downstream
+        depends on where it sits in the stream — and `net status` is the one
+        message that is worthless late. Behind a 49 KB window it takes eighty
+        seconds to arrive, which is how the console came to report the gateway
+        missing and then healthy again a minute later, with nothing wrong at
+        either end.
+
+        S2C_OPEN, S2C_EOF and S2C_ERR must NOT do this and do not: an EOF has to
+        stay behind the bytes it terminates, and an OPEN has to precede them.
+        Only a session-level message can overtake anything.
+
+        The one place it cannot go is in front of a control record that is HALF
+        SENT. Channel 0 is a single byte stream on the far side, reassembled by
+        a [type][len][payload] state machine, so splicing a whole message into
+        the middle of a partly transmitted one would corrupt both. In that case
+        it goes second — behind the record that has already started, and still
+        in front of the backlog."""
+        rec = [CH_CTRL, bytearray([S2C_HELLO, len(payload)]) + payload]
+        with self.lock:
+            mid_message = (self.out and self.out_started
+                           and self.out[0][0] == CH_CTRL)
+            if mid_message:
+                self.out.insert(1, rec)
+            else:
+                self.out.insert(0, rec)
+                self.out_started = False
+
+    def forget(self, ch):
+        """Throw away everything still queued for a channel the SNES has
+        finished with.
+
+        Without this, a `web` window keeps being transmitted long after the
+        application that asked for it has gone: 49 KB, eighty seconds of a
+        615 B/s link, spent on a page nobody will ever see. Three separate
+        symptoms came out of that one omission, and channel REUSE is why —
+
+          the next `web` is handed channel 1 again and receives the tail of the
+          dead page, S2C_OPEN and all, before its own, so two images end up
+          interleaved in one cache file and the picture is garbage;
+
+          a second page queues behind the first one's corpse and the app's own
+          timeout fires before a byte of it arrives;
+
+          and every control message queues there too, which is why a HELLO went
+          unanswered for a minute. push_hello() now steps around that one, but
+          the queue should not have been full of a dead page to begin with.
+
+        test/net.lua, the canned gateway the suite runs against, has done this
+        since it was written and says why. This one never got the same
+        treatment, which is precisely why the tests could not see it.
+
+        NOT done in drop(). That is the gateway noticing the far end went away,
+        and the bytes already queued are ones the application still wants — a
+        half-closed HTTP response consists of exactly those. Only the SNES
+        saying C2S_CLOSE or C2S_HANGUP means "stop, I am not reading this".
+
+        A control record that is already half transmitted is kept, because
+        truncating a message mid-payload would desynchronise the far side's
+        reassembly of channel 0. That leaves at most one stale S2C_EOF or
+        S2C_ERR in flight, and the kernel ignores both for a channel it has
+        freed."""
+        with self.lock:
+            head = self.out[0] if self.out else None
+            keep = []
+            for i, rec in enumerate(self.out):
+                if rec[0] == CH_CTRL:
+                    if ctrl_channel(rec[1]) == ch and not (
+                            i == 0 and self.out_started):
+                        continue
+                elif rec[0] == ch:
+                    continue
+                keep.append(rec)
+            if not keep or keep[0] is not head:
+                self.out_started = False
+            self.out = keep
+
+    def stale(self, ch, cgen):
+        """Has the console let this channel go since the work began?
+
+        Channels are reused, so "let go" and "handed to something else" are the
+        same event as far as anything already in flight is concerned. Answering
+        yes means: claim nothing, send nothing, report nothing."""
+        with self.plock:
+            return cgen is not None and self.chgen.get(ch, 0) != cgen
+
+    def released(self, ch):
+        """The SNES has finished with a channel. Everything started before this
+        moment is now working for nobody."""
+        with self.plock:
+            self.chgen[ch] = self.chgen.get(ch, 0) + 1
+
+    def reply(self, ch, status, flags, body, gen, cgen=None):
+        """The whole answer to one request: status, body, end of body.
+
+        One method because the three parts are not independent. Deciding
+        separately whether to send each of them is how half an answer ends up in
+        a channel that has since been handed to something else — an S2C_OPEN
+        with nothing behind it, or a body with no status in front of it. The
+        channel is tested once, and then either all of it goes or none does."""
+        if self.stale(ch, cgen):
+            print(f"  ch{ch} was closed; {len(body)} bytes not sent")
+            return
+        self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, status, flags), gen)
+        # Chunked so one huge stream cannot monopolise the frame builder.
+        for i in range(0, len(body), 512):
+            self.push(ch, body[i:i + 512], gen)
+        self.push_ctrl(S2C_EOF, bytes([ch]), gen)
+
+    def retire(self, page):
+        """Take a browser session down without stalling the caller.
+
+        close() waits for whatever CDP call is in flight — that is the whole
+        point of the session lock — and the C2S_CLOSE that asks for it arrives
+        on the frame loop, which cannot block for thirty seconds without
+        stopping the link dead. So the session is marked dead at once, which is
+        what an in-flight operation checks, and the waiting happens on a thread
+        nobody is depending on."""
+        if page is None:
+            return
+        page.dead = True
+        threading.Thread(target=page.close, daemon=True).start()
+
     def drop(self, ch):
         """Close a stream and tell the SNES, once. Both directions can discover
         the end independently — the socket erroring on send, the reader thread
@@ -368,7 +522,7 @@ class Gateway:
         self.push_ctrl(S2C_EOF, bytes([ch]))
         print(f"  ch{ch} closed")
 
-    def do_connect(self, ch, hostport, gen):
+    def do_connect(self, ch, hostport, gen, cgen=None):
         """A plain TCP stream. The gateway still owns DNS and the socket, but
         the bytes in both directions belong to whatever the SNES is running."""
         host, _, port = hostport.partition(":")
@@ -383,6 +537,16 @@ class Gateway:
             self.push_ctrl(S2C_ERR, bytes([ch, 1]), gen)
             return
         sock.settimeout(None)
+        # Connecting can take twenty seconds; the app can be long gone. The
+        # close would have found no socket, so this would leave one open with
+        # nobody on either end of it.
+        if self.stale(ch, cgen):
+            print(f"  ch{ch} was closed before the connection came up")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return
         self.socks[ch] = sock
         print(f"  connected ch{ch} -> {host}:{port}")
         self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, 200, 0), gen)
@@ -418,31 +582,61 @@ class Gateway:
             pass
         self.drop(ch)
 
-    def do_web(self, ch, op, arg, gen):
+    def do_web(self, ch, op, arg, gen, cgen=None):
         """Drive a held-open browser page and send back a picture of it.
 
         Every operation answers with a full window, because the console has no
         way to apply a partial update to a bitmap it does not model — it has the
         pixels and nothing else. That is what makes v2's tile cache the whole
         performance story: a window is ~49 KB today and most of it is tiles the
-        SNES was already holding."""
+        SNES was already holding.
+
+        Runs on its own thread, and the page it drives can be taken away from it
+        at any moment by a C2S_CLOSE on the frame loop. So every call into the
+        browser happens under the session's own lock, and the session is checked
+        for having been retired both before the work and before the answer is
+        queued. The alternative is what this used to do: close the websocket
+        under a screenshot in progress and lose the thread to
+        `OSError: [Errno 9] Bad file descriptor`."""
+        page = None
         try:
             if op == WEB_OPEN:
-                old = self.pages.pop(ch, None)
-                if old is not None:
-                    old.close()
+                with self.plock:
+                    old = self.pages.pop(ch, None)
+                self.retire(old)
                 url = arg.decode("ascii", "replace")
                 print(f"WEB ch{ch} open {url}")
-                page = browser.Session()
-                self.pages[ch] = page
-                page.navigate(url)
+                fresh = browser.Session()
+                # Starting Chrome takes a second or two, and a `web` abandoned
+                # in that window closed a channel this had not claimed yet: the
+                # close found no page to retire, and this then registered one
+                # and pushed a whole window into a channel the console had
+                # given back. Claim and check together, under the lock.
+                with self.plock:
+                    ours = self.chgen.get(ch, 0) == cgen if cgen is not None \
+                        else True
+                    if ours:
+                        self.pages[ch] = fresh
+                if not ours:
+                    print(f"  ch{ch} was closed while the browser was starting")
+                    self.retire(fresh)
+                    return
+                page = fresh
             else:
-                page = self.pages.get(ch)
+                with self.plock:
+                    page = self.pages.get(ch)
                 if page is None:
                     print(f"  ch{ch} has no page open")
                     self.push_ctrl(S2C_ERR, bytes([ch, 5]), gen)
                     return
-                if op == WEB_SCROLL:
+
+            with page.busy:
+                if page.dead:
+                    print(f"  ch{ch} was closed before it could be driven")
+                    return
+                if op == WEB_OPEN:
+                    page.navigate(url)
+                elif op == WEB_SCROLL:
                     # One signed byte of screens: the console cannot afford a
                     # finer unit when every move is a fresh image.
                     d = arg[0] if arg else 1
@@ -461,23 +655,43 @@ class Gateway:
                 else:
                     self.push_ctrl(S2C_ERR, bytes([ch, 6]), gen)
                     return
+                if page.dead:
+                    print(f"  ch{ch} was closed while it was working")
+                    return
+                png = page.shot()
 
-            png = page.shot()
+            # Outside the lock: converting 33 KB of PNG to tiles is the one
+            # expensive thing here that does not touch the browser, and holding
+            # a session hostage during it would make every close wait for it.
             body = to_img(png, browser.SNES_W, browser.SNES_H)
             print(f"  -> {len(png)} B png, {len(body)} B of tiles")
-            self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, 200, 1), gen)
-            for i in range(0, len(body), 512):
-                self.push(ch, body[i:i + 512], gen)
-            self.push_ctrl(S2C_EOF, bytes([ch]), gen)
+            with self.plock:
+                gone = (self.pages.get(ch) is not page
+                        or (cgen is not None and self.chgen.get(ch, 0) != cgen))
+            if gone:
+                # Closed, or already reopened onto something else, while this
+                # window was being built. Queueing 49 KB now would be queueing
+                # it for whoever holds the channel next.
+                print(f"  ch{ch} no longer wants this window")
+                return
+            self.reply(ch, 200, 1, body, gen, cgen)
         except Exception as e:
             print(f"  web failed: {type(e).__name__}: {e}")
             traceback.print_exc()
-            page = self.pages.pop(ch, None)
-            if page is not None:
-                page.close()
-            self.push_ctrl(S2C_ERR, bytes([ch, 4]), gen)
+            with self.plock:
+                mine = (page is None or self.pages.get(ch) is page) and (
+                    cgen is None or self.chgen.get(ch, 0) == cgen)
+                orphan = self.pages.pop(ch, None) if mine else None
+            self.retire(orphan)
+            if mine:
+                self.push_ctrl(S2C_ERR, bytes([ch, 4]), gen)
+            else:
+                # The channel moved on while this was failing. Reporting the
+                # error now would abort whatever holds it instead — an error
+                # from a dead request killing a live one is worse than silence.
+                print(f"  ch{ch} has moved on; the failure is not reported")
 
-    def do_listen(self, ch, port, gen):
+    def do_listen(self, ch, port, gen, cgen=None):
         """Bind, then hand ONE connection at a time to the SNES on this channel.
 
         One at a time because there are three channels total and a console that
@@ -496,6 +710,17 @@ class Gateway:
         except OSError as e:
             print(f"  listen failed: {e}")
             self.push_ctrl(S2C_ERR, bytes([ch, 1]), gen)
+            return
+        # The app can have given up during bind(). The close would have found
+        # no listener to release, so registering one now would hold the port
+        # until the daemon is restarted — and the next run of the server would
+        # fail to bind for no visible reason.
+        if self.stale(ch, cgen):
+            print(f"  ch{ch} was closed before the port was bound")
+            try:
+                srv.close()
+            except OSError:
+                pass
             return
         self.listeners[ch] = srv
         print(f"  listening ch{ch} on {LISTEN_ADDR}:{port} "
@@ -535,7 +760,7 @@ class Gateway:
         self.listeners.pop(ch, None)
 
     # ------------------------------------------------------------- fetching
-    def fetch(self, ch, url, as_image=False, gen=None):
+    def fetch(self, ch, url, as_image=False, gen=None, cgen=None):
         """Wrapper whose only job is that this thread cannot die in silence.
 
         An unhandled exception here used to kill the thread and nothing else:
@@ -545,13 +770,14 @@ class Gateway:
         the intermittent timeout that took two sessions to chase. A crash is now
         an error the console can print."""
         try:
-            self._fetch(ch, url, as_image, gen)
+            self._fetch(ch, url, as_image, gen, cgen)
         except Exception as e:
             print(f"  fetch crashed: {type(e).__name__}: {e}")
             traceback.print_exc()
-            self.push_ctrl(S2C_ERR, bytes([ch, 3]), gen)
+            if not self.stale(ch, cgen):
+                self.push_ctrl(S2C_ERR, bytes([ch, 3]), gen)
 
-    def _fetch(self, ch, url, as_image=False, gen=None):
+    def _fetch(self, ch, url, as_image=False, gen=None, cgen=None):
         """Runs on its own thread: a blocking fetch must not stall the link, or
         the SNES times out waiting for a status it was always going to get.
 
@@ -594,10 +820,7 @@ class Gateway:
                 return
             mark("replying")
             print(f"  -> 200, {len(body)} bytes [IMG]")
-            self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, 200, 1), gen)
-            for i in range(0, len(body), 512):
-                self.push(ch, body[i:i + 512], gen)
-            self.push_ctrl(S2C_EOF, bytes([ch]), gen)
+            self.reply(ch, 200, 1, body, gen, cgen)
             return
 
         if "://" not in url:
@@ -682,11 +905,7 @@ class Gateway:
         flags = 1 if (as_image and status == 200) else 0
         mark("replying")
         print(f"  -> {status}, {len(body)} bytes{' [IMG]' if flags else ''}")
-        self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, status, flags), gen)
-        # Chunked so one huge stream cannot monopolise the frame builder.
-        for i in range(0, len(body), 512):
-            self.push(ch, body[i:i + 512], gen)
-        self.push_ctrl(S2C_EOF, bytes([ch]), gen)
+        self.reply(ch, status, flags, body, gen, cgen)
 
     # ------------------------------------------------------------- inbound
     def ctrl_byte(self, b):
@@ -704,42 +923,47 @@ class Gateway:
                 self.dispatch()
 
     def dispatch(self):
+        # Every worker is handed the channel's generation as it stands NOW,
+        # which is the moment the request was accepted. Reading it inside the
+        # thread would be reading it after a close that has already happened,
+        # and the whole point is to notice that close.
+        cgen = self.chgen.get(self.cbuf[0], 0) if self.cbuf else 0
         if self.ctype in (C2S_FETCH, C2S_IMAGE) and len(self.cbuf) >= 1:
             ch = self.cbuf[0]
             url = self.cbuf[1:].decode("ascii", "replace")
             want_img = self.ctype == C2S_IMAGE
             print(f"{'IMAGE' if want_img else 'FETCH'} ch{ch} {url}")
             threading.Thread(target=self.fetch,
-                             args=(ch, url, want_img, self.gen),
+                             args=(ch, url, want_img, self.gen, cgen),
                              daemon=True).start()
         elif self.ctype == C2S_HELLO:
             # Answered from the frame thread, so a fetch blocked on the network
-            # cannot make the daemon look dead. It is not jumped to the front of
-            # the queue, though: control shares the send queue with bodies, and
-            # S2C_EOF has to stay behind the bytes it terminates. So a HELLO
-            # issued mid-download waits for the download. That is fine for what
-            # this is for — the shell is idle when you type `net status` — but
-            # it is a probe of the daemon, not of the queue's depth.
-            self.push_ctrl(S2C_HELLO,
-                           bytes([GW_VERSION]) + local_ip().encode())
+            # cannot make the daemon look dead — and now jumped ahead of queued
+            # bulk data too, because a liveness probe that waits eighty seconds
+            # behind a download reports the opposite of the truth. See
+            # push_hello() for why only this message may overtake anything.
+            self.push_hello(bytes([GW_VERSION]) + local_ip().encode())
         elif self.ctype == C2S_CONNECT and len(self.cbuf) >= 1:
             ch = self.cbuf[0]
             hostport = bytes(self.cbuf[1:]).decode("ascii", "replace")
             print(f"CONNECT ch{ch} {hostport}")
             threading.Thread(target=self.do_connect,
-                             args=(ch, hostport, self.gen), daemon=True).start()
+                             args=(ch, hostport, self.gen, cgen),
+                             daemon=True).start()
 
         elif self.ctype == C2S_LISTEN and len(self.cbuf) >= 3:
             ch = self.cbuf[0]
             port = self.cbuf[1] | (self.cbuf[2] << 8)
             print(f"LISTEN ch{ch} port {port}")
-            threading.Thread(target=self.do_listen, args=(ch, port, self.gen),
+            threading.Thread(target=self.do_listen,
+                             args=(ch, port, self.gen, cgen),
                              daemon=True).start()
 
         elif self.ctype == C2S_WEB and len(self.cbuf) >= 2:
             ch, op = self.cbuf[0], self.cbuf[1]
             arg = bytes(self.cbuf[2:])
-            threading.Thread(target=self.do_web, args=(ch, op, arg, self.gen),
+            threading.Thread(target=self.do_web,
+                             args=(ch, op, arg, self.gen, cgen),
                              daemon=True).start()
 
         elif self.ctype == C2S_HANGUP and len(self.cbuf) >= 1:
@@ -758,25 +982,46 @@ class Gateway:
                 except OSError:
                     pass
                 print(f"  ch{ch} hung up by the app")
+            # The app has finished with this connection and stopped reading it,
+            # so anything of it still queued is bytes nobody will collect,
+            # sitting in front of the next request's.
+            self.released(ch)
+            self.forget(ch)
 
         elif self.ctype == C2S_CLOSE and len(self.cbuf) >= 1:
-            print(f"CLOSE ch{self.cbuf[0]}")
-            sock = self.socks.pop(self.cbuf[0], None)
+            ch = self.cbuf[0]
+            print(f"CLOSE ch{ch}")
+            # Before anything else: every worker already running for this
+            # channel is now working for nobody, including the ones that have
+            # not claimed a socket or a page yet and would otherwise sail past
+            # the teardown below.
+            self.released(ch)
+            sock = self.socks.pop(ch, None)
             if sock is not None:
                 try:
                     sock.close()
                 except OSError:
                     pass
-            page = self.pages.pop(self.cbuf[0], None)
-            if page is not None:
-                page.close()
-            srv = self.listeners.pop(self.cbuf[0], None)
+            with self.plock:
+                page = self.pages.pop(ch, None)
+            # Marked dead here and closed on a thread: this is the frame loop,
+            # and close() waits for any CDP call still in flight. Closing it
+            # inline used to pull the websocket out from under a worker
+            # mid-screenshot, killing the thread on a bad file descriptor and
+            # leaving the console waiting for a window that no longer had
+            # anyone to send it.
+            self.retire(page)
+            srv = self.listeners.pop(ch, None)
             if srv is not None:
                 # Release the port, or the next run of the app cannot bind it.
                 try:
                     srv.close()
                 except OSError:
                     pass
+            # Everything still queued for this channel is now undeliverable.
+            # Keeping it starves the link for a minute and hands the next user
+            # of the channel — channels are reused — the tail of a dead page.
+            self.forget(ch)
 
     def deliver(self, f):
         o = HDR
@@ -816,8 +1061,11 @@ class Gateway:
                 f[o + 2:o + 2 + n] = data[:n]
                 del data[:n]
                 o += 2 + n
-                if not data:
+                if data:
+                    self.out_started = True
+                else:
                     self.out.pop(0)
+                    self.out_started = False
                 any_data = True
         for i in range(o, FRAME):
             f[i] = CH_PAD
@@ -854,6 +1102,7 @@ class Gateway:
                 with self.lock:
                     self.gen += 1
                     self.out.clear()
+                    self.out_started = False
                 self.cstate, self.ctype, self.cbuf = 0, 0, bytearray()
                 print("gateway: SNES restarted, session reset")
         else:

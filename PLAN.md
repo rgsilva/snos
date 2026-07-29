@@ -295,6 +295,24 @@ configuration. Not designed yet. Deliberately not started.
 
 **Done when:** the SNES answers a ping from another machine on the LAN at its own address.
 
+### Housekeeping — the gateway needs a clean-up *(agreed 2026-07-29, not urgent)*
+`gateway.py` has grown by accretion — HTTP fetch, image conversion, a `render:` scheme, a held-
+open browser, listen/accept, and now a plain TCP path for VNC — and the seams show. Known debt:
+
+- **`render:` is a testing back door** and should not survive as a public URL scheme. `web` is
+  being retired in favour of `vnc`, so it can probably go entirely.
+- **`SYS_NET_IMAGE` / `C2S_IMAGE` are dead** — the forced-conversion mechanism from before the
+  gateway decided from Content-Type. Still wired through the kernel, the trap layer and the test
+  gateway.
+- **The browser (`tools/browser.py` + the `web` app + `C2S_WEB`) becomes dead weight** once `vnc`
+  works, along with headless Chrome as a dependency.
+- The daemon now has several kinds of channel (fetch, listen, connect, web) with different
+  teardown rules, discovered one race at a time. They deserve one model rather than four.
+
+**Not a refactor for its own sake:** every fault found on 2026-07-29 — a queue that outlived its
+channel, a page closed under a running thread, an `S2C_ERR` landing on a freed channel — was a
+teardown bug, and they were separate bugs only because teardown is written four times.
+
 ### M12 — Services, not proxies *(follows M11)*
 Once the console has its own address, the gateway stops being a shim everything flows through
 and becomes **an ordinary host offering a service**. The relationship inverts: today every new

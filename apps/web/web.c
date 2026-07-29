@@ -223,6 +223,20 @@ static int show(void) {
 
 /* ------------------------------------------------------------- transferring */
 
+/* Should the transfer be given up? ESC, and nothing else.
+ *
+ * It used to be any key at all — `sys_pollkey() != SYS_ERR` — which is
+ * indefensible when a window costs eighty seconds: one stray press threw the
+ * whole load away, and the likeliest stray press is an arrow key aimed at a
+ * page that has not finished arriving. Every other key is swallowed here rather
+ * than acted on, because there is nothing yet for it to act on.
+ *
+ * ESC quits the interactive loop too, so the rule across the whole application
+ * is the same one: ESC means stop what you are doing. */
+#define KEY_ESC 0x1B
+
+static int abandon(void) { return (int)sys_pollkey() == KEY_ESC; }
+
 /* Drain a window off the channel into the cache file.
  *
  * Through SRAM rather than straight to VRAM, deliberately: VRAM only takes
@@ -241,7 +255,7 @@ static int fetch(uint16_t ch) {
       say("\ntimed out waiting for the page\n");
       return 0;
     }
-    if (sys_pollkey() != SYS_ERR) {
+    if (abandon()) {
       say("\ncancelled\n");
       return 0;
     }
@@ -281,7 +295,7 @@ static int fetch(uint16_t ch) {
     }
     st = (int)sys_net_state(ch);
     if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
-    if (sys_pollkey() != SYS_ERR) {
+    if (abandon()) {
       say("\ncancelled\n");
       sys_close();
       return 0;
@@ -360,7 +374,7 @@ int main(void) {
         sys_yield();
         continue;
       }
-      if (c == 0x1B) { /* ESC */
+      if (c == KEY_ESC) {
         running = 0;
         break;
       }

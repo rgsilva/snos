@@ -34,6 +34,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -170,9 +171,27 @@ class Session:
     needs the same page instance that produced the screenshot, and scrolling
     needs the page's own scroll position. A fresh Chrome per action could screen-
     shot but never interact.
+
+    THREADING. Held open means held open ACROSS threads: the gateway drives a
+    page from a worker while the frame loop can decide at any moment that the
+    console has hung up. So a session carries its own lock and a `dead` flag —
+    `busy` makes close() wait for whatever CDP call is in flight instead of
+    pulling the socket out from under it, and `dead` stops the next call from
+    starting. Without the pair, closing mid-screenshot killed the worker with
+    `OSError: [Errno 9] Bad file descriptor` and the SNES waited for a page that
+    was never coming.
     """
 
     def __init__(self):
+        # Before anything that can raise: close() must be safe on a session
+        # whose constructor gave up half way.
+        self.busy = threading.RLock()
+        self.dead = False
+        self.closed = False
+        self.ws = None
+        self.proc = None
+        self.profile = None
+
         chrome = find_chrome()
         if chrome is None:
             raise RuntimeError("no renderer configured (set SNOS_CHROME)")
@@ -199,38 +218,44 @@ class Session:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
-        self.ws = None
         self.next_id = 1
         self.history = []          # visited URLs, for back/forward
         self.hpos = -1
-        deadline = time.time() + 30
-        last = None
-        while time.time() < deadline:
-            try:
-                targets = json.loads(self._http("/json/list"))
-                pages = [t for t in targets if t.get("type") == "page"
-                         and t.get("webSocketDebuggerUrl")]
-                if pages:
-                    self.ws = WebSocket(pages[0]["webSocketDebuggerUrl"])
-                    break
-            except Exception as e:
-                last = e
-            if self.proc.poll() is not None:
-                raise RuntimeError("chrome exited before it was reachable")
-            time.sleep(0.2)
-        if self.ws is None:
-            raise RuntimeError(f"chrome never became reachable: {last}")
+        # From here on Chrome is RUNNING, so every exit has to go through
+        # close(). Raising straight out used to leak a headless browser and its
+        # profile directory for the life of the daemon, once per failed open.
+        try:
+            deadline = time.time() + 30
+            last = None
+            while time.time() < deadline:
+                try:
+                    targets = json.loads(self._http("/json/list"))
+                    pages = [t for t in targets if t.get("type") == "page"
+                             and t.get("webSocketDebuggerUrl")]
+                    if pages:
+                        self.ws = WebSocket(pages[0]["webSocketDebuggerUrl"])
+                        break
+                except Exception as e:
+                    last = e
+                if self.proc.poll() is not None:
+                    raise RuntimeError("chrome exited before it was reachable")
+                time.sleep(0.2)
+            if self.ws is None:
+                raise RuntimeError(f"chrome never became reachable: {last}")
 
-        self.cmd("Page.enable")
-        self.cmd("Runtime.enable")
-        # --window-size sets the OS window, which is NOT the viewport: Chrome
-        # handed back 512x241 when asked for 512x384. Override the metrics so
-        # the screenshot is exactly the size the console expects, or to_img
-        # letterboxes a short image into a tall window and the page arrives
-        # squashed into the middle of the screen.
-        self.cmd("Emulation.setDeviceMetricsOverride",
-                 {"width": CSS_W, "height": CSS_H,
-                  "deviceScaleFactor": 1, "mobile": False})
+            self.cmd("Page.enable")
+            self.cmd("Runtime.enable")
+            # --window-size sets the OS window, which is NOT the viewport:
+            # Chrome handed back 512x241 when asked for 512x384. Override the
+            # metrics so the screenshot is exactly the size the console expects,
+            # or to_img letterboxes a short image into a tall window and the
+            # page arrives squashed into the middle of the screen.
+            self.cmd("Emulation.setDeviceMetricsOverride",
+                     {"width": CSS_W, "height": CSS_H,
+                      "deviceScaleFactor": 1, "mobile": False})
+        except BaseException:
+            self.close()
+            raise
 
     def _http(self, path):
         with urllib.request.urlopen(
@@ -345,12 +370,33 @@ class Session:
         return base64.b64decode(r["data"])
 
     def close(self):
-        if self.ws is not None:
-            self.ws.close()
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-        shutil.rmtree(self.profile, ignore_errors=True)
+        """Shut the browser down. Idempotent, and safe to call while another
+        thread is mid-operation.
+
+        It was neither, and that was a use-after-close: a C2S_CLOSE arriving on
+        the gateway's frame loop closed this websocket while a worker thread was
+        inside Page.captureScreenshot, and the worker died on
+        `OSError: [Errno 9] Bad file descriptor`. What the console saw was a page
+        that never arrived and `[web exited 0]` with no explanation, because the
+        thread that owed it an answer was gone.
+
+        `dead` first and outside the lock, so an operation that has not started
+        yet gives up immediately rather than waiting for a session that is going
+        away. Then the lock, which is what makes this WAIT for a call already in
+        flight instead of cutting it off. Callers who cannot afford to wait —
+        the frame loop — hand this to a thread; see Gateway.retire()."""
+        self.dead = True
+        with self.busy:
+            if self.closed:
+                return
+            self.closed = True
+            if self.ws is not None:
+                self.ws.close()
+            if self.proc is not None and self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+            if self.profile is not None:
+                shutil.rmtree(self.profile, ignore_errors=True)
