@@ -89,6 +89,10 @@ static int quit;
 
 static void say(const char *s) { sys_puts(s); }
 
+/* Defined below, but called from rd(): the read loop services the cursor so a
+ * long transfer stays responsive. */
+static int poll_input(void);
+
 static void vaddr(uint16_t w) {
   R8(0x2116) = (uint8_t)w;
   R8(0x2117) = (uint8_t)(w >> 8);
@@ -102,17 +106,19 @@ static void vaddr(uint16_t w) {
 static int rd(uint8_t *dst, uint16_t n) {
   uint16_t got = 0;
   while (got < n) {
-    uint16_t k = sys_net_read(ch, dst + got, (uint16_t)(n - got));
+    uint16_t k;
+    /* Every pass, not only when starved. During a 48 KB transfer bytes are
+     * almost always waiting, so the starvation branch below never runs — which
+     * meant the cursor and ESC were ignored for the whole eighty seconds. */
+    if (poll_input()) return 0;
+    k = sys_net_read(ch, dst + got, (uint16_t)(n - got));
     if (k > 0 && k != SYS_ERR) {
       got = (uint16_t)(got + k);
       continue;
     }
     if (sys_net_state(ch) != NET_ST_OPEN && sys_net_state(ch) != NET_ST_EOF)
       return 0;
-    if (sys_pollkey() == 0x1B) { /* ESC aborts a stalled read */
-      quit = 1;
-      return 0;
-    }
+    if (poll_input()) return 0;
     sys_yield();
   }
   return 1;
@@ -404,6 +410,33 @@ static void mark(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
     for (c = tx0; c < tx1; c++) dirty[r * TILES_W + c] = 1;
 }
 
+/* Cursor and quit, serviced while a transfer is in flight.
+ *
+ * This has to run from inside the read loop, not only between updates. A first
+ * screen is 48 KB — eighty seconds at 615 B/s — and an application that only
+ * checks the keyboard between whole updates ignores you for eighty seconds. The
+ * cursor is a sprite, so moving it mid-transfer costs four bytes of OAM and no
+ * network traffic at all.
+ *
+ * Returns 1 if the user asked to leave. */
+static int poll_input(void) {
+  for (;;) {
+    int c = (int)sys_pollkey();
+    if (c == (int)SYS_ERR) return 0;
+    if (c == 0x1B) {
+      quit = 1;
+      return 1;
+    }
+    if (c == SNOS_KEY_LEFT) { cx = (uint16_t)(cx >= 8 ? cx - 8 : 0); }
+    else if (c == SNOS_KEY_RIGHT) { cx = (uint16_t)(cx < FB_W - 8 ? cx + 8 : FB_W - 1); }
+    else if (c == SNOS_KEY_UP) { cy = (uint16_t)(cy >= 8 ? cy - 8 : 0); }
+    else if (c == SNOS_KEY_DOWN) { cy = (uint16_t)(cy < FB_H - 8 ? cy + 8 : FB_H - 1); }
+    else if (c == ' ') { pointer(cx, cy, 1); pointer(cx, cy, 0); continue; }
+    else continue;
+    place_cursor();
+  }
+}
+
 /* ------------------------------------------------------------------ updates */
 
 static int read_update(void) {
@@ -433,6 +466,12 @@ static int read_update(void) {
       for (row = 0; row < h; row++)
         if (!rd(&fb[(uint16_t)((y + row) * FB_W + x)], w)) return 0;
       mark(x, y, w, h);
+      /* Paint it NOW, not after the whole update. A server may split one screen
+       * across several messages, so waiting meant painting a fraction of the
+       * screen with stale VRAM — the console's own font — showing through the
+       * rest. That was the corruption. It also turns an eighty-second first
+       * screen into something you can watch arrive. */
+      flush_dirty();
     } else if (enc == ENC_COPYRECT) {
       uint16_t sx, sy;
       if (!rd(hdr, 4)) return 0;
@@ -566,14 +605,36 @@ int main(void) {
   }
   say("\nESC quits\n");
 
-  for (i = 0; i < NTILES; i++) dirty[i] = 0;
+  /* Start from a known screen: clear the shadow and paint every tile once, so
+   * anything the server has not sent yet is black rather than whatever the
+   * console left in VRAM. "Not arrived" then looks like not arrived. */
+  /* One index, no multiply. The nested version of this guarded against a 16-bit
+   * overflow that cannot happen — FB_SIZE is 49152 and a uint16_t reaches 65535
+   * — and paid for it with a runtime multiply per byte, because the 65816 has no
+   * multiply instruction. Forty-nine thousand calls to a software multiply is a
+   * hang from the outside: it never reached the next print. */
+  {
+    uint16_t k;
+    for (k = 0; k < FB_SIZE; k++) fb[k] = 0;
+  }
+  for (i = 0; i < NTILES; i++) dirty[i] = 1;
+
+  say("receiving the first screen - about 80s on this link\n");
+  say("it paints as it arrives; ESC quits\n");
   sys_gfx(1);
   R8(0x2100) = 0x8F;
+  /* Increment the VRAM address after the HIGH byte, so a low/high pair writes
+   * one word. Without this the console's last setting applies, the address
+   * advances after the LOW byte, and every word is split across two addresses —
+   * which paints the console's own font back at you, scrambled. `view` has
+   * always set this; copying its VRAM layout without its VMAIN was the bug. */
+  R8(0x2115) = 0x80;
   load_palette();
   hide_sprites();
   load_cursor();
   place_cursor();
   setup_ppu();
+  flush_dirty();
 
   while (!quit) {
     if (!request(first ? 0 : 1)) break;
