@@ -315,3 +315,91 @@ a scroll introduces only **~22% new tiles**, because a rendered page is mostly a
 font and the glyphs are already resident. That is 8 KB instead of 49 KB per
 scroll — and at 4 colours and 512 dots wide it is both smaller and sharper than
 what v1 sends.
+
+## `vnc` — a Super Nintendo as a thin client
+
+The console speaks RFB itself: handshake, pixel format, framebuffer updates,
+pointer events. Nothing on the far side knows it is talking to a SNES.
+
+```
+vnc HOST[:PORT]        default port 5900
+
+  arrow keys   move the cursor     space   click
+  ESC          quit
+```
+
+### Running it locally, start to finish
+
+**1. Build the test server, once.** Needs Docker running.
+
+```sh
+cd snos/snes/tools/vncbox
+docker build -t snos-vnc .
+```
+
+**2. Start it.** Either a browser or an xterm, on port 5900:
+
+```sh
+# a real browser at exactly the console's resolution
+docker run -d --rm --name snosvnc -p 5900:5900 \
+  -e SNOS_APP=chromium -e SNOS_URL=https://news.ycombinator.com snos-vnc
+
+# or a plain X session with an xterm (lighter, starts instantly)
+docker run -d --rm --name snosvnc -p 5900:5900 snos-vnc
+```
+
+Give chromium ~10 seconds to paint before connecting.
+
+**3. Start the gateway** and load the bridge in Mesen as usual:
+
+```sh
+cd snos/snes && python3 tools/gateway.py
+```
+
+Then in Mesen: **Debug → Script Window**, load `snos/snes/build/snosbridge.lua`,
+press Run. (Debug → Script Window → "Allow access to I/O and OS functions" must
+be on, as for any networking here.)
+
+**4. In SNOS:**
+
+```
+vnc 127.0.0.1
+```
+
+`127.0.0.1` and not `host.docker.internal` — the gateway runs on the host, and
+that name only means anything *inside* a container.
+
+### What to expect
+
+The first screen is a full 48 KB framebuffer: **about 80 seconds at the
+emulator's 615 B/s**, and roughly 2.5 at M7's cable speed. It paints in one go
+when it arrives rather than progressively, because a tile cannot be built from
+part of a rectangle.
+
+After that, updates are incremental — a still screen sends **nothing at all**,
+measured. Anything that changes sends only the rectangles that changed.
+
+### Sanity checks if it does not work
+
+`net status` first: it probes the gateway and reports the link counters, so it
+separates a dead daemon from a dead link.
+
+```sh
+python3 snos/snes/tools/rfbspike.py 127.0.0.1 5900
+```
+
+That is a throwaway Python RFB client. If it reports `OK: ... exactly 1 byte per
+pixel` then the server and the pixel format are fine and the problem is on the
+console side. It also renders what the SNES would display if you pass it an
+output path.
+
+If the gateway ever seems to stop rather than fail, **send it SIGUSR1** — it
+dumps every thread's stack. That is how the starvation bug that blocked this app
+for an afternoon was finally found, after a great deal of guessing that a stack
+trace would have settled immediately.
+
+### Known gaps
+
+No keyboard yet — the cursor and clicks work, typing does not. `CopyRect` is
+advertised to the server but its path has never executed; it will fire the first
+time something on screen scrolls.
