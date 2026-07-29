@@ -340,7 +340,19 @@ static void setup_ppu(void) {
   R8(0x2105) = 0x03;                             /* Mode 3, BG1 8bpp */
   R8(0x210D) = 0; R8(0x210D) = 0;
   R8(0x210E) = 0; R8(0x210E) = 0;
-  R8(0x2107) = (uint8_t)((VRAM_MAP >> 10) << 2); /* BG1SC */
+  /* BG1SC. The base field counts 1K-WORD units, and VRAM_MAP here is a BYTE
+   * address — so it has to be halved first. view.c's version of this line looks
+   * identical but its VRAM_MAP is already a word address, and copying the
+   * formula without the units gave 0xE0 instead of 0x70: a tilemap base past the
+   * end of VRAM. The PPU then read tile INDICES from the wrong place, selected
+   * arbitrary tiles, and drew scattered noise over a picture whose tile data was
+   * perfectly correct all along.
+   *
+   * That is why it survived every check I made. My verification decoded tile
+   * data in assumed tilemap order, which bypasses the tilemap entirely — so it
+   * confirmed the one thing that was never broken. Ricardo's register log found
+   * it in a single run. */
+  R8(0x2107) = (uint8_t)((((uint16_t)(VRAM_MAP >> 1)) >> 10) << 2);
   R8(0x210B) = 0x00;                             /* BG1 tiles at $0000 */
   R8(0x2101) = 0x03;                             /* OBSEL: 8x8, base $C000 */
   R8(0x212C) = 0x11;                             /* BG1 + OBJ */
@@ -636,20 +648,11 @@ int main(void) {
    * which paints the console's own font back at you, scrambled. `view` has
    * always set this; copying its VRAM layout without its VMAIN was the bug. */
   R8(0x2115) = 0x80;
-  /* Stop all HDMA before touching the display.
-   *
-   * The keyboard panel drives HDMA on channels 3/4/5 and rewrites the BG
-   * tilemap-base and scroll registers EVERY SCANLINE. Left running, the PPU
-   * fetches tilemap entries from the wrong address part-way down the frame, so
-   * arbitrary tile indices select arbitrary tile data and the screen fills with
-   * scattered noise that flickers as HDMA re-triggers — on top of a picture that
-   * is otherwise perfectly correct in VRAM.
-   *
-   * sys_gfx(1) is supposed to tear the split down, and under the test runner it
-   * does, because no keys are bound there and the panel never existed. That is
-   * exactly the configuration this was verified in, and exactly why the failure
-   * only ever appeared on Ricardo's screen. One register write costs nothing and
-   * does not depend on that teardown having happened. */
+  /* Stop any HDMA before touching the display. The keyboard panel drives HDMA
+   * on channels 3/4/5 and rewrites BG registers every scanline, which would
+   * shred a Mode 3 picture. NOT the cause of the corruption this was added
+   * for — Ricardo's log showed $420C was already 00 — but an app that takes the
+   * display should not depend on somebody else's teardown. */
   R8(0x420C) = 0x00;
   load_palette();
   hide_sprites();
