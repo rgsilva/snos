@@ -22,7 +22,8 @@ local F_DATA = 0x01
 local CH_CTRL, CH_PAD = 0, 0xFF
 local WRAM = emu.memType.snesWorkRam
 
-local C2S_FETCH, C2S_CLOSE, C2S_IMAGE = 0x01, 0x02, 0x03
+local C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
+local S2C_HELLO = 0x84
 local S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
 
 local function rb(o) return emu.read(MB + o, WRAM) end
@@ -151,6 +152,10 @@ local function ctrl_byte(b)
       push(ch, BODY_IMG)
       push_ctrl(S2C_EOF, string.char(ch))
     end
+    -- Liveness probe, answered unconditionally like the real daemon so that
+    -- `net status` can tell "nothing behind the bridge" from "there and
+    -- working". Queued like any other control record, not jumped ahead.
+    if c.typ == C2S_HELLO then push_ctrl(S2C_HELLO, string.char(1)) end
     -- C2S_CLOSE: drop anything still queued for that channel. A real gateway
     -- closes the socket and stops reading; a canned one that keeps streaming an
     -- abandoned body starves every later request of the send window, which is
@@ -437,8 +442,12 @@ emu.addEventCallback(function()
           "get did not run as an application via the name fallback")
   r.check(text:find("that is a picture", 1, true) ~= nil,
           "printing a converted picture to the console was not refused")
-  r.check(text:find("gateway up", 1, true) ~= nil,
-          "kernel did not detect the gateway")
+  -- "alive" rather than "up": the status line is now a HELLO round trip, so
+  -- this asserts the canned gateway *answered*, not merely that the mailbox
+  -- had a magic word in it. The old wording passed in exactly the situation
+  -- the probe was added to catch — a claimed link with nothing behind it.
+  r.check(text:find("gateway alive", 1, true) ~= nil,
+          "net status did not get a HELLO reply from the gateway")
 
   -- A URL that crossed the link intact proves framing and reassembly.
   r.check(#gw.fetches >= 3, "gateway received " .. #gw.fetches .. " fetches, wanted 3")

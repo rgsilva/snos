@@ -43,8 +43,9 @@ SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 F_DATA = 0x01
 CH_CTRL, CH_PAD = 0, 0xFF
 
-C2S_FETCH, C2S_CLOSE, C2S_IMAGE = 0x01, 0x02, 0x03
-S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
+C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
+S2C_OPEN, S2C_EOF, S2C_ERR, S2C_HELLO = 0x81, 0x82, 0x83, 0x84
+GW_VERSION = 1
 
 USER_AGENT = "SNOS/0.1 (Super Nintendo; via gateway)"
 # What the SNES will actually receive. It arrives at roughly 600 B/s, so half a
@@ -291,6 +292,15 @@ class Gateway:
             print(f"{'IMAGE' if want_img else 'FETCH'} ch{ch} {url}")
             threading.Thread(target=self.fetch, args=(ch, url, want_img),
                              daemon=True).start()
+        elif self.ctype == C2S_HELLO:
+            # Answered from the frame thread, so a fetch blocked on the network
+            # cannot make the daemon look dead. It is not jumped to the front of
+            # the queue, though: control shares the send queue with bodies, and
+            # S2C_EOF has to stay behind the bytes it terminates. So a HELLO
+            # issued mid-download waits for the download. That is fine for what
+            # this is for — the shell is idle when you type `net status` — but
+            # it is a probe of the daemon, not of the queue's depth.
+            self.push_ctrl(S2C_HELLO, bytes([GW_VERSION]))
         elif self.ctype == C2S_CLOSE and len(self.cbuf) >= 1:
             print(f"CLOSE ch{self.cbuf[0]}")
 

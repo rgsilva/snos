@@ -53,6 +53,12 @@
  * format and its tests are untouched — and because a 200 that will not decode
  * as an image is a genuinely different failure from a 404. */
 #define C2S_IMAGE 0x03 /* [len][ch][url...] */
+
+/* Liveness. net_up() only proves the *bridge* claimed the mailbox — the daemon
+ * behind it can be dead, stopped or wedged and the link still looks attached,
+ * which is exactly what it did while a fetch was timing out. Nothing else in
+ * the protocol is unsolicited, so asking is the only way to know. */
+#define C2S_HELLO 0x04 /* [0] */
 /* [3][ch][status_lo][status_hi] or [4][...][flags].
  *
  * The flags byte is optional so that a three-byte reply still parses: the
@@ -62,8 +68,11 @@
 #define S2C_F_IMAGE 0x01 /* the body is Mode 3 tile data, not the resource */
 #define S2C_EOF 0x82   /* [1][ch] */
 #define S2C_ERR 0x83   /* [2][ch][code] */
+#define S2C_HELLO 0x84 /* [1][version] */
 
 volatile uint16_t net_stat_rx_frames;
+volatile uint16_t net_stat_hello;
+volatile uint16_t net_gw_version;
 volatile uint16_t net_stat_bad_sum;
 volatile uint16_t net_stat_resent;
 
@@ -135,6 +144,8 @@ void net_init(void) {
   awaiting_ack = 0;
   txframe_bytes = 0;
   net_stat_rx_frames = 0;
+  net_stat_hello = 0;
+  net_gw_version = 0;
   net_stat_bad_sum = 0;
   net_stat_resent = 0;
   for (j = 0; j < LINK_FRAME; j++) {
@@ -243,6 +254,17 @@ static int net_open(const char *url, uint8_t cmd) {
 int net_fetch(const char *url) { return net_open(url, C2S_FETCH); }
 int net_image(const char *url) { return net_open(url, C2S_IMAGE); }
 
+/* Ask the far end to say something. The reply lands in ctrl_message and bumps
+ * net_stat_hello; the caller watches that counter rather than blocking here,
+ * because the link is serviced from NMI and this runs in the foreground. */
+int net_hello(void) {
+  if (!net_up()) return -1;
+  if (txq_space() < 2) return -1;
+  txq_put(C2S_HELLO);
+  txq_put(0);
+  return 0;
+}
+
 void net_close(int ch) {
   if (ch < 1 || ch >= NET_CHANNELS) return;
   if (ch_state[ch] != NET_ST_FREE && txq_space() >= 3) {
@@ -270,6 +292,10 @@ static void ctrl_message(void) {
         ch_state[ch] = NET_ST_OPEN;
       }
     }
+    break;
+  case S2C_HELLO:
+    net_stat_hello++;
+    net_gw_version = (cmsg_got >= 1) ? cmsg[0] : 0;
     break;
   case S2C_EOF:
     if (cmsg_got >= 1) {

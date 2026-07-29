@@ -60,6 +60,9 @@ void net_close(int ch);
  * rather than that the transfer merely succeeded. A retransmit that never
  * happens and a retransmit that works look identical from the outside. */
 extern volatile uint16_t net_stat_rx_frames;
+extern volatile uint16_t net_stat_hello;
+extern volatile uint16_t net_gw_version;
+int net_hello(void);
 extern volatile uint16_t net_stat_bad_sum;
 extern volatile uint16_t net_stat_resent;
 

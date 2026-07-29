@@ -448,13 +448,47 @@ static void cmd_fstest(void) {
   }
 }
 
+/* Ask the far end to prove it is there, rather than reporting the mailbox.
+ *
+ * net_up() only tests whether the *bridge* claimed the link. The daemon behind
+ * it can be stopped, crashed or wedged and this still said "gateway up" — which
+ * it cheerfully did during a session where every fetch was timing out. A status
+ * line that is right only when nothing is wrong is worse than none, because it
+ * is consulted precisely when something is. */
 static void cmd_net_status(void) {
+  uint16_t before, deadline, waited;
+
   if (!net_up()) {
-    kcon_puts("no gateway attached\n");
-    kcon_puts("(emulator: run tools/netbridge.lua; hardware: M7)\n");
+    kcon_puts("no link (the bridge script is not running)\n");
+    kcon_puts("(emulator: run build/snosbridge.lua; hardware: M7)\n");
     return;
   }
-  kcon_puts("gateway up. frames ");
+
+  before = net_stat_hello;
+  if (net_hello() < 0) {
+    kcon_puts("link up, but the send queue is full\n");
+    return;
+  }
+
+  /* One second. A healthy round trip is a couple of frames — the daemon answers
+   * HELLO from the frame thread, so even a fetch in progress cannot delay it. */
+  deadline = (uint16_t)(snos_frames + 60u);
+  while (net_stat_hello == before) {
+    if ((int16_t)(snos_frames - deadline) >= 0) {
+      kcon_puts("link up, but the gateway is NOT answering\n");
+      kcon_puts("(the bridge is running; start tools/gateway.py)\n");
+      return;
+    }
+    kbd_idle();
+  }
+  waited = (uint16_t)(snos_frames - (uint16_t)(deadline - 60u));
+
+  kcon_puts("gateway alive, v");
+  kcon_putu(net_gw_version);
+  kcon_puts(", replied in ");
+  kcon_putu(waited);
+  kcon_puts(" frames\n");
+  kcon_puts("frames ");
   kcon_putu(net_stat_rx_frames);
   kcon_puts(", bad sums ");
   kcon_putu(net_stat_bad_sum);
