@@ -321,6 +321,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     }
     url[i < 255 ? i : 255] = 0;
     r = net_fetch(url);
+    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 
@@ -334,6 +335,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     }
     url[i < 255 ? i : 255] = 0;
     r = net_image(url);
+    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 

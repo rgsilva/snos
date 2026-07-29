@@ -55,6 +55,8 @@ uint16_t net_http_status(int ch);
  * fetching — but it only knows once the status has arrived. */
 int net_is_image(int ch);
 void net_close(int ch);
+void net_own(int ch);
+int net_reap(void);
 
 /* Counters, purely so tests can assert that the recovery paths actually ran
  * rather than that the transfer merely succeeded. A retransmit that never

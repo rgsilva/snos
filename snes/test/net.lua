@@ -431,6 +431,23 @@ emu.addEventCallback(function()
     return
   end
 
+  -- Leaked-channel reclamation. A keypress abort is NOT the case that matters:
+  -- `get` still returns through its own cleanup and closes politely. The kill
+  -- switch is the one that leaks, because it unwinds the application without
+  -- running another instruction of it -- which is exactly what it is for.
+  if step == 15 then
+    L.feed("get http://example.com/big LEAK.TXT\n")
+    at = frame + 90                  -- mid-transfer, while a channel is open
+    step = 16
+    return
+  end
+  if step == 16 then
+    emu.write(0xF00E, 1, WRAM)       -- MB_BREAK: the kill switch, as F12 does
+    at = frame + 400
+    step = 17
+    return
+  end
+
   local r = L.new_report("net")
   local text = L.ring_text()
   print("--- mailbox ---"); print(text); print("---------------")
@@ -485,6 +502,16 @@ emu.addEventCallback(function()
   -- abort: a long transfer must stop on a keypress and keep what it had.
   r.check(text:find("[aborted", 1, true) ~= nil,
           "a keypress did not abort the download - a stuck transfer would need a power cycle")
+
+  -- The kill switch leaves a channel open by construction: it unwinds the app
+  -- without running another instruction of it, so no amount of tidy code in the
+  -- application reaches its own close. Channels are reused, so the leak is not
+  -- cosmetic -- the next app handed that channel would read the dead one's
+  -- bytes as its own. The kernel reclaims it and says so.
+  r.check(text:find("[get killed]", 1, true) ~= nil,
+          "the kill switch did not terminate the download")
+  r.check(text:find("left 1 connection open - closed", 1, true) ~= nil,
+          "a channel leaked by a killed app was not reclaimed")
   r.check(text:find("BIG.TXT", 1, true) ~= nil,
           "the aborted download left nothing on the volume, despite saying it kept a partial file")
 

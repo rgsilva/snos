@@ -229,6 +229,23 @@ static void run_app_entry(const app_entry_t *a, const char *args) {
     kcon_putu(rc);
     kcon_puts("]\n");
   }
+
+  /* Reclaim what it left behind. Apps are supposed to close their own streams
+   * and mostly do, but the break key kills one mid-transfer by design, and
+   * channels are reused — so a leak hands the next application someone else's
+   * bytes. Say so rather than cleaning up silently: a count that is normally
+   * zero is worth noticing on the day it is not. */
+  {
+    int leaked = net_reap();
+    if (leaked > 0) {
+      kcon_puts("[");
+      kcon_puts(a->name);
+      kcon_puts(" left ");
+      kcon_putu((uint16_t)leaked);
+      kcon_puts(leaked == 1 ? " connection open - closed]\n"
+                            : " connections open - closed]\n");
+    }
+  }
 }
 
 static void cmd_run(char *cmdline) {

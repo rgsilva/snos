@@ -82,6 +82,12 @@ static uint16_t ring_tail[NET_CHANNELS]; /* foreground writes */
 static uint8_t ch_state[NET_CHANNELS];
 static uint16_t ch_http[NET_CHANNELS];
 static uint8_t ch_flags[NET_CHANNELS];
+/* Which channels an application opened, so they can be reclaimed when it
+ * leaves. Channels are REUSED, so a leak is not merely untidy: the next app
+ * handed the same channel inherits whatever the dead one left in its ring, and
+ * reads another program's bytes as its own. The break key makes that reachable
+ * today, since killing a download mid-transfer leaks by construction. */
+static uint8_t ch_app[NET_CHANNELS];
 
 /* Outbound control bytes. Small: the SNES says very little — a URL and the
  * occasional close. */
@@ -137,6 +143,7 @@ void net_init(void) {
     ring_tail[i] = 0;
     ch_state[i] = NET_ST_FREE;
     ch_http[i] = 0;
+    ch_app[i] = 0;
   }
   txq_head = 0;
   txq_tail = 0;
@@ -270,6 +277,28 @@ static int net_open(const char *url, uint8_t cmd) {
 int net_fetch(const char *url) { return net_open(url, C2S_FETCH); }
 int net_image(const char *url) { return net_open(url, C2S_IMAGE); }
 
+/* Called by the trap layer when an app — rather than the shell — opened one. */
+void net_own(int ch) {
+  if (ch > 0 && ch < NET_CHANNELS) ch_app[(uint8_t)ch] = 1;
+}
+
+/* Close whatever the departing application did not. Returns how many, so the
+ * caller can say so: silently cleaning up teaches nobody, and a count that is
+ * usually zero is a useful thing to notice when it is not. */
+int net_reap(void) {
+  int i, n = 0;
+  for (i = 1; i < NET_CHANNELS; i++) {
+    if (ch_app[i]) {
+      if (ch_state[i] != NET_ST_FREE) {
+        net_close(i);
+        n++;
+      }
+      ch_app[i] = 0;
+    }
+  }
+  return n;
+}
+
 /* Ask the far end to say something. The reply lands in ctrl_message and bumps
  * net_stat_hello; the caller watches that counter rather than blocking here,
  * because the link is serviced from NMI and this runs in the foreground. */
@@ -292,6 +321,7 @@ void net_close(int ch) {
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
   ch_flags[ch] = 0;
+  ch_app[ch] = 0;
 }
 
 /* --------------------------------------------------------- inbound control */

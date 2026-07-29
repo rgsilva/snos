@@ -27,6 +27,7 @@ WHAT LIVES HERE, AND WHY
 import gzip
 import io
 import os
+import socket
 import struct
 import sys
 import threading
@@ -44,7 +45,15 @@ F_DATA = 0x01
 CH_CTRL, CH_PAD = 0, 0xFF
 
 C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
+C2S_RESOLVE, C2S_PING = 0x05, 0x06
 S2C_OPEN, S2C_EOF, S2C_ERR, S2C_HELLO = 0x81, 0x82, 0x83, 0x84
+S2C_RESOLVE, S2C_PING = 0x85, 0x86
+
+# Standard ping payload. Not the MTU: 56 bytes is what ping(8) sends, and
+# filling the MTU is a fragmentation test that fails for reasons having nothing
+# to do with whether the host is reachable.
+PING_PAYLOAD = 56
+PING_TIMEOUT = 2.0
 F_SYN = 0x02
 GW_VERSION = 1
 
@@ -148,6 +157,113 @@ def to_img(data):
     return bytes(out)
 
 
+def local_ip():
+    """The address the SNES should be reached at, since the SNES has no address
+    of its own — anything it ever serves is served through this host.
+
+    Asks the routing table which source address it would use to reach a public
+    one. No packets are sent (UDP connect just binds), no interface parsing, no
+    dependency, and it picks the right interface on a machine with several."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))     # TEST-NET-1: reserved, never routed
+        return s.getsockname()[0]
+    except OSError:
+        return "0.0.0.0"                # no route at all: offline, and say so
+    finally:
+        s.close()
+
+
+def resolve(name):
+    """A records only. AAAA is deliberately excluded: an IPv6 address does not
+    fit the 64-column console in any useful way, and nothing downstream of here
+    can open one anyway."""
+    try:
+        infos = socket.getaddrinfo(name, None, socket.AF_INET)
+    except socket.gaierror:
+        return []
+    seen, out = set(), []
+    for info in infos:
+        ip = info[4][0]
+        if ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+    return out
+
+
+def icmp_checksum(b):
+    """The one's-complement sum RFC 792 asks for. macOS will not fill this in
+    for us the way Linux does on an unprivileged ICMP socket — send a zero
+    checksum here and every echo is silently discarded, which looks exactly like
+    an unreachable host."""
+    if len(b) % 2:
+        b += b"\x00"
+    total = 0
+    for i in range(0, len(b), 2):
+        total += (b[i] << 8) + b[i + 1]
+    total = (total >> 16) + (total & 0xFFFF)
+    total += total >> 16
+    return ~total & 0xFFFF
+
+
+def ping(host, count=4):
+    """Real ICMP echo, four times, one result each.
+
+    Unprivileged ICMP datagram sockets work on macOS and on Linux with
+    ping_group_range set, so this needs no root and no setuid helper. Each echo
+    is timed independently and reported as it lands, so the SNES draws its dots
+    live rather than showing four at once when it is already over.
+
+    Note what this measures: the GATEWAY's reachability of the target, not the
+    SNES's. The SNES has no IP stack — that is the entire premise — so there is
+    no other reading available, and it is the one you want when asking whether
+    the far side is on the network."""
+    try:
+        addr = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+    except (socket.gaierror, IndexError):
+        return None, []
+
+    results = []
+    ident = os.getpid() & 0xFFFF
+    for seq in range(1, count + 1):
+        rtt = None
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
+                                 socket.IPPROTO_ICMP)
+            sock.settimeout(PING_TIMEOUT)
+            payload = b"\x42" * PING_PAYLOAD
+            head = struct.pack("!BBHHH", 8, 0, 0, ident, seq)
+            csum = icmp_checksum(head + payload)
+            pkt = struct.pack("!BBHHH", 8, 0, csum, ident, seq) + payload
+
+            t0 = time.time()
+            sock.sendto(pkt, (addr, 0))
+            while True:
+                left = PING_TIMEOUT - (time.time() - t0)
+                if left <= 0:
+                    break
+                sock.settimeout(left)
+                data, _ = sock.recvfrom(1024)
+                # macOS hands back the whole IP packet on this socket type,
+                # Linux hands back the ICMP message alone. Skip the IP header
+                # when one is present rather than assuming either.
+                off = 0
+                if len(data) >= 20 and (data[0] >> 4) == 4:
+                    off = (data[0] & 0x0F) * 4
+                if len(data) >= off + 8 and data[off] == 0:      # echo reply
+                    if struct.unpack("!H", data[off + 6:off + 8])[0] == seq:
+                        rtt = int((time.time() - t0) * 1000)
+                        break
+        except (socket.timeout, OSError):
+            pass
+        finally:
+            if sock is not None:
+                sock.close()
+        results.append(rtt)
+    return addr, results
+
+
 class Gateway:
     def __init__(self):
         self.tx_seq = 0
@@ -189,6 +305,21 @@ class Gateway:
 
     def push_ctrl(self, typ, payload, gen=None):
         self.push(CH_CTRL, bytes([typ, len(payload)]) + payload, gen)
+
+    def do_ping(self, host, gen):
+        addr, results = ping(host)
+        if addr is None:
+            self.push_ctrl(S2C_PING, b"\x00", gen)      # could not resolve
+            print("  -> name did not resolve")
+            return
+        got = sum(1 for r in results if r is not None)
+        avg = [r for r in results if r is not None]
+        print(f"  -> {got}/{len(results)} replied"
+              + (f", avg {sum(avg) // len(avg)} ms" if avg else ""))
+        # [1][count][one byte per echo: 0 = lost, else min(rtt_ms, 254)]
+        body = bytes([1, len(results)]) + bytes(
+            0 if r is None else min(r, 254) for r in results)
+        self.push_ctrl(S2C_PING, body, gen)
 
     # ------------------------------------------------------------- fetching
     def fetch(self, ch, url, as_image=False, gen=None):
@@ -323,7 +454,31 @@ class Gateway:
             # issued mid-download waits for the download. That is fine for what
             # this is for — the shell is idle when you type `net status` — but
             # it is a probe of the daemon, not of the queue's depth.
-            self.push_ctrl(S2C_HELLO, bytes([GW_VERSION]))
+            self.push_ctrl(S2C_HELLO,
+                           bytes([GW_VERSION]) + local_ip().encode())
+        elif self.ctype == C2S_RESOLVE and len(self.cbuf) >= 1:
+            name = bytes(self.cbuf).decode("ascii", "replace")
+            print(f"RESOLVE {name}")
+            ips = resolve(name)
+            # Text, not packed octets. The console is the only consumer and it
+            # would only have to format them back; when something needs binary
+            # addresses it will be an app, and it can have its own record.
+            body = " ".join(ips[:4]).encode()
+            if len(ips) > 4:
+                body += f" +{len(ips) - 4}".encode()
+            print(f"  -> {body.decode() if ips else 'not found'}")
+            self.push_ctrl(S2C_RESOLVE, body)
+
+        elif self.ctype == C2S_PING and len(self.cbuf) >= 1:
+            host = bytes(self.cbuf).decode("ascii", "replace")
+            print(f"PING {host}")
+            # On its own thread: four echoes with a two-second timeout each is
+            # eight seconds worst case, and the link must keep running or the
+            # SNES decides the gateway died while it is busy proving something
+            # else did.
+            threading.Thread(target=self.do_ping, args=(host, self.gen),
+                             daemon=True).start()
+
         elif self.ctype == C2S_CLOSE and len(self.cbuf) >= 1:
             print(f"CLOSE ch{self.cbuf[0]}")
 
