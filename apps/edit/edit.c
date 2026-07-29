@@ -410,6 +410,20 @@ static const char *const MENU[MENU_ITEMS] = {
 #define MENU_ROW 2
 #define MENU_COL 3
 
+/* One item row. Split out because moving the selection changes exactly two of
+ * them, and the console charges by the ROW: a dirty row costs about a frame and
+ * a half whatever is on it, so repainting the whole box to move a highlight was
+ * paying nine rows for two rows of work. */
+static void draw_menu_item(int i) {
+  pad_row(0);
+  rowbuf[MENU_COL] = SNOS_BOX_V;
+  rowbuf[MENU_COL + MENU_W - 1] = SNOS_BOX_V;
+  put_at(MENU_COL + 2, MENU[i]);
+  if (i == (int)menu_sel) invert(MENU_COL + 1, MENU_COL + MENU_W - 1);
+  rowbuf[scr_cols] = 0;
+  sys_puts_at(MENU_ROW + 1 + i, 0, rowbuf);
+}
+
 static void draw_menu(void) {
   int i, j;
 
@@ -420,15 +434,7 @@ static void draw_menu(void) {
   rowbuf[scr_cols] = 0;
   sys_puts_at(MENU_ROW, 0, rowbuf);
 
-  for (i = 0; i < MENU_ITEMS; i++) {
-    pad_row(0);
-    rowbuf[MENU_COL] = SNOS_BOX_V;
-    rowbuf[MENU_COL + MENU_W - 1] = SNOS_BOX_V;
-    put_at(MENU_COL + 2, MENU[i]);
-    if (i == (int)menu_sel) invert(MENU_COL + 1, MENU_COL + MENU_W - 1);
-    rowbuf[scr_cols] = 0;
-    sys_puts_at(MENU_ROW + 1 + i, 0, rowbuf);
-  }
+  for (i = 0; i < MENU_ITEMS; i++) draw_menu_item(i);
 
   pad_row(0);
   rowbuf[MENU_COL] = SNOS_BOX_BL;
@@ -708,7 +714,8 @@ static int shortcut(int c) {
 
 static void run_menu(void) {
   int was_osk = (int)sys_osk(2);
-  int need = 1;
+  int need = 1;          /* the whole box: only on opening */
+  int moved_from = -1;   /* or just the two rows a moved highlight touches */
 
   /* The keyboard owns the d-pad while it is up, so it has to go away for the
    * menu to be navigable at all. */
@@ -731,6 +738,13 @@ static void run_menu(void) {
     if (need) {
       draw_menu();
       need = 0;
+    } else if (moved_from >= 0) {
+      /* Two rows instead of nine. The console charges per dirty row, so this is
+       * the difference between a highlight that moves when you press the key
+       * and one that arrives a moment later. */
+      draw_menu_item(moved_from);
+      draw_menu_item((int)menu_sel);
+      moved_from = -1;
     }
     sys_yield();
 
@@ -740,13 +754,17 @@ static void run_menu(void) {
         return;
       }
       if (c == SNOS_KEY_UP) {
+        /* Remember where it came FROM the first time only: several key events
+         * can arrive before the next repaint, and the row that still shows a
+         * stale highlight is the one we started at, not the one we passed
+         * through. */
+        if (moved_from < 0) moved_from = (int)menu_sel;
         menu_sel = (uint16_t)((menu_sel + MENU_ITEMS - 1) % MENU_ITEMS);
-        need = 1;
         continue;
       }
       if (c == SNOS_KEY_DOWN) {
+        if (moved_from < 0) moved_from = (int)menu_sel;
         menu_sel = (uint16_t)((menu_sel + 1) % MENU_ITEMS);
-        need = 1;
         continue;
       }
       if (c == '\n' || c == '\r') { /* Enter, or START on a controller */
