@@ -344,6 +344,45 @@ uint16_t snos_cop_c(uint16_t sp) {
     SNOS_ARGS.p1 = net_stat_bad_sum;
     return net_stat_rx_frames;
 
+  case SYS_NET_CONNECT: {
+    char hp[256];
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int i, r;
+    for (i = 0; i < 255; i++) {
+      hp[i] = (char)far_rd(bank, (uint16_t)(off + i));
+      if (hp[i] == 0) break;
+    }
+    hp[i < 255 ? i : 255] = 0;
+    r = net_connect(hp);
+    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
+    return r < 0 ? SYS_ERR : (uint16_t)r;
+  }
+
+  case SYS_NET_WRITE: {
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1, ch = SNOS_ARGS.p2;
+    const uint8_t __far *src =
+        (const uint8_t __far *)(((uint32_t)bank << 16) | (uint32_t)off);
+    /* Copy through a local buffer: net_write takes a near pointer and the
+     * source is in the application's bank. */
+    uint8_t tmp[128];
+    uint16_t i, n = a;
+    if (n > sizeof tmp) n = sizeof tmp;
+    for (i = 0; i < n; i++) tmp[i] = src[i];
+    return (uint16_t)net_write((int)ch, tmp, (int)n);
+  }
+
+  case SYS_NET_WSPACE:
+    return (uint16_t)net_wspace((int)a);
+
+  case SYS_NET_HANGUP:
+    return net_hangup((int)a) < 0 ? SYS_ERR : 0;
+
+  case SYS_NET_LISTEN: {
+    int r = net_listen(a);
+    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
+    return r < 0 ? SYS_ERR : (uint16_t)r;
+  }
+
   case SYS_NET_READ: {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1, ch = SNOS_ARGS.p2;
     uint8_t __far *dst = (uint8_t __far *)(((uint32_t)bank << 16) | (uint32_t)off);

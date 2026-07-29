@@ -46,7 +46,14 @@ F_DATA = 0x01
 CH_CTRL, CH_PAD = 0, 0xFF
 
 C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
-C2S_RESOLVE, C2S_PING = 0x05, 0x06
+C2S_RESOLVE, C2S_PING, C2S_CONNECT = 0x05, 0x06, 0x07
+C2S_LISTEN, C2S_HANGUP = 0x08, 0x09
+
+# Servers bind on every interface deliberately: the point is a SNES serving a
+# page to someone else's phone at a conference. That IS an exposure decision —
+# what a SNES app serves becomes reachable by anything that can route to this
+# host — and it is made here, once, where it can be seen and changed.
+LISTEN_ADDR = "0.0.0.0"
 S2C_OPEN, S2C_EOF, S2C_ERR, S2C_HELLO = 0x81, 0x82, 0x83, 0x84
 S2C_RESOLVE, S2C_PING = 0x85, 0x86
 
@@ -300,6 +307,11 @@ class Gateway:
         # frame it will ever send. Announce and adopt are both required; each
         # alone fixes exactly one direction.
         self.rx_resync = True
+        # Live sockets, by channel, for connections the SNES owns rather than
+        # requests it made. A fetch is a request-and-forget; these stay open and
+        # carry bytes both ways until one side hangs up.
+        self.socks = {}
+        self.listeners = {}      # channel -> listening socket
         self.inflight = None
         self.out = []            # [ch, bytearray] queued for the SNES
         self.lock = threading.Lock()
@@ -317,6 +329,128 @@ class Gateway:
 
     def push_ctrl(self, typ, payload, gen=None):
         self.push(CH_CTRL, bytes([typ, len(payload)]) + payload, gen)
+
+    def drop(self, ch):
+        """Close a stream and tell the SNES, once. Both directions can discover
+        the end independently — the socket erroring on send, the reader thread
+        seeing EOF — and a channel closed twice would send a stray EOF that the
+        next connection on that channel would receive as its own."""
+        sock = self.socks.pop(ch, None)
+        if sock is None:
+            return
+        try:
+            sock.close()
+        except OSError:
+            pass
+        self.push_ctrl(S2C_EOF, bytes([ch]))
+        print(f"  ch{ch} closed")
+
+    def do_connect(self, ch, hostport, gen):
+        """A plain TCP stream. The gateway still owns DNS and the socket, but
+        the bytes in both directions belong to whatever the SNES is running."""
+        host, _, port = hostport.partition(":")
+        try:
+            port = int(port) if port else 80
+        except ValueError:
+            port = 80
+        try:
+            sock = socket.create_connection((host, port), timeout=20)
+        except OSError as e:
+            print(f"  connect failed: {e}")
+            self.push_ctrl(S2C_ERR, bytes([ch, 1]), gen)
+            return
+        sock.settimeout(None)
+        self.socks[ch] = sock
+        print(f"  connected ch{ch} -> {host}:{port}")
+        self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, 200, 0), gen)
+        self.pump(ch, sock, gen)
+
+    def pump(self, ch, sock, gen):
+        """Socket -> SNES until the peer hangs up.
+
+        Reads are capped well under the receive ring so a burst cannot arrive
+        faster than the link drains it; the queue is the backpressure, and the
+        SNES refuses to ack a frame it has no room for."""
+        try:
+            while True:
+                data = sock.recv(512)
+                if not data:
+                    # The PEER stopped sending. That is not the end of the
+                    # connection: `printf | nc` and every HTTP client half-close
+                    # after the request and then wait for the answer. Closing
+                    # here threw the response away before it was written, which
+                    # is exactly what it looked like — an echo server that
+                    # accepted, received, and replied to nobody.
+                    self.push_ctrl(S2C_EOF, bytes([ch]), gen)
+                    return
+                if gen is not None and gen != self.gen:
+                    return              # session reset under us
+                self.push(ch, data, gen)
+                # Do not race ahead of a 615 B/s link with an unbounded queue.
+                while sum(len(d) for _, d in self.out) > 4096:
+                    time.sleep(0.02)
+                    if gen is not None and gen != self.gen:
+                        return
+        except OSError:
+            pass
+        self.drop(ch)
+
+    def do_listen(self, ch, port, gen):
+        """Bind, then hand ONE connection at a time to the SNES on this channel.
+
+        One at a time because there are three channels total and a console that
+        moves 615 B/s; a queue of parallel requests would be a queue of things
+        timing out. The listener stays bound between connections, so the app
+        loops "wait for OPEN, serve, close" without re-binding and without
+        losing the port to a straggler.
+
+        A browser opens six connections at once and will therefore look broken;
+        curl and a phone fetching one page will not."""
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind((LISTEN_ADDR, port))
+            srv.listen(4)
+        except OSError as e:
+            print(f"  listen failed: {e}")
+            self.push_ctrl(S2C_ERR, bytes([ch, 1]), gen)
+            return
+        self.listeners[ch] = srv
+        print(f"  listening ch{ch} on {LISTEN_ADDR}:{port} "
+              f"(reach it at {local_ip()}:{port})")
+
+        while True:
+            try:
+                conn, peer = srv.accept()
+            except OSError:
+                break
+            if gen != self.gen or ch not in self.listeners:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                break
+            print(f"  ch{ch} accepted {peer[0]}:{peer[1]}")
+            conn.settimeout(None)
+            self.socks[ch] = conn
+            self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, 200, 0), gen)
+            # Blocks here for the life of the connection: one at a time is the
+            # contract, and accepting more would need channels that do not exist.
+            self.pump(ch, conn, gen)
+            # One at a time: do not accept another until the app has finished
+            # with this one, or two connections would share a channel.
+            waited = 0.0
+            while ch in self.socks and waited < 60.0 and gen == self.gen:
+                time.sleep(0.02)
+                waited += 0.02
+            if ch in self.socks:
+                print(f"  ch{ch} timed out waiting for the app to hang up")
+                self.drop(ch)
+        try:
+            srv.close()
+        except OSError:
+            pass
+        self.listeners.pop(ch, None)
 
     def do_ping(self, host, gen):
         addr, results = ping(host)
@@ -512,8 +646,52 @@ class Gateway:
             threading.Thread(target=self.do_ping, args=(host, self.gen),
                              daemon=True).start()
 
+        elif self.ctype == C2S_CONNECT and len(self.cbuf) >= 1:
+            ch = self.cbuf[0]
+            hostport = bytes(self.cbuf[1:]).decode("ascii", "replace")
+            print(f"CONNECT ch{ch} {hostport}")
+            threading.Thread(target=self.do_connect,
+                             args=(ch, hostport, self.gen), daemon=True).start()
+
+        elif self.ctype == C2S_LISTEN and len(self.cbuf) >= 3:
+            ch = self.cbuf[0]
+            port = self.cbuf[1] | (self.cbuf[2] << 8)
+            print(f"LISTEN ch{ch} port {port}")
+            threading.Thread(target=self.do_listen, args=(ch, port, self.gen),
+                             daemon=True).start()
+
+        elif self.ctype == C2S_HANGUP and len(self.cbuf) >= 1:
+            # End this connection, keep the port. Everything the SNES sent
+            # before this record has already been written to the socket —
+            # records are processed in order — so closing now cannot truncate.
+            ch = self.cbuf[0]
+            sock = self.socks.pop(ch, None)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                print(f"  ch{ch} hung up by the app")
+
         elif self.ctype == C2S_CLOSE and len(self.cbuf) >= 1:
             print(f"CLOSE ch{self.cbuf[0]}")
+            sock = self.socks.pop(self.cbuf[0], None)
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            srv = self.listeners.pop(self.cbuf[0], None)
+            if srv is not None:
+                # Release the port, or the next run of the app cannot bind it.
+                try:
+                    srv.close()
+                except OSError:
+                    pass
 
     def deliver(self, f):
         o = HDR
@@ -524,6 +702,16 @@ class Gateway:
             if ch == CH_CTRL:
                 for i in range(ln):
                     self.ctrl_byte(f[o + 2 + i])
+            else:
+                # Stream bytes from the SNES. Until connect existed this branch
+                # had nothing to do — every byte the console sent was a control
+                # record — which is why it could only ever ask for things.
+                sock = self.socks.get(ch)
+                if sock is not None:
+                    try:
+                        sock.sendall(bytes(f[o + 2:o + 2 + ln]))
+                    except OSError:
+                        self.drop(ch)
             o += 2 + ln
 
     # -------------------------------------------------------- frame builder

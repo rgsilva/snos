@@ -61,6 +61,9 @@
 #define C2S_HELLO 0x04 /* [0] */
 #define C2S_RESOLVE 0x05 /* [len][name...] */
 #define C2S_PING 0x06    /* [len][host...] */
+#define C2S_CONNECT 0x07 /* [len][ch][host:port...] */
+#define C2S_LISTEN 0x08  /* [3][ch][port lo][port hi] */
+#define C2S_HANGUP 0x09  /* [1][ch] */
 /* [3][ch][status_lo][status_hi] or [4][...][flags].
  *
  * The flags byte is optional so that a three-byte reply still parses: the
@@ -99,6 +102,24 @@ static uint8_t ch_flags[NET_CHANNELS];
  * reads another program's bytes as its own. The break key makes that reachable
  * today, since killing a download mid-transfer leaks by construction. */
 static uint8_t ch_app[NET_CHANNELS];
+/* Channels bound to a port. They differ from every other channel in that they
+ * come back: a connection ending returns them to LISTEN rather than freeing
+ * them, so a server is a loop and the port survives between requests. */
+static uint8_t ch_listen[NET_CHANNELS];
+
+/* Outbound stream bytes, per channel. Until now the SNES could only ever ASK
+ * for things: every byte it sent was a control record. A stream that only flows
+ * one way cannot carry IRC, an echo server or an HTTP response, so each channel
+ * gets a send queue of its own and build_frame packs from all of them.
+ *
+ * 512 rather than the 1024 of the receive ring, because the shapes differ: a
+ * download arrives in bulk and has to be buffered against an app that reads it
+ * slowly, whereas what the SNES sends is a request or a response it generates
+ * itself and can simply generate less of when the queue is full. */
+#define NET_TXRING 512
+static uint8_t txring[NET_CHANNELS][NET_TXRING];
+static uint16_t txring_head[NET_CHANNELS]; /* foreground writes */
+static uint16_t txring_tail[NET_CHANNELS]; /* NMI writes */
 
 /* Outbound control bytes. Small: the SNES says very little — a URL and the
  * occasional close. */
@@ -115,6 +136,7 @@ static uint8_t cmsg_type;
 static uint8_t cmsg_len;
 static uint8_t cmsg_state; /* 0 want type, 1 want len, 2 collecting */
 
+static uint16_t txframe_ch[NET_CHANNELS]; /* per-channel bytes in flight */
 static uint8_t peer_syn_seen;
 static uint8_t syn_out;
 static uint8_t rx_resync;
@@ -155,6 +177,10 @@ void net_init(void) {
     ch_state[i] = NET_ST_FREE;
     ch_http[i] = 0;
     ch_app[i] = 0;
+    ch_listen[i] = 0;
+    txring_head[i] = 0;
+    txring_tail[i] = 0;
+    txframe_ch[i] = 0;
   }
   txq_head = 0;
   txq_tail = 0;
@@ -334,6 +360,89 @@ static int ctrl_str(uint8_t cmd, const char *arg) {
 int net_resolve(const char *name) { return ctrl_str(C2S_RESOLVE, name); }
 int net_ping(const char *host) { return ctrl_str(C2S_PING, host); }
 
+/* Room left in a channel's send queue. Callers check this rather than
+ * discovering a short write, because a partial send of an HTTP header is worse
+ * than none: the peer parses what arrived. */
+int net_wspace(int ch) {
+  if (ch <= 0 || ch >= NET_CHANNELS) return 0;
+  return (int)(NET_TXRING - 1 -
+               (uint16_t)((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1)));
+}
+
+/* Queue bytes for the peer. Returns how many were taken — never partial past
+ * what space allows, and never blocking, because this runs in the foreground
+ * while the NMI drains it. */
+int net_write(int ch, const uint8_t *src, int n) {
+  int i, room;
+  if (ch <= 0 || ch >= NET_CHANNELS) return 0;
+  /* EOF too, not just OPEN. EOF means the PEER stopped sending; the direction
+   * we write in is still open, and refusing here is what made an echo server
+   * spin forever on a client that had half-closed — which is every client that
+   * sends a request and then waits, including every HTTP client. */
+  if (ch_state[ch] != NET_ST_OPEN && ch_state[ch] != NET_ST_EOF) return 0;
+  room = net_wspace(ch);
+  if (n > room) n = room;
+  for (i = 0; i < n; i++) {
+    txring[ch][txring_head[ch]] = src[i];
+    txring_head[ch] = (uint16_t)((txring_head[ch] + 1) & (NET_TXRING - 1));
+  }
+  return n;
+}
+
+/* A plain TCP stream, as opposed to net_fetch's "do an HTTP request for me".
+ * The gateway still owns DNS and the socket; what is new is that the bytes in
+ * both directions are ours. */
+int net_connect(const char *hostport) { return net_open(hostport, C2S_CONNECT); }
+
+/* End the current connection but keep the port.
+ *
+ * Refuses while the channel still has unsent bytes, and the caller retries.
+ * That is not politeness: build_frame packs the control queue BEFORE channel
+ * data, so a HANGUP queued alongside a half-sent response would overtake it and
+ * the client would get a truncated page. Making the caller wait is the only
+ * ordering guarantee available without a second queue. */
+int net_hangup(int ch) {
+  if (ch <= 0 || ch >= NET_CHANNELS) return -1;
+  if (!ch_listen[ch]) return -1;
+  if (((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1)) != 0) return -1;
+  if (txframe_ch[ch] != 0) return -1;      /* still in flight, unacknowledged */
+  if (txq_space() < 3) return -1;
+
+  txq_put(C2S_HANGUP);
+  txq_put(1);
+  txq_put((uint8_t)ch);
+
+  ring_head[ch] = 0;
+  ring_tail[ch] = 0;
+  ch_state[ch] = NET_ST_LISTEN;
+  return 0;
+}
+
+int net_listen(uint16_t port) {
+  int ch;
+  if (!net_up()) return -1;
+  for (ch = 1; ch < NET_CHANNELS; ch++)
+    if (ch_state[ch] == NET_ST_FREE) break;
+  if (ch >= NET_CHANNELS) return -1;
+  if (txq_space() < 5) return -1;
+
+  txq_put(C2S_LISTEN);
+  txq_put(3);
+  txq_put((uint8_t)ch);
+  txq_put((uint8_t)(port & 0xFF));
+  txq_put((uint8_t)(port >> 8));
+
+  ring_head[ch] = 0;
+  ring_tail[ch] = 0;
+  txring_head[ch] = 0;
+  txring_tail[ch] = 0;
+  ch_flags[ch] = 0;
+  ch_http[ch] = 0;
+  ch_listen[ch] = 1;
+  ch_state[ch] = NET_ST_LISTEN;
+  return ch;
+}
+
 int net_hello(void) {
   if (!net_up()) return -1;
   if (txq_space() < 2) return -1;
@@ -354,6 +463,10 @@ void net_close(int ch) {
   ring_tail[ch] = 0;
   ch_flags[ch] = 0;
   ch_app[ch] = 0;
+  ch_listen[ch] = 0;
+  txring_head[ch] = 0;
+  txring_tail[ch] = 0;
+  txframe_ch[ch] = 0;
 }
 
 /* --------------------------------------------------------- inbound control */
@@ -364,7 +477,19 @@ static void ctrl_message(void) {
   case S2C_OPEN:
     if (cmsg_got >= 3) {
       ch = cmsg[0];
-      if (ch < NET_CHANNELS && ch_state[ch] == NET_ST_OPENING) {
+      /* A listening channel accepts an OPEN from LISTEN or from the EOF of the
+       * previous connection, because the gateway keeps accepting on the same
+       * port and reuses the channel. Rings are cleared here so one request
+       * cannot inherit the tail of the last one. */
+      if (ch < NET_CHANNELS && ch_listen[ch] &&
+          (ch_state[ch] == NET_ST_LISTEN || ch_state[ch] == NET_ST_EOF)) {
+        ring_head[ch] = 0;
+        ring_tail[ch] = 0;
+        txring_head[ch] = 0;
+        txring_tail[ch] = 0;
+        txframe_ch[ch] = 0;
+        ch_state[ch] = NET_ST_OPEN;
+      } else if (ch < NET_CHANNELS && ch_state[ch] == NET_ST_OPENING) {
         ch_http[ch] = (uint16_t)(cmsg[1] | ((uint16_t)cmsg[2] << 8));
         ch_flags[ch] = (cmsg_got >= 4) ? cmsg[3] : 0;
         ch_state[ch] = NET_ST_OPEN;
@@ -506,10 +631,15 @@ static void build_frame(void) {
   txframe[LINK_ACK] = (uint8_t)(rx_next - 1);
   txframe[LINK_FLAGS] = syn_out ? LINK_F_SYN : 0;
 
-  /* Only the control channel has anything outbound today; when OPEN arrives in
-   * M8 and applications start writing to streams, this becomes a loop over the
-   * channels packing a record from each — which is exactly why the frame format
-   * carries records rather than one channel per frame. */
+  /* Control first, then a record from every channel with something to send,
+   * greedily until the frame is full. Records rather than one-channel-per-frame
+   * is exactly so three trickling streams share a frame instead of taking three
+   * — and so a bulk transfer still gets the whole frame when nothing else has
+   * anything to say. No scheduler required.
+   *
+   * Control goes first on purpose: a CLOSE that queued behind a channel's
+   * backlog would be delivered after bytes the peer should never have received.
+   */
   n = (int)((txq_head - txq_tail) & (TXQ_SIZE - 1));
   if (n > 0) {
     int room = LINK_FRAME - o - 2;
@@ -524,6 +654,26 @@ static void build_frame(void) {
     txframe[LINK_FLAGS] |= LINK_F_DATA;
   }
   txframe_bytes = (uint16_t)(n > 0 ? n : 0);
+
+  {
+    int ch;
+    for (ch = 1; ch < NET_CHANNELS; ch++) {
+      int have = (int)((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1));
+      int room = LINK_FRAME - o - 2;
+      int i;
+      txframe_ch[ch] = 0;
+      if (have <= 0 || room <= 0) continue;
+      if (have > room) have = room;
+      if (have > 255) have = 255;
+      txframe[o++] = (uint8_t)ch;
+      txframe[o++] = (uint8_t)have;
+      for (i = 0; i < have; i++) {
+        txframe[o++] = txring[ch][(txring_tail[ch] + i) & (NET_TXRING - 1)];
+      }
+      txframe_ch[ch] = (uint16_t)have;
+      txframe[LINK_FLAGS] |= LINK_F_DATA;
+    }
+  }
 
   while (o < LINK_FRAME) txframe[o++] = LINK_CH_PAD;
   txframe[LINK_SUM] = 0;
@@ -548,8 +698,17 @@ void net_service(void) {
 
       /* An ack for the frame in flight releases it. */
       if (awaiting_ack && rxframe[LINK_ACK] == tx_seq) {
+        int c;
         txq_tail = (uint16_t)((txq_tail + txframe_bytes) & (TXQ_SIZE - 1));
         txframe_bytes = 0;
+        /* Release every source the frame drew from, not just the control queue.
+         * Recomputing any of these from current occupancy would be wrong: the
+         * foreground can enqueue more while the frame is in flight. */
+        for (c = 1; c < NET_CHANNELS; c++) {
+          txring_tail[c] =
+              (uint16_t)((txring_tail[c] + txframe_ch[c]) & (NET_TXRING - 1));
+          txframe_ch[c] = 0;
+        }
         awaiting_ack = 0;
         tx_seq++;
         syn_out = 0; /* it acked us, so it has our sequence base */

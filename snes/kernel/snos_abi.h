@@ -55,7 +55,7 @@
  * image through SYS_GETC_F would be 43000 traps; and Mode 3 tile data for a
  * full screen is 57 KB of the 64 KB of VRAM, so the console's font and tilemaps
  * cannot coexist with it and something has to arbitrate. */
-#define SNOS_ABI_VERSION 6
+#define SNOS_ABI_VERSION 7
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -147,6 +147,11 @@
 #define NET_ST_OPEN 2
 #define NET_ST_EOF 3
 #define NET_ST_ERROR 4
+/* ABI 7. Bound to a port, waiting for somebody to connect. A listening channel
+ * cycles LISTEN -> OPEN -> EOF -> LISTEN without rebinding, so a server app is
+ * a loop rather than a fresh listen per request — and the port is not released
+ * between connections, where a straggler could steal it. */
+#define NET_ST_LISTEN 5
 /* ABI 5. Exactly SYS_NET_FETCH, except the gateway converts the resource to
  * Mode 3 tile data first. Same stream, same states, same reads. */
 #define SYS_NET_IMAGE 0x65 /* p0/p1 = URL -> channel, or SYS_ERR */
@@ -157,6 +162,17 @@
  * but without these numbers the two ends look equally plausible and you end up
  * guessing. Returns frames received; p0 = resends, p1 = bad checksums. */
 #define SYS_NET_STATS 0x66
+
+/* ABI 7. The SNES can send now, not only ask. Until these existed every byte it
+ * put on the wire was a control record, which is enough to fetch a URL and
+ * nothing else — no IRC, no echo server, no HTTP response. */
+#define SYS_NET_CONNECT 0x67 /* p0/p1 = "host:port" -> channel, or SYS_ERR */
+#define SYS_NET_WRITE 0x68   /* p0/p1 = buffer, p2 = channel, A = len -> taken */
+#define SYS_NET_WSPACE 0x69  /* A = channel -> bytes acceptable right now */
+#define SYS_NET_LISTEN 0x6A  /* A = port -> channel, or SYS_ERR */
+/* A = channel -> 0, or SYS_ERR while the response is still going out. Retry:
+ * hanging up with bytes unsent would truncate what the client receives. */
+#define SYS_NET_HANGUP 0x6B
 /* $70-$7F  debug */
 #define SYS_TRACE 0x70 /* p0/p1 = string -> the test mailbox */
 
@@ -233,6 +249,16 @@ uint16_t sys_net_state(uint16_t ch);
 uint16_t sys_net_close(uint16_t ch);
 uint16_t sys_net_image_raw(void);
 uint16_t sys_net_stats(void);
+uint16_t sys_net_connect_raw(void);
+uint16_t sys_net_write_raw(uint16_t len);
+uint16_t sys_net_wspace(uint16_t ch);
+uint16_t sys_net_listen(uint16_t port);
+uint16_t sys_net_hangup(uint16_t ch);
+
+/* Wrappers, so callers do not each re-do the pointer marshalling. */
+#define sys_net_connect(hp) (snos_set_ptr(hp), sys_net_connect_raw())
+#define sys_net_write(ch, buf, len) \
+  (snos_set_ptr(buf), SNOS_ARGS.p2 = (ch), sys_net_write_raw(len))
 uint16_t sys_gfx(uint16_t on);
 uint16_t sys_read_f_raw(uint16_t max);
 uint16_t sys_fs_free(void);

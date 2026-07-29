@@ -78,6 +78,11 @@ int net_resolve(const char *name);
 int net_ping(const char *host);
 extern volatile uint16_t net_gw_version;
 int net_hello(void);
+int net_connect(const char *hostport);
+int net_listen(uint16_t port);
+int net_hangup(int ch);
+int net_write(int ch, const uint8_t *src, int n);
+int net_wspace(int ch);
 extern volatile uint16_t net_stat_bad_sum;
 extern volatile uint16_t net_stat_resent;
 

@@ -671,6 +671,80 @@ static void cmd_net_test(void) {
   }
 }
 
+/* Prove the upstream path end to end: open a plain TCP stream, WRITE a request
+ * on it, and print what comes back. `get` cannot test this — the gateway
+ * composes the request there, so every byte on the wire is still the gateway's.
+ * Here the bytes are ours, which is the whole point of the stream API. */
+static uint8_t send_buf[64];
+
+static void cmd_send(char *hostport) {
+  static const char REQ[] = "GET / HTTP/1.0\r\nHost: snos\r\nConnection: close\r\n\r\n";
+  int ch, st, sent = 0, i;
+  uint32_t got = 0;
+  uint16_t deadline;
+
+  if (*hostport == 0) {
+    kcon_puts("usage: debug send HOST:PORT\n");
+    return;
+  }
+  if (!net_up()) {
+    kcon_puts("no gateway attached\n");
+    return;
+  }
+  ch = net_connect(hostport);
+  if (ch < 0) {
+    kcon_puts("no free channel\n");
+    return;
+  }
+  deadline = (uint16_t)(snos_frames + 1800u);
+  while (net_state(ch) == NET_ST_OPENING) {
+    if ((int16_t)(snos_frames - deadline) >= 0) {
+      kcon_puts("connect timed out\n");
+      net_close(ch);
+      return;
+    }
+    kbd_idle();
+  }
+  if (net_state(ch) != NET_ST_OPEN) {
+    kcon_puts("connect failed\n");
+    net_close(ch);
+    return;
+  }
+
+  /* Written in pieces against available space rather than assumed to fit: the
+   * send queue drains at link speed, and a partial request is worse than none
+   * because the peer parses what arrived. */
+  while (REQ[sent]) {
+    int room = net_wspace(ch);
+    int n = 0;
+    while (REQ[sent + n] && n < room && n < (int)sizeof send_buf) {
+      send_buf[n] = (uint8_t)REQ[sent + n];
+      n++;
+    }
+    if (n > 0) sent += net_write(ch, send_buf, n);
+    else kbd_idle();
+    if ((int16_t)(snos_frames - deadline) >= 0) break;
+  }
+
+  for (;;) {
+    int n = net_read(ch, send_buf, (int)sizeof send_buf);
+    if (n > 0) {
+      for (i = 0; i < n; i++) kcon_putc(send_buf[i]);
+      got += (uint32_t)n;
+      if (got > 512) break;      /* a taste is enough to prove the path */
+      continue;
+    }
+    st = net_state(ch);
+    if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
+    if ((int16_t)(snos_frames - deadline) >= 0) break;
+    kbd_idle();
+  }
+  net_close(ch);
+  kcon_puts("\n[");
+  kcon_putu((uint16_t)got);
+  kcon_puts(" bytes]\n");
+}
+
 static void cmd_net(char *rest) {
   char *what = rest;
   char *arg = split_word(rest);
@@ -702,9 +776,11 @@ static void cmd_debug(char *rest) {
     kcon_puts("debug syscheck  exercise the COP syscall path\n");
     kcon_puts("debug fstest    verify SRAM addressing\n");
     kcon_puts("debug get URL   fetch a URL to the console\n");
+    kcon_puts("debug send H:P  raw stream: connect, GET /, print\n");
     return;
   }
-  if (streq(what, "ver")) cmd_ver();
+  if (streq(what, "send")) cmd_send((char *)arg);
+  else if (streq(what, "ver")) cmd_ver();
   else if (streq(what, "syscheck")) cmd_syscheck();
   else if (streq(what, "fstest")) cmd_fstest();
   else {

@@ -44,6 +44,8 @@ net status          probe the gateway (HELLO round trip), its address, counters
 net test            fetch a known URL to prove DNS, TLS and the link work
 net resolve NAME    look up a name (A records only)
 net ping HOST       four ICMP echoes through the gateway
+netecho [PORT]      echo server (default 7777)
+httpd [PORT]        serve the volume over HTTP (default 8080)
 get URL -           fetch and print to the console
 get URL NAME        fetch and save to the SRAM volume
 view NAME           display a picture
@@ -179,3 +181,59 @@ it is a decision rather than an oversight.
 The daemon **listens on no socket** — traffic reaches it through a file the
 bridge writes, so it cannot accidentally become an open proxy on your network.
 Worth keeping that way if it ever grows a socket for convenience.
+
+## Servers: the SNES accepting connections
+
+Two applications, and the reason there are two is that `netecho` has no parsing
+in it — if something is broken, it is the stream API and not the program.
+
+```sh
+# on the SNES
+netecho                       # then: printf 'hi\n' | nc <gateway-ip> 7777
+httpd                         # then: curl http://<gateway-ip>:8080/
+```
+
+`net status` prints the address to use. The SNES has none of its own — it has no
+IP stack, which is the premise of the whole design — so everything it serves is
+reached at the gateway's address.
+
+**Ports below 1024 need root**, because the gateway binds the socket. That is
+why the defaults are 7777 and 8080 rather than 7 and 80; `httpd 80` works if you
+started the daemon with privileges.
+
+**One connection at a time.** There are three channels in total and the link
+moves ~615 B/s. `curl`, `nc`, and a phone loading one page all work. A desktop
+browser opens six connections at once and will look broken — that is the channel
+count, not a bug.
+
+**`httpd` is GET-only, HTTP/1.1, `Connection: close`.** No keep-alive, chunking,
+compression, ranges or conditional requests. `/` means `INDEX.HTM`; anything with
+a `/`, `%` or `\` in it is refused, because the volume is flat so a separator is
+either a mistake or an attempt to leave. Content-Type comes from the extension.
+Files come from the same volume as everything else, so `edit INDEX.HTM` and
+reload is the entire authoring workflow.
+
+### The half-close, which cost the most time here
+
+`printf | nc` and every HTTP client do the same thing: send the request, then
+**close their sending side and wait to read**. Two separate layers treated that
+as "the connection is over":
+
+- the gateway's pump closed the socket when `recv` returned empty, throwing away
+  the response before it was written;
+- `net_write` refused to queue bytes on a channel in `EOF` state, so the echo
+  loop span forever waiting for space that would never come.
+
+EOF means the *peer* stopped sending. The direction you write in is still open.
+Both now say so, and `NET_ST_EOF` is a state an app serves from rather than one
+it bails out on.
+
+### Hanging up without truncating
+
+`sys_net_hangup(ch)` ends the current connection and keeps the port — the app
+loops instead of re-binding, and a straggler cannot steal it between requests.
+
+It **refuses while bytes are still queued**, and the caller retries. That is not
+politeness: `build_frame` packs the control queue *before* channel data, so a
+hangup queued next to a half-sent response would overtake it and the client
+would get a truncated page.

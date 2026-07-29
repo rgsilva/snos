@@ -25,6 +25,7 @@ local WRAM = emu.memType.snesWorkRam
 
 local C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
 local C2S_RESOLVE, C2S_PING = 0x05, 0x06
+local C2S_CONNECT, C2S_LISTEN, C2S_HANGUP = 0x07, 0x08, 0x09
 local S2C_HELLO, S2C_RESOLVE, S2C_PING = 0x84, 0x85, 0x86
 local S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
 
@@ -52,6 +53,9 @@ local gw = {
   drop_out = 0,       -- discard this many outgoing frames (loss toward the SNES)
   corrupt_out = 0,    -- send this many frames with a broken checksum
   fetches = {},
+  listens = {},      -- ports the SNES asked to bind
+  hangups = 0,       -- connections the app ended itself
+  upstream = {},     -- bytes the SNES SENT, per channel
   images = {},       -- urls seen, for assertions
 }
 
@@ -157,6 +161,17 @@ local function ctrl_byte(b)
     -- Liveness probe, answered unconditionally like the real daemon so that
     -- `net status` can tell "nothing behind the bridge" from "there and
     -- working". Queued like any other control record, not jumped ahead.
+    if c.typ == C2S_LISTEN and #c.buf >= 3 then
+      local ch = c.buf[1]
+      gw.listens[#gw.listens + 1] = c.buf[2] | (c.buf[3] << 8)
+      -- Accept immediately, then half-close: the client says everything it
+      -- intends to and waits to read, which is what every HTTP client does and
+      -- what broke two layers of this when it was first written.
+      push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, 0, 0))
+      push(ch, "ping over tcp\n")
+      push_ctrl(S2C_EOF, string.char(ch))
+    end
+    if c.typ == C2S_HANGUP and #c.buf >= 1 then gw.hangups = gw.hangups + 1 end
     if c.typ == C2S_HELLO then
       -- Version, then the gateway's own address as text. The SNES has no
       -- address, so this is what anything it serves would be reached at.
@@ -207,6 +222,13 @@ local function deliver(f)
     if o + 2 + len > FRAME then break end
     if ch == CH_CTRL then
       for i = 0, len - 1 do ctrl_byte(f[o + 2 + i]) end
+    else
+      -- Stream bytes FROM the SNES. Until the upstream path existed this branch
+      -- had nothing to do: every byte the console sent was a control record.
+      gw.upstream[ch] = (gw.upstream[ch] or "")
+      for i = 0, len - 1 do
+        gw.upstream[ch] = gw.upstream[ch] .. string.char(f[o + 2 + i])
+      end
     end
     o = o + 2 + len
   end
@@ -480,6 +502,10 @@ emu.addEventCallback(function()
   if step == 19 then L.feed("net ping half.example\n"); at = frame + 300; step = 20; return end
   if step == 20 then L.feed("net ping down.example\n"); at = frame + 300; step = 21; return end
   if step == 21 then L.feed("net status\n"); at = frame + 300; step = 22; return end
+  -- The server path: bind a port, accept, echo, hang up. This is the only test
+  -- of the SNES SENDING stream bytes rather than asking for them.
+  if step == 22 then L.feed("netecho 7777\n"); at = frame + 900; step = 23; return end
+  if step == 23 then L.feed(" "); at = frame + 400; step = 24; return end
 
   local r = L.new_report("net")
   local text = L.ring_text()
@@ -560,6 +586,19 @@ emu.addEventCallback(function()
   -- The SNES has no address of its own; this is what it would be reached at.
   r.check(text:find("gateway alive @ 10.0.0.1", 1, true) ~= nil,
           "net status did not report the gateway's address")
+
+  -- Servers. The SNES bound a port, took a connection, and sent bytes it
+  -- composed itself — none of which it could do before the stream API.
+  r.check(gw.listens[1] == 7777,
+          "netecho did not bind the port it was given (got " ..
+          tostring(gw.listens[1]) .. ")")
+  r.check((gw.upstream[1] or ""):find("ping over tcp", 1, true) ~= nil,
+          "the echo server did not send the bytes back: upstream was '" ..
+          tostring(gw.upstream[1]) .. "'")
+  -- The client half-closed. An app that treats EOF as "give up" never replies,
+  -- and one that hangs up early truncates; this asserts it did neither.
+  r.check(gw.hangups >= 1,
+          "the app never hung up, so the connection would have hung until timeout")
   r.check(text:find("BIG.TXT", 1, true) ~= nil,
           "the aborted download left nothing on the volume, despite saying it kept a partial file")
 
