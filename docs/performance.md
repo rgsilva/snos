@@ -103,9 +103,57 @@ possible. Doing it the other way round is what produced the 2 KB stall.
 
 Reverted. A correct 590 B/s beats a broken 1820.
 
-Also unexplained and worth a look: even allowing for stop-and-wait, a data frame
-carries ~20 bytes of a possible ~58. Something upstream of `build()` is feeding
-it in small pieces.
+### Measured properly, and the earlier guess about packing was wrong
+
+A repeatable benchmark now exists: `get file:///tmp/bench.bin` fetches a fixed
+8192 bytes with no network in the path, so it times the link and nothing else.
+Three runs: 799, 800, 789 frames — **615 B/s, reproducible to about 1%**.
+
+Frame accounting over that transfer, counted in the gateway:
+
+| | |
+|---|---|
+| polls | 600 |
+| frames carrying new data | 120 |
+| payload in those frames | 7198 bytes — **60 of a possible 60 each** |
+| retransmissions | **355** |
+
+So the frames are already completely full, and the earlier note guessing that
+"something upstream of build() is feeding it in small pieces" was wrong. The
+link is **round-trip-bound**: a frame takes about five emulated frames to be
+acknowledged through two files and two processes, and stop-and-wait sends
+nothing while it waits. 59% of all polls are retransmissions.
+
+### The obvious fix does not work, and it is worth knowing why
+
+A round-trip-bound link is fixed by carrying more per round trip, so: raise
+`LINK_FRAME` from 64 to 256. One constant on each of four sides, no protocol
+change. It builds and links cleanly — the frame buffers are in far WRAM, not the
+bank $00 budget — and then **the kernel dies the moment the link is claimed**.
+
+    *** BRK ***
+    PB:0001 PC:0051  D:1B00  DB:00AB
+
+Executing at $01:0051 is the WRAM mirror — the CPU jumped into the kernel's own
+direct page, which means a return address was smashed. `boot` and `shell` pass
+throughout, because neither claims the link; only the paths that actually
+exchange frames crash. 128 fails the same way, so it is not a marginal budget
+that one more byte tips over.
+
+The likely cause is NMI re-entrancy: `net_service` runs in NMI and copies the
+frame in and out with a C loop at `-O0`, so quadrupling the frame quadruples
+that copy, the handler overruns the frame, and the next NMI re-enters it on the
+same direct page and stack. That is a hypothesis, not a measurement — what is
+established is that the change is not the one-line win it looks like.
+
+**Doing it properly means making the copy cheap first**: `MVN` moves a block at
+~7 cycles/byte against something like 40-100 for a `-O0` far loop, which is the
+same "hand-written 65816 for the hot loop" pattern the rest of this family uses.
+With that in place a bigger frame — or a real window, which additionally needs a
+mailbox deeper than one frame per direction — becomes affordable.
+
+Reverted to 64 rather than left half-done. A correct 615 B/s beats a 2400 B/s
+that panics.
 
 **Real hardware is a different question.** None of this constrains the cable: a
 synchronous exchange has no file bridge, no 1-deep mailbox and no 60 Hz ceiling.

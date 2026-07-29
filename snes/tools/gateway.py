@@ -29,6 +29,7 @@ import io
 import os
 import socket
 import struct
+import traceback
 import sys
 import threading
 import time
@@ -334,6 +335,22 @@ class Gateway:
 
     # ------------------------------------------------------------- fetching
     def fetch(self, ch, url, as_image=False, gen=None):
+        """Wrapper whose only job is that this thread cannot die in silence.
+
+        An unhandled exception here used to kill the thread and nothing else:
+        no reply, no error, no log beyond a traceback nobody was watching, and
+        a SNES waiting for a status that was never coming. That is
+        indistinguishable from a hung network, and it is exactly the shape of
+        the intermittent timeout that took two sessions to chase. A crash is now
+        an error the console can print."""
+        try:
+            self._fetch(ch, url, as_image, gen)
+        except Exception as e:
+            print(f"  fetch crashed: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            self.push_ctrl(S2C_ERR, bytes([ch, 3]), gen)
+
+    def _fetch(self, ch, url, as_image=False, gen=None):
         """Runs on its own thread: a blocking fetch must not stall the link, or
         the SNES times out waiting for a status it was always going to get.
 
@@ -424,6 +441,11 @@ class Gateway:
         # would be noise. Older three-byte S2C_OPEN frames still parse — the
         # kernel treats a missing flags byte as zero — so the canned frames in
         # test/net.lua did not all have to change at once.
+        # file:// and other non-HTTP schemes have no numeric status. Reaching
+        # the bytes IS the success condition there, so call it 200 rather than
+        # letting struct.pack refuse None and take the thread down with it.
+        if not isinstance(status, int):
+            status = 200
         flags = 1 if (as_image and status == 200) else 0
         mark("replying")
         print(f"  -> {status}, {len(body)} bytes{' [IMG]' if flags else ''}")
