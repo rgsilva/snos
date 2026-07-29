@@ -337,6 +337,11 @@ uint16_t snos_cop_c(uint16_t sp) {
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 
+  case SYS_NET_STATS:
+    SNOS_ARGS.p0 = net_stat_resent;
+    SNOS_ARGS.p1 = net_stat_bad_sum;
+    return net_stat_rx_frames;
+
   case SYS_NET_READ: {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1, ch = SNOS_ARGS.p2;
     uint8_t __far *dst = (uint8_t __far *)(((uint32_t)bank << 16) | (uint32_t)off);

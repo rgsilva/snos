@@ -30,7 +30,7 @@
               .public sys_net_image_raw, sys_gfx, sys_read_f_raw
               .public sys_read_vram
               .public sys_fs_free
-              .public sys_net_state, sys_net_close
+              .public sys_net_state, sys_net_close, sys_net_stats
               .public sys_puts_at_raw, sys_screen, sys_pollkey, sys_osk
 
 sys_exit:       cop     #0x00
@@ -103,6 +103,8 @@ sys_net_close:  cop     #0x64
                 rtl
 sys_net_image_raw:
                 cop     #0x65
+                rtl
+sys_net_stats:  cop     #0x66
                 rtl
 sys_gfx:        cop     #0x19
                 rtl

@@ -168,11 +168,25 @@ int main(void) {
   deadline = (uint16_t)(sys_frames() + OPEN_DEADLINE);
   {
     uint16_t next_tick = (uint16_t)(sys_frames() + 120u);
+    uint16_t frames0 = sys_net_stats();
     for (;;) {
       st = sys_net_state(ch);
       if (st != NET_ST_OPENING) break;
       if ((int16_t)(sys_frames() - deadline) >= 0) {
+        /* Say which half stalled. A gateway log showing a clean fetch next to a
+         * SNES showing a timeout is not a contradiction — it means the reply
+         * never crossed the link — but the bare message left both ends equally
+         * suspect, and I burned a lot of time guessing between them. If frames
+         * moved during the wait the link is alive and the answer went missing;
+         * if they did not, the bridge is not running. */
+        uint16_t moved = (uint16_t)(sys_net_stats() - frames0);
         say("\ntimeout waiting for the gateway\n");
+        sys_putu(moved);
+        say(" frames in, ");
+        sys_putu(SNOS_ARGS.p0);
+        say(" resends\n");
+        say(moved ? "link is alive - the reply never crossed it\n"
+                  : "nothing came back - check the bridge and the daemon\n");
         sys_net_close(ch);
         return 1;
       }

@@ -150,6 +150,13 @@
 /* ABI 5. Exactly SYS_NET_FETCH, except the gateway converts the resource to
  * Mode 3 tile data first. Same stream, same states, same reads. */
 #define SYS_NET_IMAGE 0x65 /* p0/p1 = URL -> channel, or SYS_ERR */
+
+/* ABI 6. Link counters, so a stalled transfer can say which half of the system
+ * stalled. A gateway that logs a successful fetch while the SNES reports a
+ * timeout is not a contradiction — it means the reply never crossed the link —
+ * but without these numbers the two ends look equally plausible and you end up
+ * guessing. Returns frames received; p0 = resends, p1 = bad checksums. */
+#define SYS_NET_STATS 0x66
 /* $70-$7F  debug */
 #define SYS_TRACE 0x70 /* p0/p1 = string -> the test mailbox */
 
@@ -225,6 +232,7 @@ uint16_t sys_net_read_raw(uint16_t max);
 uint16_t sys_net_state(uint16_t ch);
 uint16_t sys_net_close(uint16_t ch);
 uint16_t sys_net_image_raw(void);
+uint16_t sys_net_stats(void);
 uint16_t sys_gfx(uint16_t on);
 uint16_t sys_read_f_raw(uint16_t max);
 uint16_t sys_fs_free(void);
