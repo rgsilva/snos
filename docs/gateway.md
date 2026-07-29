@@ -398,6 +398,24 @@ dumps every thread's stack. That is how the starvation bug that blocked this app
 for an afternoon was finally found, after a great deal of guessing that a stack
 trace would have settled immediately.
 
+### If the picture is noisy or flickers
+
+Almost certainly a display register, not the network — the bytes reach VRAM
+correctly and something else spoils how they are read. Capture it:
+
+```sh
+cd snos/snes
+cat build/snosbridge.lua tools/vramwatch.lua > /tmp/watch.lua
+```
+
+Load `/tmp/watch.lua` in the Script Window instead of the bridge — the bridge is
+included, so everything still works — and read the log while `vnc` runs.
+
+**`$420C` non-zero while the app is running is the answer.** That is the keyboard
+panel's HDMA still rewriting the BG tilemap base every scanline, which makes the
+PPU fetch tiles from the wrong address: flickering noise over a picture that is
+correct in VRAM. `$2115` should read `80` whenever tile data is being written.
+
 ### Known gaps
 
 No keyboard yet — the cursor and clicks work, typing does not. `CopyRect` is
