@@ -42,8 +42,6 @@ In SNOS:
 ```
 net status          probe the gateway (HELLO round trip), its address, counters
 net test            fetch a known URL to prove DNS, TLS and the link work
-net resolve NAME    look up a name (A records only)
-net ping HOST       four ICMP echoes through the gateway
 netecho [PORT]      echo server (default 7777)
 httpd [PORT]        serve the volume over HTTP (default 8080)
 get URL -           fetch and print to the console
@@ -63,32 +61,6 @@ requested.
 
 `get` and `view` are applications, not shell builtins. Typing an application's
 name runs it, so no `run` prefix is needed.
-
-## What ping and resolve actually measure
-
-Both run **on the gateway**, because the SNES has no IP stack — that is the
-premise of this whole design, not a shortcut. `net ping 1.1.1.1` answers "can
-the gateway reach 1.1.1.1", which is the question you want when the console says
-a fetch failed.
-
-```
-net ping 1.1.1.1        !!!! 4/4        ! replied, . did not
-net ping 192.0.2.1      .... 0/4
-net ping nosuch.aaa     nosuch.aaa not found
-```
-
-Real ICMP echo, 56-byte payload, the same as `ping(8)` — not an MTU-filling
-packet, which tests fragmentation and fails for reasons unrelated to whether a
-host is up. Unprivileged ICMP sockets mean no root and no setuid helper.
-
-The four echoes go out **together** against one two-second deadline rather than
-sequentially. Sequential timeouts made the worst case four timeouts — eight
-seconds of a console showing nothing, and long enough that the SNES gave up on
-the gateway before the gateway gave up on the host.
-
-`net status` reports the gateway's own address because the SNES does not have
-one. Anything the SNES ever serves is reached at the gateway's address, so that
-is the number to point a browser at.
 
 ## Why two files instead of a socket or a pipe
 

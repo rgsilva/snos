@@ -24,9 +24,8 @@ local CH_CTRL, CH_PAD = 0, 0xFF
 local WRAM = emu.memType.snesWorkRam
 
 local C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
-local C2S_RESOLVE, C2S_PING = 0x05, 0x06
 local C2S_CONNECT, C2S_LISTEN, C2S_HANGUP = 0x07, 0x08, 0x09
-local S2C_HELLO, S2C_RESOLVE, S2C_PING = 0x84, 0x85, 0x86
+local S2C_HELLO = 0x84
 local S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
 
 local function rb(o) return emu.read(MB + o, WRAM) end
@@ -176,29 +175,6 @@ local function ctrl_byte(b)
       -- Version, then the gateway's own address as text. The SNES has no
       -- address, so this is what anything it serves would be reached at.
       push_ctrl(S2C_HELLO, string.char(1) .. "10.0.0.1")
-    end
-    if c.typ == C2S_RESOLVE and #c.buf >= 1 then
-      local name = ""
-      for i = 1, #c.buf do name = name .. string.char(c.buf[i]) end
-      -- An empty reply is "no A record", which is a different thing from the
-      -- link failing and has to read differently on the console.
-      push_ctrl(S2C_RESOLVE, name:find("missing") and "" or "10.0.0.7 10.0.0.8")
-    end
-    if c.typ == C2S_PING and #c.buf >= 1 then
-      local host = ""
-      for i = 1, #c.buf do host = host .. string.char(c.buf[i]) end
-      if host:find("missing") then
-        push_ctrl(S2C_PING, string.char(0))                 -- did not resolve
-      elseif host:find("half") then
-        -- The case a live network cannot be asked to produce on demand: some
-        -- echoes answer and some do not, which is the only one where the dots
-        -- and the count can disagree with each other.
-        push_ctrl(S2C_PING, string.char(1, 4, 0, 12, 0, 13))
-      elseif host:find("down") then
-        push_ctrl(S2C_PING, string.char(1, 4, 0, 0, 0, 0))
-      else
-        push_ctrl(S2C_PING, string.char(1, 4, 11, 12, 11, 12))
-      end
     end
     -- C2S_CLOSE: drop anything still queued for that channel. A real gateway
     -- closes the socket and stops reading; a canned one that keeps streaming an
@@ -497,15 +473,11 @@ emu.addEventCallback(function()
     step = 17
     return
   end
-  if step == 17 then L.feed("net resolve example.com\n"); at = frame + 300; step = 18; return end
-  if step == 18 then L.feed("net resolve missing.example\n"); at = frame + 300; step = 19; return end
-  if step == 19 then L.feed("net ping half.example\n"); at = frame + 300; step = 20; return end
-  if step == 20 then L.feed("net ping down.example\n"); at = frame + 300; step = 21; return end
-  if step == 21 then L.feed("net status\n"); at = frame + 300; step = 22; return end
+  if step == 17 then L.feed("net status\n"); at = frame + 300; step = 18; return end
   -- The server path: bind a port, accept, echo, hang up. This is the only test
   -- of the SNES SENDING stream bytes rather than asking for them.
-  if step == 22 then L.feed("netecho 7777\n"); at = frame + 900; step = 23; return end
-  if step == 23 then L.feed(" "); at = frame + 400; step = 24; return end
+  if step == 18 then L.feed("netecho 7777\n"); at = frame + 900; step = 19; return end
+  if step == 19 then L.feed(" "); at = frame + 400; step = 20; return end
 
   local r = L.new_report("net")
   local text = L.ring_text()
@@ -572,17 +544,6 @@ emu.addEventCallback(function()
   r.check(text:find("left 1 connection open - closed", 1, true) ~= nil,
           "a channel leaked by a killed app was not reclaimed")
 
-  -- resolve and ping are control records: one round trip each, no channel.
-  r.check(text:find("example.com 10.0.0.7 10.0.0.8", 1, true) ~= nil,
-          "net resolve did not print the addresses")
-  r.check(text:find("missing.example not found", 1, true) ~= nil,
-          "a name with no A record did not read as 'not found'")
-  -- The partial case is the one worth asserting: two of four replied, so the
-  -- dots and the count have to agree, and a lost echo must not be scored.
-  r.check(text:find(".!.! 2/4", 1, true) ~= nil,
-          "a partly answered ping did not render as '.!.! 2/4'")
-  r.check(text:find(".... 0/4", 1, true) ~= nil,
-          "an unreachable host did not render as '.... 0/4'")
   -- The SNES has no address of its own; this is what it would be reached at.
   r.check(text:find("gateway alive @ 10.0.0.1", 1, true) ~= nil,
           "net status did not report the gateway's address")
