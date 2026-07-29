@@ -45,6 +45,7 @@ CH_CTRL, CH_PAD = 0, 0xFF
 
 C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
 S2C_OPEN, S2C_EOF, S2C_ERR, S2C_HELLO = 0x81, 0x82, 0x83, 0x84
+F_SYN = 0x02
 GW_VERSION = 1
 
 USER_AGENT = "SNOS/0.1 (Super Nintendo; via gateway)"
@@ -152,6 +153,25 @@ class Gateway:
         self.tx_seq = 0
         self.rx_next = 0
         self.awaiting = False
+        # "I have restarted; my sequence begins again here." Held until the SNES
+        # acknowledges a frame, which is the only proof it adopted the new base.
+        # Without it, restarting this daemon alone deadlocks the link forever:
+        # we come back at seq 0, the SNES is still waiting for seq 200, it never
+        # acks, and stop-and-wait resends the same frame until the SNES reboots.
+        self.syn = True
+        # Bumped whenever the session resets. A fetch thread started before the
+        # reset captures the old value and drops its results instead of
+        # injecting a dead session's bytes into the new one.
+        self.gen = 0
+        self.peer_syn_seen = False
+        # F_SYN tells the peer OUR sequence began again. It does not tell us
+        # THEIRS, and they have no reason to restart just because we did — so on
+        # the first frame after a restart we adopt whatever sequence they are
+        # already using. Without this the deadlock simply reverses: we come back
+        # at rx_next=0, the SNES is calmly sending seq=1, and we reject every
+        # frame it will ever send. Announce and adopt are both required; each
+        # alone fixes exactly one direction.
+        self.rx_resync = True
         self.inflight = None
         self.out = []            # [ch, bytearray] queued for the SNES
         self.lock = threading.Lock()
@@ -161,15 +181,17 @@ class Gateway:
         self.cbuf = bytearray()
 
     # ------------------------------------------------------------ outbound
-    def push(self, ch, data):
+    def push(self, ch, data, gen=None):
         with self.lock:
+            if gen is not None and gen != self.gen:
+                return          # a fetch from a session that no longer exists
             self.out.append([ch, bytearray(data)])
 
-    def push_ctrl(self, typ, payload):
-        self.push(CH_CTRL, bytes([typ, len(payload)]) + payload)
+    def push_ctrl(self, typ, payload, gen=None):
+        self.push(CH_CTRL, bytes([typ, len(payload)]) + payload, gen)
 
     # ------------------------------------------------------------- fetching
-    def fetch(self, ch, url, as_image=False):
+    def fetch(self, ch, url, as_image=False, gen=None):
         """Runs on its own thread: a blocking fetch must not stall the link, or
         the SNES times out waiting for a status it was always going to get.
 
@@ -223,7 +245,7 @@ class Gateway:
             truncated = False
         except Exception as e:
             print(f"  fetch failed: {e}")
-            self.push_ctrl(S2C_ERR, bytes([ch, 1]))
+            self.push_ctrl(S2C_ERR, bytes([ch, 1]), gen)
             return
 
         # Auto-convert on Content-Type. The gateway is the only party that knows
@@ -251,7 +273,7 @@ class Gateway:
                 # A 200 that will not decode is a distinct failure from a 404,
                 # and the console can do nothing useful with the raw bytes.
                 print(f"  image conversion failed: {e}")
-                self.push_ctrl(S2C_ERR, bytes([ch, 2]))
+                self.push_ctrl(S2C_ERR, bytes([ch, 2]), gen)
                 return
 
         # The flags byte tells the SNES the body is Mode 3 tile data rather than
@@ -263,11 +285,11 @@ class Gateway:
         flags = 1 if (as_image and status == 200) else 0
         mark("replying")
         print(f"  -> {status}, {len(body)} bytes{' [IMG]' if flags else ''}")
-        self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, status, flags))
+        self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, status, flags), gen)
         # Chunked so one huge stream cannot monopolise the frame builder.
         for i in range(0, len(body), 512):
-            self.push(ch, body[i:i + 512])
-        self.push_ctrl(S2C_EOF, bytes([ch]))
+            self.push(ch, body[i:i + 512], gen)
+        self.push_ctrl(S2C_EOF, bytes([ch]), gen)
 
     # ------------------------------------------------------------- inbound
     def ctrl_byte(self, b):
@@ -290,7 +312,8 @@ class Gateway:
             url = self.cbuf[1:].decode("ascii", "replace")
             want_img = self.ctype == C2S_IMAGE
             print(f"{'IMAGE' if want_img else 'FETCH'} ch{ch} {url}")
-            threading.Thread(target=self.fetch, args=(ch, url, want_img),
+            threading.Thread(target=self.fetch,
+                             args=(ch, url, want_img, self.gen),
                              daemon=True).start()
         elif self.ctype == C2S_HELLO:
             # Answered from the frame thread, so a fetch blocked on the network
@@ -339,6 +362,8 @@ class Gateway:
             f[i] = CH_PAD
         if any_data:
             f[FLAGS] |= F_DATA
+        if self.syn:
+            f[FLAGS] |= F_SYN
         f[SUM] = 0
         f[SUM] = checksum(f)
         return f, any_data
@@ -346,9 +371,33 @@ class Gateway:
     def on_frame(self, f):
         if f[SUM] != checksum(f):
             return                      # corrupt: say nothing, peer resends
+        if self.rx_resync:
+            self.rx_resync = False
+            self.rx_next = f[SEQ]
+
         if self.awaiting and f[ACK] == self.tx_seq:
             self.awaiting = False
             self.tx_seq = (self.tx_seq + 1) & 0xFF
+            # It acked us, so it has our sequence base. Stop announcing.
+            self.syn = False
+
+        # Mirror of the SNES's handling: the peer restarted, so adopt its
+        # sequence once per episode and drop everything the old session owned.
+        # Once per episode, not once per frame — honouring it on every frame
+        # would re-deliver retransmissions, since the seq check is what
+        # discards those.
+        if f[FLAGS] & F_SYN:
+            if not self.peer_syn_seen:
+                self.peer_syn_seen = True
+                self.rx_next = f[SEQ]
+                with self.lock:
+                    self.gen += 1
+                    self.out.clear()
+                self.cstate, self.ctype, self.cbuf = 0, 0, bytearray()
+                print("gateway: SNES restarted, session reset")
+        else:
+            self.peer_syn_seen = False
+
         if (f[FLAGS] & F_DATA) and f[SEQ] == self.rx_next:
             self.deliver(f)
             self.rx_next = (self.rx_next + 1) & 0xFF
@@ -367,10 +416,21 @@ class Gateway:
 
 
 def main():
+    # Do NOT truncate here. The bridge owns the length of both files — it
+    # truncates them when the emulator starts a session — and a second truncator
+    # silently invalidates the offset the OTHER end is reading from. That was a
+    # real, reproducible deadlock: start the daemon, stop it, start it again,
+    # and the SNES never saw another frame no matter how many times you reloaded
+    # the bridge script, because the bridge was still reading at an offset far
+    # past the end of a file this had just emptied underneath it.
+    #
+    # Instead, join the stream where it currently is: skip whatever was written
+    # before we existed, and append.
     for path in (UP, DOWN):
-        open(path, "wb").close()
+        if not os.path.exists(path):
+            open(path, "wb").close()
     gw = Gateway()
-    up_off = 0
+    up_off = os.path.getsize(UP) // FRAME * FRAME
     down = open(DOWN, "ab", buffering=0)
 
     print(f"gateway: reading {UP}, writing {DOWN}")

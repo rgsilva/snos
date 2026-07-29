@@ -96,6 +96,13 @@ emu.addEventCallback(function()
   -- hide timing bugs that M7 would then inherit.
   local f = io.open(DOWN, "rb")
   if f then
+    -- The far end was restarted and emptied the file under us. Without this the
+    -- link is dead forever after the first gateway restart: we keep reading at
+    -- an offset past the end of a file that now begins again at zero, so not one
+    -- frame is ever seen and no amount of reloading this script helps, because
+    -- the stale offset is only reset when the emulator itself restarts.
+    local size = f:seek("end")
+    if size < down_off then down_off = 0 end
     f:seek("set", down_off)
     local chunk = f:read(FRAME)
     f:close()

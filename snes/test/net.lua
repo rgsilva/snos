@@ -19,6 +19,7 @@ local MAGIC = 0x4B4C       -- "LK"
 local FRAME, HDR = 64, 4
 local SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 local F_DATA = 0x01
+local F_SYN = 0x02
 local CH_CTRL, CH_PAD = 0, 0xFF
 local WRAM = emu.memType.snesWorkRam
 

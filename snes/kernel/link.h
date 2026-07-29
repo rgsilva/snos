@@ -16,6 +16,7 @@
  *   [0] seq       sender's frame sequence number
  *   [1] ack       highest sequence the sender has correctly received
  *   [2] flags     LINK_F_DATA when this frame carries new records
+ *                 LINK_F_SYN  the sender has restarted; adopt its sequence
  *   [3] checksum  8-bit sum of all 64 bytes, computed with this byte zero
  *   [4..63]       records, packed: [channel][length][payload...]
  *                 padded out with channel LINK_CH_PAD
@@ -44,6 +45,20 @@
 #define LINK_SUM 3
 
 #define LINK_F_DATA 0x01u /* this frame carries records worth accepting */
+
+/* "I have restarted; my sequence numbers begin again here."
+ *
+ * Without this the link deadlocks permanently the first time either end is
+ * restarted alone. The peer comes back at seq 0 while we are still waiting for
+ * seq 200; we reject every frame and never ack, it is stop-and-wait so it
+ * retransmits the same frame forever, and nothing short of rebooting the SNES
+ * recovers. Reproduced exactly: start gateway (works), stop it, start it again
+ * (dead forever, including across a reload of the bridge script).
+ *
+ * The receiver adopts the sender's sequence ONCE per episode — a flag that is
+ * honoured on every frame would re-deliver retransmissions as duplicates, since
+ * the ordinary seq check is what discards those. */
+#define LINK_F_SYN 0x02u
 
 #define LINK_CH_CTRL 0  /* commands and their replies */
 #define LINK_CH_PAD 0xFF /* filler; stop parsing records here */

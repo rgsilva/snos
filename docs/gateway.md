@@ -68,8 +68,16 @@ wrong one: a blocking read inside an `endFrame` callback freezes the emulator.
 Reading a regular file at a tracked offset returns whatever is there and never
 blocks, which is the property that matters.
 
-`/tmp/snos-up.bin` and `/tmp/snos-down.bin` grow for the length of a session and
-are truncated at startup.
+`/tmp/snos-up.bin` and `/tmp/snos-down.bin` grow for the length of a session.
+**Only the bridge truncates them**, when the emulator starts a session. The
+daemon joins the stream where it finds it — it seeks to the current end of the
+up-file and appends to the down-file — and the bridge resets its read offset if
+it ever sees the file shrink underneath it.
+
+That division matters. When both ends truncated, restarting the daemon silently
+invalidated the offset the bridge was reading from, so the SNES never saw
+another frame and no amount of reloading the script helped. Two truncators, one
+pair of files, no protocol between them.
 
 ## The gateway must not free-run
 
@@ -110,8 +118,17 @@ Non-zero frames in means the link ran the whole time and the reply specifically
 went missing; zero means nothing crossed at all. Different bugs, and they used
 to look identical.
 
-With the daemon plainly alive, restart it: it tracks file offsets, and
-restarting the emulator truncates both files underneath it.
+**Either end can now be restarted alone**, which used to deadlock the link
+permanently. The peer comes back at sequence zero while the other side is still
+waiting for sequence 200, rejects every frame, never acks, and stop-and-wait
+resends the same frame forever; only rebooting the SNES recovered. Fixed with
+two rules that are both required, since each alone fixes one direction:
+
+- `LINK_F_SYN` announces "my sequence begins again here", and the peer adopts it
+  once per episode — once, because honouring it on every frame would re-deliver
+  retransmissions, which the ordinary sequence check is what discards.
+- A side that has just restarted **adopts the peer's sequence** from the first
+  frame it sees. The peer has no reason to restart just because we did.
 
 **The script produces no output whatsoever, and Mesen looks hung** — that is
 what a Lua *syntax error* looks like in Mesen. There is no error message.

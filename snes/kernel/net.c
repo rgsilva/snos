@@ -98,6 +98,9 @@ static uint8_t cmsg_type;
 static uint8_t cmsg_len;
 static uint8_t cmsg_state; /* 0 want type, 1 want len, 2 collecting */
 
+static uint8_t peer_syn_seen;
+static uint8_t syn_out;
+static uint8_t rx_resync;
 static uint8_t txframe[LINK_FRAME];
 static uint8_t rxframe[LINK_FRAME];
 static uint8_t tx_seq;      /* sequence of the frame currently in flight */
@@ -142,6 +145,19 @@ void net_init(void) {
   tx_seq = 0;
   rx_next = 0;
   awaiting_ack = 0;
+  peer_syn_seen = 0;
+  /* Announce our own restart until the peer acknowledges a frame. On the
+   * emulated backend the gateway also notices the bridge truncating its files,
+   * but that is a property of files, not of the link — on real hardware this
+   * flag is the only thing that tells the far end our sequence began again. */
+  syn_out = 1;
+  /* The mirror of syn_out. That flag tells the peer our sequence began again;
+   * this one accepts that THEIRS did not. A gateway that has been running for
+   * an hour is at seq 57 and has no reason to restart because we did, so we
+   * adopt its sequence from the first frame rather than demanding it match a
+   * counter we just zeroed. Announce and adopt are both needed — each alone
+   * fixes one direction and leaves the other deadlocked. */
+  rx_resync = 1;
   txframe_bytes = 0;
   net_stat_rx_frames = 0;
   net_stat_hello = 0;
@@ -395,7 +411,7 @@ static void build_frame(void) {
 
   txframe[LINK_SEQ] = tx_seq;
   txframe[LINK_ACK] = (uint8_t)(rx_next - 1);
-  txframe[LINK_FLAGS] = 0;
+  txframe[LINK_FLAGS] = syn_out ? LINK_F_SYN : 0;
 
   /* Only the control channel has anything outbound today; when OPEN arrives in
    * M8 and applications start writing to streams, this becomes a loop over the
@@ -432,13 +448,36 @@ void net_service(void) {
        * cleverer risks acting on bytes we know are wrong. */
       net_stat_bad_sum++;
     } else {
+      if (rx_resync) {
+        rx_resync = 0;
+        rx_next = rxframe[LINK_SEQ];
+      }
+
       /* An ack for the frame in flight releases it. */
       if (awaiting_ack && rxframe[LINK_ACK] == tx_seq) {
         txq_tail = (uint16_t)((txq_tail + txframe_bytes) & (TXQ_SIZE - 1));
         txframe_bytes = 0;
         awaiting_ack = 0;
         tx_seq++;
+        syn_out = 0; /* it acked us, so it has our sequence base */
       }
+      /* The peer restarted. Adopt its sequence base, once, and fail every
+       * channel: whatever sockets those represented died with it, so an app
+       * blocked on one gets an error instead of waiting forever. Acting on
+       * every SYN frame rather than once per episode would re-deliver
+       * retransmissions, because the seq check below is what discards those. */
+      if ((rxframe[LINK_FLAGS] & LINK_F_SYN) != 0) {
+        if (!peer_syn_seen) {
+          int i;
+          peer_syn_seen = 1;
+          rx_next = rxframe[LINK_SEQ];
+          for (i = 1; i < NET_CHANNELS; i++)
+            if (ch_state[i] != NET_ST_FREE) ch_state[i] = NET_ST_ERROR;
+        }
+      } else {
+        peer_syn_seen = 0;
+      }
+
       if ((rxframe[LINK_FLAGS] & LINK_F_DATA) != 0) {
         if (rxframe[LINK_SEQ] == rx_next) {
           if (frame_fits(rxframe)) {
