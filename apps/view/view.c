@@ -140,6 +140,16 @@ static int show(const char *file) {
   build_tilemap();
 
   R8(0x2105) = 0x03;                             /* Mode 3: BG1 is 8bpp */
+
+  /* Zero the scroll registers. The console leaves them wherever its own scroll
+   * ring put them, and nothing else resets them — so a picture viewed after the
+   * shell had scrolled appeared shifted vertically by exactly that amount, and
+   * a picture viewed on a fresh screen looked perfect. Write-twice registers,
+   * hence the pairs. */
+  R8(0x210D) = 0; R8(0x210D) = 0;                /* BG1HOFS */
+  R8(0x210E) = 0; R8(0x210E) = 0;                /* BG1VOFS */
+  R8(0x210F) = 0; R8(0x210F) = 0;                /* BG2HOFS */
+  R8(0x2110) = 0; R8(0x2110) = 0;                /* BG2VOFS */
   R8(0x2107) = (uint8_t)((VRAM_MAP >> 10) << 2); /* BG1SC, 32x32 */
   R8(0x210B) = 0x00;                             /* BG1 tiles at $0000 */
   R8(0x212C) = 0x01;                             /* main screen: BG1 only */

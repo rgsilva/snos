@@ -170,7 +170,21 @@ class Gateway:
     # ------------------------------------------------------------- fetching
     def fetch(self, ch, url, as_image=False):
         """Runs on its own thread: a blocking fetch must not stall the link, or
-        the SNES times out waiting for a status it was always going to get."""
+        the SNES times out waiting for a status it was always going to get.
+
+        Each stage is logged with the time it took. A fetch that never answers
+        has been reported and could not be reproduced here, and the log at the
+        time showed only "FETCH" followed by "CLOSE" with nothing between —
+        which says the thread produced no output but not WHERE it stopped.
+        Silence is the same shape for "never started", "stuck opening the
+        connection", "stuck reading the body" and "stuck converting", and those
+        want completely different fixes."""
+        t0 = time.time()
+
+        def mark(what):
+            print(f"  [{time.time() - t0:5.1f}s] {what}")
+
+        mark("thread started")
         if "://" not in url:
             url = "https://" + url
         ctype = ""
@@ -180,6 +194,7 @@ class Gateway:
                 headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"},
             )
             with urllib.request.urlopen(req, timeout=20) as resp:
+                mark("connected")
                 status = resp.status
                 ctype = resp.headers.get("Content-Type", "")
                 # Decide the cap from what came back, before reading it: an
@@ -219,6 +234,7 @@ class Gateway:
             as_image = True
             print(f"  {ctype} -> converting")
 
+        mark(f"body read: {len(body)} bytes, {ctype or 'no content-type'}")
         if truncated:
             # Say so rather than handing on a damaged body. Silently truncating
             # is how a 960 KB PNG turned into "image file is truncated", a
@@ -244,6 +260,7 @@ class Gateway:
         # kernel treats a missing flags byte as zero — so the canned frames in
         # test/net.lua did not all have to change at once.
         flags = 1 if (as_image and status == 200) else 0
+        mark("replying")
         print(f"  -> {status}, {len(body)} bytes{' [IMG]' if flags else ''}")
         self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, status, flags))
         # Chunked so one huge stream cannot monopolise the frame builder.

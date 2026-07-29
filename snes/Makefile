@@ -139,57 +139,57 @@ test: test-boot test-input test-history test-shell test-shadow test-apps test-fs
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 
 test-input: $(BUILD)/snos.sfc $(BUILD)/test/input.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/input.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/input.lua
 
 test-shell: $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
 
 test-apps: $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
 
 # Mesen persists cart SRAM to a .srm; a stale one from a previous run would
 # make the persistence assertion pass for the wrong reason.
 test-fs: $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
 
 test-basic: $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
 
 test-panel: $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
 
 test-editor: $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
 
 test-net: $(BUILD)/snos.sfc $(BUILD)/test/net.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/net.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/net.lua
 
 test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 
 test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 	$(call check_env)
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/history.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 
 test-shadow: $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	$(MESEN) --testrunner $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
 
 # One script for the Mesen Script Window that starts BOTH the host keyboard and
 # the gateway link, since the Script Window runs only one at a time.

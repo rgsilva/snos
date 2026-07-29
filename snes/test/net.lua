@@ -493,8 +493,12 @@ emu.addEventCallback(function()
   -- Auto-conversion: nothing asked for an image. The URL ended .jpg, the
   -- gateway said so with the flags byte, and the name was forced to .IMG
   -- because the bytes are no longer a JPEG.
-  r.check(text:find("picture - view TINY.IMG", 1, true) ~= nil,
-          "the converted picture was not announced as one")
+  -- The completion line is deliberately terse now, so what proves the
+  -- auto-conversion happened is the NAME: nothing asked for an image, the URL
+  -- ended .jpg, and the extension was forced to .IMG because the saved bytes
+  -- are Mode 3 tiles rather than a JPEG.
+  r.check(text:find("saved TINY.IMG", 1, true) ~= nil,
+          "the fetched picture was not saved under a forced .IMG name")
   r.check(text:find("saved TINY.IMG", 1, true) ~= nil,
           "the converted picture never reached the volume")
 

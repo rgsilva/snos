@@ -23,6 +23,7 @@ has twice reset Snes.Port1.Type to None — which is how the actual cause kept
 coming back.
 """
 import json
+import os
 import pathlib
 import sys
 
@@ -39,16 +40,19 @@ def main() -> int:
         print(f"warning: could not read Mesen settings ({exc})", file=sys.stderr)
         return 0
 
-    port1 = cfg.get("Snes", {}).get("Port1", {}).get("Type")
-    if port1 in (None, "None"):
+    # The controller is no longer checked here. tools/runtest.sh borrows it for
+    # the duration of each run and gives it back afterwards, because Ricardo
+    # deliberately keeps port 1 empty and exiting the Mesen GUI rewrites the
+    # setting anyway — asking a human to remember lost that race three times.
+    #
+    # What is worth failing on is being unable to change it at all, since then
+    # the tests would silently run without input and blame the keyboard.
+    if not os.access(SETTINGS, os.W_OK):
         print(
-            "ERROR: Mesen has no controller in SNES port 1 "
-            f"(Snes.Port1.Type = {port1}).\n"
-            "       emu.setInput then has nothing to set, $4218 reads zero, and\n"
-            "       every controller-driven test fails claiming the on-screen\n"
-            "       keyboard is broken. It is not.\n"
-            "       Fix: Mesen -> Settings -> Controllers -> Player 1 -> "
-            "SNES Controller.",
+            f"ERROR: cannot write {SETTINGS}.\n"
+            "       The harness needs to plug a controller into SNES port 1 for\n"
+            "       the duration of a run; without one, emu.setInput does\n"
+            "       nothing and controller tests fail blaming the keyboard.",
             file=sys.stderr,
         )
         return 1

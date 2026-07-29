@@ -34,6 +34,14 @@
  * is seconds of work on the far side — so the wait for a status has to be
  * generous. A plain fetch of a slow server can take just as long, so there is
  * no reason to distinguish. */
+/* How long to wait for the gateway's answer, covering DNS, TCP, TLS, the
+ * download and — for a picture — decoding and rescaling it.
+ *
+ * Instrumenting the gateway showed the whole sequence takes 0.3 s for a 960 KB
+ * PNG, so thirty seconds is already a hundredfold margin. I had raised this to
+ * two minutes on the theory that a slow conversion was causing the reported
+ * timeouts; the measurement says otherwise, so it goes back. The wait being
+ * interruptible and visible below is worth keeping on its own merits. */
 #define OPEN_DEADLINE 1800u
 
 static char args[SNOS_ARGV_MAX];
@@ -158,15 +166,33 @@ int main(void) {
     return 1;
   }
   deadline = (uint16_t)(sys_frames() + OPEN_DEADLINE);
-  for (;;) {
-    st = sys_net_state(ch);
-    if (st != NET_ST_OPENING) break;
-    if ((int16_t)(sys_frames() - deadline) >= 0) {
-      say("timeout waiting for the gateway\n");
-      sys_net_close(ch);
-      return 1;
+  {
+    uint16_t next_tick = (uint16_t)(sys_frames() + 120u);
+    for (;;) {
+      st = sys_net_state(ch);
+      if (st != NET_ST_OPENING) break;
+      if ((int16_t)(sys_frames() - deadline) >= 0) {
+        say("\ntimeout waiting for the gateway\n");
+        sys_net_close(ch);
+        return 1;
+      }
+      /* Any key abandons the wait. Converting a large picture takes long enough
+       * that a silent, uninterruptible pause is indistinguishable from a hang —
+       * which is exactly what it looked like. */
+      if (sys_pollkey() != SYS_ERR) {
+        say("\n[cancelled]\n");
+        sys_net_close(ch);
+        return 1;
+      }
+      /* A dot every two seconds, so the wait is visibly alive. */
+      if ((int16_t)(sys_frames() - next_tick) >= 0) {
+        next_tick = (uint16_t)(sys_frames() + 120u);
+        sys_putc('.');
+      }
+      sys_yield();
     }
-    sys_yield();
+    if ((int16_t)(sys_frames() - (uint16_t)(deadline - OPEN_DEADLINE) - 120) >= 0)
+      sys_putc('\n'); /* close the dotted line if we printed any */
   }
 
   /* sys_net_state leaves the status in p0 and the image flag in p1. Read them
@@ -302,11 +328,6 @@ int main(void) {
     say(", ");
     say_u32(got);
     say(" bytes\n");
-    if (is_img) {
-      say("picture - view ");
-      say(name);
-      sys_putc('\n');
-    }
   }
   sys_net_close(ch);
   return 0;

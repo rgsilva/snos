@@ -186,7 +186,15 @@ void con_putc(int c) {
     c &= 0xFF;
     if (c == '\n') { newline(); return; }
     if (c == '\r') { col = 0; return; }
-    if (c == '\b') { if (col) col--; return; }
+    if (c == '\b') {
+        /* Step back onto the previous row when already at column 0. A typed
+         * line longer than 64 columns wraps, and stopping at the left edge
+         * meant the wrapped part could never be erased — you could delete
+         * "mg" from "cover.img" and no further. */
+        if (col) col--;
+        else if (row) { row--; col = COLS - 1; }
+        return;
+    }
     if (c == 7) return;
     if (c < 0x20) return;
     r = (uint8_t)((top + row) % RING);
