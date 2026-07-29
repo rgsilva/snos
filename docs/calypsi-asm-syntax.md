@@ -59,3 +59,27 @@ bytes rather than trusting the absence of an error.
 
 `snesmac/snes/calypsi/tilecopy.s` and `m68krun.s` are the reference for
 hand-written Calypsi 65816 — they use `##` and `long:`/`dp:.tiny` throughout.
+
+
+## Initialised statics do not survive in an APPLICATION
+
+```c
+static uint16_t cx = 128;   /* reads back as 0 */
+```
+
+Applications link with `--no-auto-libraries`, so the C startup that walks the
+data-initialisation table and copies initialised variables out of ROM into RAM
+never runs. The initialiser is emitted into the image and then nobody applies
+it. Zero-initialised statics are fine — that memory starts as zero anyway.
+
+**Assign at the top of `main` instead.** This is not a warning the compiler can
+give you; the code is legal and the linker is doing what it was told.
+
+The symptom is worse than a wrong value, because it looks like the *write* is
+broken rather than the *variable*. `web` parked its cursor sprite off-screen at
+(0, 255) with the rest of the OAM entry perfectly correct — the OAM dump read
+`00 FF 00 30`, where the tile and attribute bytes were exactly right and only
+the coordinates were zero. Hunting that as an OAM addressing problem would have
+taken a long time.
+
+The kernel is unaffected: it links normally and its startup runs.

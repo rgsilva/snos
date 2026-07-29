@@ -377,6 +377,24 @@ uint16_t snos_cop_c(uint16_t sp) {
   case SYS_NET_HANGUP:
     return net_hangup((int)a) < 0 ? SYS_ERR : 0;
 
+  case SYS_WEB_OPEN: {
+    char url[256];
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    int i, r;
+    for (i = 0; i < 255; i++) {
+      url[i] = (char)far_rd(bank, (uint16_t)(off + i));
+      if (url[i] == 0) break;
+    }
+    url[i < 255 ? i : 255] = 0;
+    r = net_web_open(url);
+    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
+    return r < 0 ? SYS_ERR : (uint16_t)r;
+  }
+
+  case SYS_WEB_OP:
+    return net_web_op((int)SNOS_ARGS.p0, (uint8_t)a, (uint8_t)SNOS_ARGS.p1,
+                      (uint8_t)SNOS_ARGS.p2) < 0 ? SYS_ERR : 0;
+
   case SYS_NET_LISTEN: {
     int r = net_listen(a);
     if (r >= 0 && SNOS_EXEC_RUN) net_own(r);

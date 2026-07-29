@@ -29,6 +29,8 @@ import io
 import os
 import socket
 import struct
+
+import browser
 import subprocess
 import tempfile
 import traceback
@@ -50,6 +52,10 @@ CH_CTRL, CH_PAD = 0, 0xFF
 C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
 C2S_CONNECT = 0x07
 C2S_LISTEN, C2S_HANGUP = 0x08, 0x09
+C2S_WEB = 0x0A
+
+# `web` operations, in the first payload byte after the channel.
+WEB_OPEN, WEB_SCROLL, WEB_CLICK, WEB_BACK, WEB_FORWARD = 0, 1, 2, 3, 4
 
 # Servers bind on every interface deliberately: the point is a SNES serving a
 # page to someone else's phone at a conference. That IS an exposure decision —
@@ -83,7 +89,7 @@ SCREEN_W, SCREEN_H = 256, 224
 IMG_MAGIC = b"SIMG"
 
 
-def to_img(data):
+def to_img(data, out_w=None, out_h=None):
     """Decode any image and render it as SNES Mode 3 tile data.
 
     Everything expensive happens here rather than on the console, which is the
@@ -113,8 +119,13 @@ def to_img(data):
     else:
         im = im.convert("RGB")
 
+    # `web` asks for a shorter window than a photograph gets: a full-screen
+    # 8bpp image leaves no 16 KB-aligned home for the cursor's sprite tiles, so
+    # the browser gives up 32 scanlines to get a cursor. See browser.py.
+    tw = out_w or SCREEN_W
+    th = out_h or SCREEN_H
     sw, sh = im.size
-    scale = min(SCREEN_W / sw, SCREEN_H / sh)
+    scale = min(tw / sw, th / sh)
     w, h = max(1, round(sw * scale)), max(1, round(sh * scale))
     im = im.resize((w, h), Image.LANCZOS)
 
@@ -323,6 +334,7 @@ class Gateway:
         # carry bytes both ways until one side hangs up.
         self.socks = {}
         self.listeners = {}      # channel -> listening socket
+        self.pages = {}          # channel -> browser.Session
         self.inflight = None
         self.out = []            # [ch, bytearray] queued for the SNES
         self.lock = threading.Lock()
@@ -405,6 +417,65 @@ class Gateway:
         except OSError:
             pass
         self.drop(ch)
+
+    def do_web(self, ch, op, arg, gen):
+        """Drive a held-open browser page and send back a picture of it.
+
+        Every operation answers with a full window, because the console has no
+        way to apply a partial update to a bitmap it does not model — it has the
+        pixels and nothing else. That is what makes v2's tile cache the whole
+        performance story: a window is ~49 KB today and most of it is tiles the
+        SNES was already holding."""
+        try:
+            if op == WEB_OPEN:
+                old = self.pages.pop(ch, None)
+                if old is not None:
+                    old.close()
+                url = arg.decode("ascii", "replace")
+                print(f"WEB ch{ch} open {url}")
+                page = browser.Session()
+                self.pages[ch] = page
+                page.navigate(url)
+            else:
+                page = self.pages.get(ch)
+                if page is None:
+                    print(f"  ch{ch} has no page open")
+                    self.push_ctrl(S2C_ERR, bytes([ch, 5]), gen)
+                    return
+                if op == WEB_SCROLL:
+                    # One signed byte of screens: the console cannot afford a
+                    # finer unit when every move is a fresh image.
+                    d = arg[0] if arg else 1
+                    if d > 127:
+                        d -= 256
+                    print(f"WEB ch{ch} scroll {d:+d}")
+                    page.scroll(d)
+                elif op == WEB_CLICK:
+                    x, y = (arg[0], arg[1]) if len(arg) >= 2 else (0, 0)
+                    href = page.click(x, y)
+                    print(f"WEB ch{ch} click ({x},{y}) -> {href or 'nothing there'}")
+                elif op == WEB_BACK:
+                    print(f"WEB ch{ch} back: {page.back()}")
+                elif op == WEB_FORWARD:
+                    print(f"WEB ch{ch} forward: {page.forward()}")
+                else:
+                    self.push_ctrl(S2C_ERR, bytes([ch, 6]), gen)
+                    return
+
+            png = page.shot()
+            body = to_img(png, browser.SNES_W, browser.SNES_H)
+            print(f"  -> {len(png)} B png, {len(body)} B of tiles")
+            self.push_ctrl(S2C_OPEN, struct.pack("<BHB", ch, 200, 1), gen)
+            for i in range(0, len(body), 512):
+                self.push(ch, body[i:i + 512], gen)
+            self.push_ctrl(S2C_EOF, bytes([ch]), gen)
+        except Exception as e:
+            print(f"  web failed: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            page = self.pages.pop(ch, None)
+            if page is not None:
+                page.close()
+            self.push_ctrl(S2C_ERR, bytes([ch, 4]), gen)
 
     def do_listen(self, ch, port, gen):
         """Bind, then hand ONE connection at a time to the SNES on this channel.
@@ -665,6 +736,12 @@ class Gateway:
             threading.Thread(target=self.do_listen, args=(ch, port, self.gen),
                              daemon=True).start()
 
+        elif self.ctype == C2S_WEB and len(self.cbuf) >= 2:
+            ch, op = self.cbuf[0], self.cbuf[1]
+            arg = bytes(self.cbuf[2:])
+            threading.Thread(target=self.do_web, args=(ch, op, arg, self.gen),
+                             daemon=True).start()
+
         elif self.ctype == C2S_HANGUP and len(self.cbuf) >= 1:
             # End this connection, keep the port. Everything the SNES sent
             # before this record has already been written to the socket —
@@ -690,6 +767,9 @@ class Gateway:
                     sock.close()
                 except OSError:
                     pass
+            page = self.pages.pop(self.cbuf[0], None)
+            if page is not None:
+                page.close()
             srv = self.listeners.pop(self.cbuf[0], None)
             if srv is not None:
                 # Release the port, or the next run of the app cannot bind it.

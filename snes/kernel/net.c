@@ -62,6 +62,7 @@
 #define C2S_CONNECT 0x07 /* [len][ch][host:port...] */
 #define C2S_LISTEN 0x08  /* [3][ch][port lo][port hi] */
 #define C2S_HANGUP 0x09  /* [1][ch] */
+#define C2S_WEB 0x0A     /* [len][ch][op][args...] */
 /* [3][ch][status_lo][status_hi] or [4][...][flags].
  *
  * The flags byte is optional so that a three-byte reply still parses: the
@@ -371,6 +372,59 @@ int net_connect(const char *hostport) { return net_open(hostport, C2S_CONNECT); 
  * data, so a HANGUP queued alongside a half-sent response would overtake it and
  * the client would get a truncated page. Making the caller wait is the only
  * ordering guarantee available without a second queue. */
+/* Drive a browser the gateway holds open.
+ *
+ * The reply is an ordinary image on the channel — the same Mode 3 tiles a
+ * photograph produces — so nothing below this knows a browser is involved. */
+int net_web_open(const char *url) {
+  int ch, n = 0, i;
+  if (!net_up()) return -1;
+  for (ch = 1; ch < NET_CHANNELS; ch++)
+    if (ch_state[ch] == NET_ST_FREE) break;
+  if (ch >= NET_CHANNELS) return -1;
+
+  while (url[n] && n < 200) n++;
+  if (txq_space() < n + 4) return -1;
+
+  txq_put(C2S_WEB);
+  txq_put((uint8_t)(n + 2));
+  txq_put((uint8_t)ch);
+  txq_put(0); /* WEB_OPEN */
+  for (i = 0; i < n; i++) txq_put((uint8_t)url[i]);
+
+  ring_head[ch] = 0;
+  ring_tail[ch] = 0;
+  txring_head[ch] = 0;
+  txring_tail[ch] = 0;
+  ch_flags[ch] = 0;
+  ch_http[ch] = 0;
+  ch_state[ch] = NET_ST_OPENING;
+  return ch;
+}
+
+/* Scroll, click, back, forward. The channel stays open across all of them —
+ * the page is held on the far side, so a click has the same document the
+ * screenshot came from. */
+int net_web_op(int ch, uint8_t op, uint8_t a, uint8_t b) {
+  if (ch <= 0 || ch >= NET_CHANNELS) return -1;
+  if (ch_state[ch] == NET_ST_FREE) return -1;
+  if (txq_space() < 6) return -1;
+
+  txq_put(C2S_WEB);
+  txq_put(4);
+  txq_put((uint8_t)ch);
+  txq_put(op);
+  txq_put(a);
+  txq_put(b);
+
+  /* The far side answers with a fresh window, so the ring starts empty and the
+   * channel goes back to waiting for a status. */
+  ring_head[ch] = 0;
+  ring_tail[ch] = 0;
+  ch_state[ch] = NET_ST_OPENING;
+  return 0;
+}
+
 int net_hangup(int ch) {
   if (ch <= 0 || ch >= NET_CHANNELS) return -1;
   if (!ch_listen[ch]) return -1;

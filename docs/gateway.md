@@ -42,7 +42,8 @@ In SNOS:
 ```
 net status          probe the gateway (HELLO round trip), its address, counters
 net test            fetch a known URL to prove DNS, TLS and the link work
-get render:URL NAME fetch a PICTURE of a web page
+web URL             browse: cursor, click, scroll
+get render:URL NAME fetch a still picture of a page (testing)
 netecho [PORT]      echo server (default 7777)
 httpd [PORT]        serve the volume over HTTP (default 8080)
 get URL -           fetch and print to the console
@@ -254,3 +255,63 @@ did.
 A screenful is ~57 KB of tiles: **94 seconds at 615 B/s, about 3 seconds at
 M7's 20 KB/s.** Rendering itself is 2.5-4 s. This is a demo that wants the
 cable.
+
+## `web` — the browser
+
+```
+web news.ycombinator.com
+
+  arrow keys   move the cursor      space   click
+  W / S        window up / down     ESC     quit
+  A / D        back / forward
+```
+
+Chrome runs on the far side and stays **open** for the session — a click needs
+the same document the screenshot came from, and scrolling needs the page's own
+scroll position. A fresh browser per request could screenshot but never
+interact. `tools/browser.py` drives it over CDP.
+
+The console never sees HTML. It gets Mode 3 tiles, exactly as a photograph would
+produce, and moves a sprite over them. **That is what makes the cursor free** —
+a sprite moves by writing four bytes of OAM, with no repaint, no tile churn and
+no DMA. Moving a cursor by rewriting the bitmap would cost a whole window per
+step.
+
+Clicks are resolved to a link and navigated rather than synthesised as a mouse
+event: a real click can land on an overlay, open a tab, or run script that goes
+nowhere, and none of those have anywhere to go on a SNES. Clicking something
+that is not a link does nothing, which is the honest outcome when the console
+cannot show what it hit.
+
+### Why a hand-written WebSocket
+
+CDP commands are websocket-only — the HTTP endpoints can list targets but
+cannot evaluate or click — and Python has no websocket client in the standard
+library. `gateway.py`'s one virtue as a dependency is needing nothing but
+Pillow, so `browser.py` carries about eighty lines of RFC 6455 client instead.
+Cheaper than a dependency, much cheaper than being unable to click.
+
+### Two things that are not obvious
+
+**`--window-size` is not the CSS viewport.** Headless Chrome asked for 512x384
+returns a 512x241 screenshot. `Emulation.setDeviceMetricsOverride` pins it;
+without that, `to_img` letterboxes a short image into a tall window and the page
+arrives squashed into the middle of the screen.
+
+**The window is 192 lines, not 224.** A full-screen 8bpp image is 57 KB of tiles
+and the sprite tile base can only sit on a 16 KB boundary — every one of which
+lands inside an image that large. Giving up 32 scanlines buys a cursor with no
+overlap and no corrupted block. v2's 4-colour format makes tiles 16 bytes rather
+than 64 and frees over 30 KB, so this is temporary.
+
+### What it costs, and what v2 fixes
+
+Every action is a whole window: ~49 KB, **80 seconds at 615 B/s, about 2.5 at
+M7's 20 KB/s**. There is no partial update because the console has no model of
+the page — it has pixels.
+
+v2 sends unique tiles plus a tilemap and keeps a cache. Measured on a real page:
+a scroll introduces only **~22% new tiles**, because a rendered page is mostly a
+font and the glyphs are already resident. That is 8 KB instead of 49 KB per
+scroll — and at 4 colours and 512 dots wide it is both smaller and sharper than
+what v1 sends.

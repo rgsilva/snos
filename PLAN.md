@@ -267,6 +267,26 @@ page: it parses HTML on the fly and stores only what's on screen, which is exact
 64×28 console with 64 KB of app arena wants.
 **Done when:** fetch and render a real page over the cable.
 
+### M11 — Real TCP/IP: the SNES gets an address
+Today the gateway *is* the network — it holds the sockets and the SNES holds a byte stream, so
+the console has no address and nothing on the LAN can reach it except through something the
+gateway is already doing. This milestone inverts that: **the SNES runs an IP stack and owns an
+address**, and the adapter stops being a proxy and becomes a converter — framing the console's
+packets onto the wire and back, and nothing more.
+
+That changes what the machine *is*. `httpd` stops being "a thing the gateway forwards to" and
+becomes a host on the network. Every application stops needing the gateway to understand its
+protocol, which is the thing that currently makes each new protocol a gateway change.
+
+**TLS is the open problem, and it stays open on purpose.** A handshake on a 3.58 MHz 65816 runs
+to minutes, so the console cannot terminate it and a converter has nothing to terminate it with.
+The intended shape is a **proxy configured on the console** — an explicit tunnel the SNES sends
+its TLS through, rather than a gateway silently doing it — which keeps the honesty of the
+current design (nothing forges a certificate) while moving the decision to the console's own
+configuration. Not designed yet. Deliberately not started.
+
+**Done when:** the SNES answers a ping from another machine on the LAN at its own address.
+
 ### M10 — Preemptive multitasking *(the crazy one)*
 NMI-driven round-robin scheduler. Carve `$0800–$18FF` into 8 × 512 B process slots (§2). Context
 switch = push A/X/Y/P/D/DB, `TSC` save, `TCS` load, pop — **under ~40 cycles**. Background
