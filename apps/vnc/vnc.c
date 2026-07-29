@@ -388,6 +388,13 @@ static void flush_tile(uint16_t t) {
 
 static void flush_dirty(void) {
   uint16_t t;
+  /* Re-assert VMAIN on every flush, not once at startup. Anything that runs
+   * between two flushes — and sys_yield() reaches the console and the keyboard
+   * panel — can leave the VRAM increment mode somewhere else, and the result is
+   * scrambled bitplanes on whichever tiles were written afterwards: scattered
+   * noise on an otherwise black screen. One register write is cheaper than
+   * reasoning about who else might have touched it. */
+  R8(0x2115) = 0x80;
   /* Forced blank: VRAM takes writes only while blanking, and a full screen is
    * far more than one vblank's worth. The screen goes dark for the duration,
    * which on a first update is the honest cost of 48 KB arriving. */
