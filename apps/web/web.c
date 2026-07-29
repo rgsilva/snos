@@ -248,7 +248,9 @@ static int fetch(uint16_t ch) {
     sys_yield();
   }
   if (st != NET_ST_OPEN && st != NET_ST_EOF) {
-    say("\nthe gateway could not render that\n");
+    say("\nthe gateway could not render that (state ");
+    sys_putu((uint16_t)st);
+    say(")\n");
     return 0;
   }
 
@@ -291,7 +293,23 @@ static int fetch(uint16_t ch) {
     say("\nno room on the volume for a page\n");
     return 0;
   }
-  return got > IMG_HDR + IMG_PAL;
+
+  /* Say WHY, always. This used to end with a bare `return got > ...`, so a
+   * gateway that failed after the status had already been sent — an error
+   * arriving mid-transfer, which is exactly what a flaky link produces —
+   * dropped straight out of the application with no message at all. The user
+   * saw `[web exited 0]` under `opening <url>` and had nothing to go on. */
+  if (st == NET_ST_ERROR) {
+    say("\nthe gateway failed part way through\n");
+    return 0;
+  }
+  if (got <= IMG_HDR + IMG_PAL) {
+    say("\nthe page arrived empty (");
+    sys_putu((uint16_t)got);
+    say(" bytes)\n");
+    return 0;
+  }
+  return 1;
 }
 
 /* ---------------------------------------------------------------- the loop */

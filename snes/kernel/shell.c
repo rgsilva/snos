@@ -479,7 +479,7 @@ static void cmd_fstest(void) {
  * line that is right only when nothing is wrong is worse than none, because it
  * is consulted precisely when something is. */
 static void cmd_net_status(void) {
-  uint16_t before, deadline, waited;
+  uint16_t before, deadline, waited, rx0;
 
   if (!net_up()) {
     kcon_puts("no link (the bridge script is not running)\n");
@@ -488,18 +488,34 @@ static void cmd_net_status(void) {
   }
 
   before = net_stat_hello;
+  rx0 = net_stat_rx_frames;
   if (net_hello() < 0) {
     kcon_puts("link up, but the send queue is full\n");
     return;
   }
 
-  /* One second. A healthy round trip is a couple of frames — the daemon answers
-   * HELLO from the frame thread, so even a fetch in progress cannot delay it. */
-  deadline = (uint16_t)(snos_frames + 60u);
+  /* Three seconds, not one.
+   *
+   * A HELLO answers in about 7 frames on an idle link. After a 49 KB transfer
+   * — a page in `web` — it was measured at 21 to 30, with the resend counter up
+   * from 3 to 80: the reply queues behind whatever the link is still carrying.
+   * One second was close enough to that to report "the gateway is NOT
+   * answering" about a gateway that was working perfectly, which is a lie told
+   * by the one command whose entire job is to be trusted about this. */
+  deadline = (uint16_t)(snos_frames + 180u);
   while (net_stat_hello == before) {
     if ((int16_t)(snos_frames - deadline) >= 0) {
-      kcon_puts("link up, but the gateway is NOT answering\n");
-      kcon_puts("(the bridge is running; start tools/gateway.py)\n");
+      /* Say what the link did while we waited. Frames arriving means the far
+       * end is alive and merely slow or busy; none at all means nothing is
+       * coming back, and those want different things done about them. */
+      uint16_t moved = (uint16_t)(net_stat_rx_frames - rx0);
+      kcon_puts("no answer in 3s. ");
+      kcon_putu(moved);
+      kcon_puts(" frames in, ");
+      kcon_putu(net_stat_resent);
+      kcon_puts(" resends\n");
+      kcon_puts(moved ? "(the link is alive - the gateway is busy or wedged)\n"
+                      : "(nothing is coming back - is tools/gateway.py running?)\n");
       return;
     }
     kbd_idle();
