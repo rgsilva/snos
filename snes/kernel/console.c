@@ -214,12 +214,34 @@ void con_puts(const char *s) { while (*s) con_putc(*s++); }
  * eight channels, and while the keyboard split is up it holds 3, 4 and 5 — and
  * reprogramming those for a DMA would overwrite the HDMA table pointer, since
  * $43x2-4 is shared. So: four rows normally, two while the split is active. */
-#define FLUSH_MAX 4
+/* Rows per flush.
+ *
+ * This used to be 4, and 2 while the keyboard split was up, because the code
+ * handed every row its own DMA channel and there were only so many to go round.
+ * That was never the real limit: dma_vram writes $420B and the CPU stalls until
+ * that single transfer finishes, so the channel index buys nothing and the
+ * transfers were always sequential. One channel can do all of them.
+ *
+ * The real limit is how much of vblank there is. NTSC gives roughly 38 blank
+ * scanlines, about 51,800 master cycles, and DMA moves a byte every 8 — call it
+ * 6.4 KB. A row is 128 bytes across both layers, so the ceiling is around 40
+ * rows and the whole 28-row screen would fit.
+ *
+ * 8 rather than 28 because the budget is shared: NMI fires at the top of the
+ * same window and the link poll is not cheap, and a flush that overruns has its
+ * DMA land during active display where VRAM writes are ignored. That failure is
+ * invisible — the screen simply stops updating. 8 is a quarter of the estimated
+ * ceiling, which leaves room for NMI to be wrong about its own cost. */
+#define FLUSH_MAX CON_FLUSH_ROWS
 static uint16_t rowbuf[FLUSH_MAX][32];
 static uint16_t rowbuf1[FLUSH_MAX][32];
 
-static const uint8_t chan_free[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-static const uint8_t chan_split[4] = {0, 1, 2, 6}; /* 3,4,5 belong to HDMA */
+/* One channel for every transfer. Channels 3, 4 and 5 belong to the keyboard
+ * split's HDMA, and channel 0 never does — and since each transfer runs to
+ * completion before the next begins, one is all this needs. The old pair of
+ * tables existed to ration a resource that was not actually scarce, and rationed
+ * the keyboard split down to two rows a frame for no reason. */
+#define DMA_CH 0
 
 static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nwords) {
     uint16_t base = (uint16_t)(0x4300 + ch * 0x10);
@@ -242,12 +264,13 @@ static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nword
 void con_flush(void) {
     uint8_t rows[FLUSH_MAX];
     if (gfx_owned) return;
-    const uint8_t *chan;
     int budget, n = 0, i, cell;
     uint8_t r;
 
-    if (split_on) { chan = chan_split; budget = 2; }
-    else          { chan = chan_free;  budget = FLUSH_MAX; }
+    /* The split no longer costs rows. It used to halve them because HDMA had
+     * taken three of the eight channels; with a single channel doing every
+     * transfer, HDMA's channels are irrelevant. */
+    budget = FLUSH_MAX;
 
     /* A scroll changes what the hardware displays IMMEDIATELY, but the row
      * being revealed at the bottom still holds whatever was in that tilemap row
@@ -280,8 +303,8 @@ void con_flush(void) {
     while (!(R8(0x4212) & 0x80)) ;                    /* into vblank */
     if (vofs_dirty) { set_vofs(); vofs_dirty = 0; }
     for (i = 0; i < n; i++) {
-        dma_vram(chan[i * 2],     (uint16_t)(BG2_MAP + rows[i] * 32), rowbuf[i], 32);
-        dma_vram(chan[i * 2 + 1], (uint16_t)(BG1_MAP + rows[i] * 32), rowbuf1[i], 32);
+        dma_vram(DMA_CH, (uint16_t)(BG2_MAP + rows[i] * 32), rowbuf[i], 32);
+        dma_vram(DMA_CH, (uint16_t)(BG1_MAP + rows[i] * 32), rowbuf1[i], 32);
         dirty[rows[i]] = 0;
     }
 }

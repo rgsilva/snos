@@ -309,6 +309,12 @@ static int pager_more(void) {
   kcon_putc('\r');
   kcon_puts("                    ");
   kcon_putc('\r');
+  /* Erasing is carriage returns and spaces — no newline — so nothing about it
+   * makes the console decide to paint. It used to ride out on the next line of
+   * the file, which is invisible until the page you quit on: then there is no
+   * next line and the prompt stays on screen. Say so explicitly rather than
+   * relying on somebody else's output to carry it. */
+  kcon_sync();
   return (c == 'q' || c == 'Q' || c == 0x1B) ? 0 : 1;
 }
 

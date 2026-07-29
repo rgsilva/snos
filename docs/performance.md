@@ -17,24 +17,40 @@ Two figures fall out of that, and they are the ones worth designing against:
   That is ~34 lines/second, and it dominates everything textual.
 - **SRAM moves ~30 KB/s** (40 000 byte operations in 79 frames of work).
 
-## 1. Console output — the big one
+## 1. Console output — done, and the 3.5x estimate was optimistic
 
-`kcon_putc` calls `con_flush` on every newline, and `con_flush` waits for a
-*fresh* vblank edge. So every line costs at least one frame, and 1.75 in
-practice. Meanwhile `con_flush` is capable of **four rows per vblank** — so
-flushing per newline wastes three quarters of its capacity.
+Batching landed. Measured A/B on the same binary:
 
-**Batch it.** Flush when four rows are dirty, and unconditionally before
-blocking for input. Output would then appear in bursts of four lines, and the
-user would never see a stale screen, because they only ever look at it when the
-program pauses for input or the screen fills.
+| | before | after |
+|---|---|---|
+| `help` (13 lines) | 30 frames | **21** |
+| `cat NET.TXT` | 57 frames | **47** |
 
-Estimated: 175 frames → ~50 for the same 100 lines. **Roughly 3.5×**, on every
-text operation in the system — `help`, `cat`, BASIC, the download dots, and the
-browser when it exists.
+**1.2-1.4x, not 3.5x.** The estimate assumed the display was the only cost. For
+`cat` it no longer is — SRAM reads at ~30 KB/s now dominate, so making the
+screen faster stopped helping.
 
-Lowest risk on this list: `con_flush` already handles multiple rows; only the
-decision of *when* to call it changes.
+Two things were wrong in the old note. `con_flush` moves **eight** rows, not
+four — and the four was never a hardware limit at all: `dma_vram` writes $420B
+and the CPU stalls until that one transfer finishes, so the transfers were
+always sequential and the per-row DMA channel bought nothing. The channel tables
+rationed a resource that was not scarce, and rationed the keyboard split down to
+*two* rows a flush for no reason. One channel does all of them now.
+
+Raising the budget alone changed nothing measurable, which is the useful part:
+nothing accumulated. `kcon_putc` flushed on EVERY newline, so exactly one row
+was ever dirty when the flush ran — a flush capable of eight moved one and paid
+a whole vblank for it. The budget only started to matter once flushing waited
+for a batch.
+
+**What is left here is the cadence, not the batch size.** Flushes land about
+four frames apart: `kbd_idle` waits a frame, then `con_flush` deliberately waits
+for the *next* vblank rather than using the one it is standing in. That wait is
+a guard, not an oversight — NMI fires at the top of the same window and a DMA
+that overruns lands during active display where VRAM writes are ignored, which
+presents as a frozen screen and no other symptom. Removing it means making the
+flush know how much vblank remains. That is the next real win and the riskiest
+change in the console.
 
 ## 2. SRAM block I/O
 

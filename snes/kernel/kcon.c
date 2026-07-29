@@ -21,14 +21,26 @@
 
 void kcon_init(void) { con_init(); }
 
+/* Completed lines not yet pushed to VRAM.
+ *
+ * This used to flush on EVERY newline, which is why the row budget never
+ * mattered: one row was dirty when the flush ran, so a flush capable of moving
+ * eight moved one and paid a whole vblank to do it. Measured, `help` painted
+ * one line every two frames — thirty frames for fifteen lines.
+ *
+ * Waiting for a full batch keeps the reason the original flushed at all: a
+ * running application still shows its output, just in groups of eight lines
+ * instead of one. Anything that stops to wait for input drains completely,
+ * because kbd_idle flushes every frame while it waits. */
+static uint8_t pending_rows;
+
 void kcon_putc(int c) {
   con_putc(c);
   mb_putc((char)c);
-  /* Push completed lines to the screen as they happen. Without this, output
-   * only reaches VRAM when something calls con_flush — which the shell does
-   * while waiting for input, but a running application does not. A BASIC
-   * program printing in a loop would otherwise show nothing until it stopped. */
-  if (c == '\n') con_flush();
+  if (c == '\n' && ++pending_rows >= CON_FLUSH_ROWS) {
+    pending_rows = 0;
+    con_flush();
+  }
 }
 
 void kcon_puts(const char *s) {
@@ -85,6 +97,9 @@ void kcon_puthex16(uint16_t v) {
  * but matters for tests, which must not assert before the screen settles. */
 void kcon_sync(void) {
   int guard;
+  /* Everything queued is going out now, so the batch counter starts again —
+   * otherwise the next line printed could trip a flush that has nothing to do. */
+  pending_rows = 0;
   for (guard = 0; guard < 64; guard++) {
     con_flush();
   }

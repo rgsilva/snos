@@ -15,7 +15,11 @@
 void con_init(void);
 void con_putc(int c);
 void con_puts(const char *s);
-void con_flush(void); /* copy one dirty row to VRAM during vblank */
+/* How many rows one con_flush can move. Callers that decide WHEN to flush
+ * need this: flushing more often than every CON_FLUSH_ROWS dirty rows pays a
+ * whole vblank to move less than a flush is capable of. */
+#define CON_FLUSH_ROWS 8
+void con_flush(void); /* copy up to CON_FLUSH_ROWS dirty rows during vblank */
 
 /* SNOS additions: random access, for the on-screen keyboard panel and the
  * shell cursor. Row/column are SCREEN coordinates; the scroll ring is resolved
