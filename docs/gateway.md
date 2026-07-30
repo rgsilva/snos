@@ -325,7 +325,7 @@ pointer events. Nothing on the far side knows it is talking to a SNES.
 vnc HOST[:PORT]        default port 5900
 
   arrow keys   move the cursor     space   click
-  ESC          quit
+  W A S D      pan the window      ESC     quit
 ```
 
 ### Running it locally, start to finish
@@ -340,13 +340,16 @@ docker build -t snos-vnc .
 **2. Start it.** Either a browser or an xterm, on port 5900:
 
 ```sh
-# a real browser at exactly the console's resolution
+# a real browser on a 512x384 desktop, twice the console in each direction
 docker run -d --rm --name snosvnc -p 5900:5900 \
   -e SNOS_APP=chromium -e SNOS_URL=https://news.ycombinator.com snos-vnc
 
 # or a plain X session with an xterm (lighter, starts instantly)
 docker run -d --rm --name snosvnc -p 5900:5900 snos-vnc
 ```
+
+The desktop size is one line — `GEOM` at the top of `tools/vncbox/start.sh` — and
+it is meant to be tuned by feel. It must stay a multiple of 8 in both axes.
 
 Give chromium ~10 seconds to paint before connecting.
 
@@ -371,8 +374,8 @@ that name only means anything *inside* a container.
 
 ### What to expect
 
-The first screen is a full 48 KB framebuffer: **about 80 seconds at the
-emulator's 615 B/s**, and roughly 2.5 at M7's cable speed. It **paints
+The first screen is a full 48 KB framebuffer, and **measured end to end against
+TigerVNC + Chromium through the real gateway, at 60 Hz: 30 seconds.** It **paints
 progressively**, one server rectangle at a time, so you watch it arrive.
 
 After that, updates are incremental — a still screen sends **nothing at all**,
@@ -384,6 +387,34 @@ write happens (see below), so it has to stay black.
 
 Arrow keys move the cursor and space clicks, from **either** a host keyboard
 through the bridge or a controller d-pad. Typing does not work yet.
+
+### Panning: the console is a window, not the desktop
+
+At 256 CSS pixels Chromium wraps a page into a column too narrow to read, so the
+desktop is 512x384 and the console shows a 256x192 **window** into it. WASD moves
+the window by 32 pixels. Nothing is scaled — a server pixel is still a console
+pixel, and the glyphs are the size they always were.
+
+**A pan does not re-download the screen.** The client keeps its 48 KB shadow as a
+torus — server pixel `(x, y)` always lives at shadow byte `(x mod 256, y mod 192)`
+— so 32 pixels is four whole tiles and the part of the screen you keep needs no
+pixel moved and no tile rebuilt. Only the tilemap is rotated, and only the strip
+you have never seen is fetched, with a non-incremental request for exactly that
+rectangle. Measured at 60 Hz, on the same link as the 30-second first screen:
+
+| step | fetched | tiles rebuilt | measured |
+|---|---|---|---|
+| left / right | 32x192 = 6 KB | 96 | **4.0 s** |
+| up / down | 256x32 = 8 KB | 128 | **5.1 s** |
+
+against **30 s** for the naive "ask for the whole window again". About half of
+what is left is now the bitplane transpose rather than the wire, which is the
+first thing to hand-write in 65816 when this needs to get faster again.
+
+Clicks go out in **server** coordinates — pan origin plus cursor — so space keeps
+hitting what is under the arrow after you have panned. `PAN_STEP` in
+`apps/vnc/vnc.c` is the step size and must stay a multiple of 8; anything else
+cannot be expressed in a tilemap and would cost a full 768-tile rebuild per pan.
 
 ### Sanity checks if it does not work
 

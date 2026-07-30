@@ -1,11 +1,12 @@
-# A VNC server sized for a Super Nintendo.
+# A VNC server sized for a Super Nintendo to look INTO.
 #
-# 256x192, which is the console's Mode 3 screen minus the 32 scanlines the
-# cursor sprite costs: a full-height 8bpp image leaves no 16 KB-aligned home for
-# the sprite tile base. Nothing scales and nothing scrolls — the SNES sees the
-# whole desktop, one server pixel per console pixel. Xvnc rather than Xvfb + x11vnc
-# because it is the X server and the VNC server in one process, with no display
-# plumbing in between.
+# The console's Mode 3 picture is 256x192 — its screen minus the 32 scanlines
+# the cursor sprite costs, because a full-height 8bpp image leaves no
+# 16 KB-aligned home for the sprite tile base. The desktop here is deliberately
+# larger than that (see start.sh) and the client pans a 256x192 window over it
+# with WASD, one server pixel per console pixel and nothing scaled. Xvnc rather
+# than Xvfb + x11vnc because it is the X server and the VNC server in one
+# process, with no display plumbing in between.
 #
 # -SecurityTypes None is the unauthenticated path: a two-byte handshake on the
 # console's side, which is all a 65816 should be asked to do. This container is

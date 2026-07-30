@@ -3,6 +3,7 @@
  *     vnc HOST[:PORT]        default port 5900
  *
  *     arrow keys   move the cursor
+ *     W A S D      pan the window over a larger desktop
  *     space        click
  *     ESC          quit
  *
@@ -32,6 +33,13 @@
  * 3. CopyRect says "this rectangle is already on screen somewhere else", which
  *    makes scrolling nearly free.
  *
+ * ...and a fourth, which is the whole of the panning below:
+ *
+ * 4. FramebufferUpdateRequest CARRIES A RECTANGLE. "Send me this part of your
+ *    desktop" is already the protocol's own idea, so a console that shows a
+ *    window into something bigger than itself needs no extension, no server
+ *    cooperation and no new message. It just asks for the part it is looking at.
+ *
  * ----------------------------------------------------------- the honest cost
  *
  * The SNES stores 8bpp as EIGHT BITPLANES, and RFB delivers linear bytes, so
@@ -39,10 +47,16 @@
  * figure that used to be here — "roughly a screen per two seconds" — was an
  * estimate and was wrong by an order of magnitude. MEASURED: rebuilding all 768
  * tiles takes about 1015 frames, so seventeen seconds a screen, or 1.3 frames a
- * tile at -O0. The link needs eighty seconds for that screen, so the wire is
- * still the bottleneck — by about five times, not a hundred. At M7's 20 KB/s the
- * transpose becomes the bottleneck outright, and it is the thing to hand-write
- * in 65816 when that day comes.
+ * tile at -O0.
+ *
+ * THE WIRE IS NO LONGER THE BOTTLENECK, and that is a change since this was
+ * written. It used to need eighty seconds for that screen at 615 B/s; the link
+ * work between then and now took it to about 3.5 KB/s, and a first screen
+ * measured end to end against TigerVNC through the real gateway, paced to 60 Hz,
+ * is THIRTY seconds — roughly seventeen of transpose and fourteen of wire. So
+ * the transpose is now the larger half, and hand-writing it in 65816 is the next
+ * lever rather than a someday one. Panning feels this directly: half of a pan
+ * step is spent transposing 96 tiles.
  *
  * What it also costs is memory. Server rectangles are NOT tile-aligned — a real
  * server sent `123x21 at (133,104)` — so a rectangle lands across partial
@@ -50,6 +64,57 @@
  * linear shadow of the framebuffer, writes rectangles into that, and rebuilds
  * whole tiles from it. 256x192 is 48 KB, which is why this lives in the app
  * arena in bank $7F rather than anywhere near bank $00's eight.
+ *
+ * ------------------------------------------------------------------ panning
+ *
+ * A 256-pixel-wide X server makes Chromium lay a page out at 256 CSS pixels,
+ * and the text wraps into a column too narrow to read. The server is therefore
+ * 512x384 (tools/vncbox/start.sh) and the console shows a 256x192 WINDOW into
+ * it, moved with WASD. Same glyphs at the same size, four times the page in
+ * reach. Downscaling a wider render instead was tried on paper and rejected:
+ * 4-pixel glyphs are a grey smear.
+ *
+ * THE SHADOW STAYS VIEWPORT-SIZED. It has to: 48 KB already fills most of bank
+ * $7F, and 512x384 would be 196 KB against a 64 KB VRAM with 48 KB of it in
+ * tile data. So panning is not "scroll a bigger picture", it is "ask the server
+ * for the rectangle you are now looking at" — which is one field of a message
+ * RFB already has.
+ *
+ * The part that decides whether it feels usable is what panning does NOT do.
+ * The naive version re-requests the whole 48 KB window: fourteen seconds at the
+ * measured ~3.5 KB/s, which reads as broken. Instead:
+ *
+ *   THE SHADOW IS A TORUS. Server pixel (sx, sy) always lives at shadow byte
+ *   (sx mod 256, sy mod 192), whatever the pan origin is. Move the window by
+ *   32 pixels and the 224 columns you keep DO NOT MOVE — they are already at
+ *   the right shadow address, so not one pixel is copied and not one tile is
+ *   rebuilt. The 32 columns that scrolled off occupy exactly the shadow bytes
+ *   the 32 newly exposed columns need, so the slots recycle themselves.
+ *
+ *   THE TILEMAP TURNS THE TORUS BACK INTO A PICTURE. Tile indices are
+ *   arbitrary, so map cell (r, c) is pointed at tile ((py/8 + r) mod 24,
+ *   (px/8 + c) mod 32) instead of at (r, c). That is 768 tilemap entries —
+ *   1.5 KB, three DMAs, four frames — against 48 KB of tile data.
+ *
+ * PAN_STEP MUST STAY A MULTIPLE OF 8 or all of that evaporates: a pan that is
+ * not a whole number of tiles cannot be expressed in the tilemap at all, and
+ * every tile on screen would have to be rebuilt.
+ *
+ * What is left to pay for is the strip you have never seen: 32x192 is 6 KB, one
+ * non-incremental FramebufferUpdateRequest, and 96 tiles to transpose. The
+ * steady state stays incremental, so a still screen still sends nothing.
+ *
+ * Two coordinate rules fall out of this, and both are the kind that look
+ * correct until you pan:
+ *
+ *   - INCOMING RECTANGLES ARE IN SERVER COORDINATES. They have to be translated
+ *     by the pan origin and clipped to the window before they touch the shadow.
+ *     While the server was exactly console-sized those were the same numbers,
+ *     so the old code could — and did — treat one as the other.
+ *
+ *   - POINTER EVENTS GO OUT IN SERVER COORDINATES: pan origin plus cursor. Get
+ *     that wrong and space clicks the right link until the first pan and the
+ *     wrong one after it, which reads as a regression rather than an omission.
  *
  * ------------------------------------------------- when it is allowed to draw
  *
@@ -71,6 +136,15 @@
 #define TILES_W (FB_W / 8)
 #define TILES_H (FB_H / 8)
 #define NTILES (TILES_W * TILES_H)
+
+/* How far one WASD press moves the window, in server pixels.
+ *
+ * MUST BE A MULTIPLE OF 8, and 32 is deliberately four whole tiles. See
+ * "panning" above: the retained part of the screen is moved by rewriting the
+ * tilemap, and a tilemap can only express a whole-tile shift. A step of, say,
+ * 20 would silently fall back to rebuilding all 768 tiles — seventeen seconds —
+ * with nothing but the feel of it to tell you. */
+#define PAN_STEP 32
 
 /* VRAM, laid out so nothing overlaps — the same arithmetic `web` uses:
  *   $0000-$BFFF  768 image tiles, 8bpp
@@ -106,19 +180,42 @@
  * about 1.3 frames per tile, so the display need only move ONE tile a frame to
  * stay ahead of the thing feeding it. Eight small transfers are also cheaper to
  * abandon halfway than one big coalesced one, which is what the first attempt
- * tried and what never fitted. */
+ * tried and what never fitted.
+ *
+ * It is also, not by accident, 8 x 32 words = exactly eight tilemap ROWS, which
+ * is what write_tilemap() stages a band of the map in. */
 #define BATCH 8
 
 static char args[SNOS_ARGV_MAX];
-static uint8_t fb[FB_SIZE];       /* linear shadow, bank $7F */
+static uint8_t fb[FB_SIZE];       /* linear shadow, bank $7F — a torus, see above */
 static uint8_t dirty[NTILES];
 static uint16_t stage[BATCH][32]; /* tiles as PPU words, built before a window */
 static uint16_t stage_t[BATCH];   /* which tile each staged entry is */
 static uint8_t hdr[32];
+static uint8_t junk[64];          /* somewhere to drop bytes we are clipping away */
+static uint8_t crow[FB_W];        /* one row, for CopyRect across the torus seam */
 static uint16_t ch;
 static uint16_t cx, cy;
 static uint16_t srv_w, srv_h;
 static int quit;
+
+/* The pan origin: which server pixel the top-left of the console shows.
+ *
+ * px/py are absolute server coordinates and always multiples of 8. pxm/pym are
+ * the same thing reduced modulo the shadow, which is what the torus arithmetic
+ * actually uses — kept alongside rather than recomputed, because it is needed
+ * per rectangle row and the 65816 has no divide either. */
+static uint16_t px, py, pxm, pym;
+static uint16_t maxpx, maxpy;
+static int16_t pend_dx, pend_dy;  /* pan asked for but not yet safe to apply */
+static int parsing;               /* 1 while a server message is half-read */
+static int ready;                 /* 1 once the app owns the PPU and has set it up */
+
+/* One pending non-incremental request, as a bounding box in SERVER coordinates.
+ * Panning puts the newly exposed strip here; a CopyRect whose source has fallen
+ * outside the window puts the part it could not satisfy here. */
+static uint16_t rqx, rqy, rqw, rqh;
+static int rq_pending;
 
 static void say(const char *s) { sys_puts(s); }
 
@@ -243,6 +340,22 @@ static int rd(uint8_t *dst, uint16_t n) {
   return 1;
 }
 
+/* Consume and throw away n bytes.
+ *
+ * A server wider than the console sends rectangles that hang off the side of
+ * the window, and every byte of one still has to come off the wire in order or
+ * the stream desynchronises. The old code returned failure — that is, hung up —
+ * on a rectangle it could not place, which was invisible only because the
+ * server was exactly console-sized and no such rectangle existed. */
+static int skipn(uint16_t n) {
+  while (n) {
+    uint16_t k = (n > (uint16_t)sizeof junk) ? (uint16_t)sizeof junk : n;
+    if (!rd(junk, k)) return 0;
+    n = (uint16_t)(n - k);
+  }
+  return 1;
+}
+
 static int wr(const uint8_t *src, uint16_t n) {
   uint16_t sent = 0;
   while (sent < n) {
@@ -306,6 +419,8 @@ static int handshake(void) {
   if (!wr(hdr, 1)) return 0;              /* ClientInit: share the desktop */
 
   if (!rd(hdr, 24)) return 0;             /* ServerInit: size + pixel format */
+  /* KEEP THE REAL SIZE. It is not the console's size any more, and everything
+   * about panning is arithmetic between the two. */
   srv_w = be16(hdr);
   srv_h = be16(hdr + 2);
   {
@@ -353,17 +468,80 @@ static int handshake(void) {
   return 1;
 }
 
-static int request(int incremental) {
+/* ------------------------------------------------------------- what to ask for
+ *
+ * A FramebufferUpdateRequest names a rectangle, so the window IS the request.
+ * Two kinds go out:
+ *
+ *   incremental, over the whole window — the steady state; a still screen
+ *   answers it with nothing at all, which is the property the whole design
+ *   leans on.
+ *
+ *   non-incremental, over one bounding box — "I have never seen this, send it
+ *   whatever you think I know". That is how a pan pays for only the strip it
+ *   exposed, and how a CopyRect whose source scrolled out of the window repairs
+ *   the part it could not copy. */
+static int req(uint16_t x, uint16_t y, uint16_t w, uint16_t h, int incremental) {
   uint8_t m[10];
   m[0] = 3;
   m[1] = (uint8_t)(incremental ? 1 : 0);
-  put16(m + 2, 0);
-  put16(m + 4, 0);
-  put16(m + 6, FB_W);
-  put16(m + 8, FB_H);
+  put16(m + 2, x);
+  put16(m + 4, y);
+  put16(m + 6, w);
+  put16(m + 8, h);
   return wr(m, 10);
 }
 
+/* Merge a rectangle into the pending non-incremental request.
+ *
+ * A bounding box rather than a region list. In every case that actually occurs
+ * — a pan strip, or the one band a scroll could not copy — there is a single
+ * rectangle and the box is exact; the pathological case costs bandwidth, not
+ * correctness, and a region library on a 65816 would cost more than it saved. */
+static void need_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+  uint16_t x1, y1;
+  if (w == 0 || h == 0) return;
+  if (!rq_pending) {
+    rqx = x; rqy = y; rqw = w; rqh = h;
+    rq_pending = 1;
+    return;
+  }
+  x1 = (uint16_t)(rqx + rqw);
+  y1 = (uint16_t)(rqy + rqh);
+  if ((uint16_t)(x + w) > x1) x1 = (uint16_t)(x + w);
+  if ((uint16_t)(y + h) > y1) y1 = (uint16_t)(y + h);
+  if (x < rqx) rqx = x;
+  if (y < rqy) rqy = y;
+  rqw = (uint16_t)(x1 - rqx);
+  rqh = (uint16_t)(y1 - rqy);
+}
+
+/* Ask for the pending rectangle if there is one, otherwise for whatever has
+ * changed in the window.
+ *
+ * ALWAYS SEND SOMETHING. An earlier version tracked whether poll_input() had
+ * already sent a request this pass and skipped the loop's own, on the grounds
+ * that two outstanding requests were untidy. That is not how a server accounts
+ * for them: TigerVNC keeps a `requested` REGION, unions every request into it,
+ * and CLEARS IT ENTIRELY when it sends an update. So the pan's strip request
+ * consumed the window request that was outstanding behind it, and after the
+ * last pan the client had nothing outstanding at all — at which point the
+ * server has no reason to ever speak again.
+ *
+ * The symptom was a screen that panned perfectly and then stopped tracking the
+ * page: end to end, a click navigated the browser (the web server logged the
+ * hit) and the console went on showing the old page, repainting only the strips
+ * that later pans fetched non-incrementally. An extra request costs ten bytes;
+ * a missing one costs the session. */
+static int send_request(void) {
+  if (rq_pending) {
+    rq_pending = 0;
+    return req(rqx, rqy, rqw, rqh, 0);
+  }
+  return req(px, py, FB_W, FB_H, 1);
+}
+
+/* SERVER coordinates, not console ones: pan origin plus cursor. */
 static int pointer(uint16_t x, uint16_t y, uint8_t mask) {
   uint8_t m[6];
   m[0] = 5;
@@ -462,6 +640,57 @@ static void hide_sprites(void) {
   }
 }
 
+/* ------------------------------------------------------------- the tilemap
+ *
+ * Which tile map cell (r, c) shows. WITHOUT panning this was the identity —
+ * cell (r, c) shows tile r*32+c — and that identity is exactly what let the
+ * rest of the app treat a shadow offset and a screen position as the same
+ * thing. They are not the same thing any more.
+ *
+ * The shadow holds server pixel (sx, sy) at (sx mod 256, sy mod 192) for ever,
+ * so the tile holding the top-left of the window is whichever tile the pan
+ * origin lands in, and the row and column both wrap. Rows past the picture keep
+ * pointing at the all-zero tile, which is what keeps scanlines 192-223 black
+ * and therefore what keeps the write window usable. */
+static uint16_t map_entry(uint16_t r, uint16_t c) {
+  uint16_t ty, tx;
+  if (r >= TILES_H) return TILE_BLANK;
+  ty = (uint16_t)((pym >> 3) + r);
+  while (ty >= TILES_H) ty = (uint16_t)(ty - TILES_H);
+  tx = (uint16_t)((pxm >> 3) + c);
+  while (tx >= TILES_W) tx = (uint16_t)(tx - TILES_W);
+  return (uint16_t)((ty << 5) + tx);
+}
+
+/* Rewrite the picture rows of the tilemap for the current pan origin.
+ *
+ * THIS IS THE WHOLE OF A PAN, as far as everything already on screen is
+ * concerned. 1.5 KB of tilemap instead of 48 KB of tile data, and not one pixel
+ * of the shadow moves.
+ *
+ * The staging buffer is BATCH x 32 words, which is eight tilemap rows exactly,
+ * and tilemap rows are contiguous in VRAM — so a band is one 512-byte DMA and
+ * the whole map is three of them. Building a band costs about half a frame
+ * outside the window; the DMA costs about a scanline and a half inside it. */
+static void write_tilemap(void) {
+  uint16_t r0, r, c;
+  uint16_t *out;
+  for (r0 = 0; r0 < TILES_H; r0 = (uint16_t)(r0 + BATCH)) {
+    out = &stage[0][0];
+    for (r = 0; r < BATCH; r++)
+      for (c = 0; c < 32; c++) *out++ = map_entry((uint16_t)(r0 + r), c);
+    /* Re-assert VMAIN inside the same guard flush_batch uses, and for the same
+     * reason: anything that ran in between may have left the increment mode
+     * somewhere else, and a tilemap written with the address advancing after
+     * the LOW byte is a screen of scattered garbage. */
+    R8(0x2115) = 0x80;
+    win_open();
+    dma_tiles((uint16_t)(((VRAM_MAP >> 1) + (r0 << 5))), &stage[0][0],
+              (uint16_t)(BATCH * 32u));
+    win_close();
+  }
+}
+
 static void setup_ppu(void) {
   uint16_t r, c;
 
@@ -478,12 +707,13 @@ static void setup_ppu(void) {
     R8(0x2119) = 0;
   }
 
-  /* Identity tilemap: tile (r,c) shows tile number r*32+c, so the tile grid is
-   * the pixel grid and a shadow offset converts to a tile index by shifting. */
+  /* The whole map, written directly: the display is still under the forced
+   * blank main() asserted, so there is no window to wait for. At pan (0,0)
+   * map_entry() is the identity this used to spell out inline. */
   vaddr(VRAM_MAP >> 1);
   for (r = 0; r < 32; r++) {
     for (c = 0; c < 32; c++) {
-      uint16_t t = (r < TILES_H) ? (uint16_t)(r * TILES_W + c) : TILE_BLANK;
+      uint16_t t = map_entry(r, c);
       R8(0x2118) = (uint8_t)t;
       R8(0x2119) = (uint8_t)(t >> 8);
     }
@@ -517,6 +747,9 @@ static void setup_ppu(void) {
  * This is the transpose: the shadow is linear bytes, the PPU wants eight
  * bitplanes, and a tile is 8 rows of 8 pixels producing 32 words in the order
  * (planes 0&1) x8, (planes 2&3) x8, (4&5) x8, (6&7) x8.
+ *
+ * `t` is a SHADOW tile, not a screen position — the tilemap is what decides
+ * where it appears — so this is untouched by panning.
  *
  * It runs OUTSIDE any window, which is why the result goes to WRAM rather than
  * straight to $2118: measured, the transpose plus 64 register writes cost about
@@ -629,27 +862,142 @@ static void clear_tiles(void) {
     dma_tiles((uint16_t)(t * 32u), stage[0], (uint16_t)(BATCH * 32u));
 }
 
-static void mark(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
-  uint16_t tx0 = (uint16_t)(x / 8), ty0 = (uint16_t)(y / 8);
-  uint16_t tx1 = (uint16_t)((x + w + 7) / 8), ty1 = (uint16_t)((y + h + 7) / 8);
-  uint16_t r, c;
-  if (tx1 > TILES_W) tx1 = TILES_W;
-  if (ty1 > TILES_H) ty1 = TILES_H;
-  for (r = ty0; r < ty1; r++)
-    for (c = tx0; c < tx1; c++) dirty[r * TILES_W + c] = 1;
+/* ------------------------------------------------------------ the torus
+ *
+ * Console position -> shadow address, for a window whose origin is (px, py).
+ * Both wrap, because the shadow holds server pixel (sx, sy) at
+ * (sx mod 256, sy mod 192) regardless of where the window is. That is the
+ * property that makes a pan free for everything already on screen.
+ *
+ * shrow() returns a byte offset, not a row number, because FB_W is 256 and the
+ * multiply is therefore a shift — and the 65816 has no multiply instruction, so
+ * "* FB_W" per row would otherwise be a call. */
+static uint16_t shrow(uint16_t vy) {
+  uint16_t s = (uint16_t)(vy + pym);
+  if (s >= FB_H) s = (uint16_t)(s - FB_H);
+  return (uint16_t)(s << 8);
 }
 
-/* Cursor and quit, serviced while a transfer is in flight.
+static uint16_t shcol(uint16_t vx) {
+  uint16_t s = (uint16_t)(vx + pxm);
+  if (s >= FB_W) s = (uint16_t)(s - FB_W);
+  return s;
+}
+
+/* Mark the shadow tiles a console-space rectangle covers. Wraps with the
+ * shadow, which is why this cannot just clamp the way it used to. */
+static void mark(uint16_t vx, uint16_t vy, uint16_t w, uint16_t h) {
+  uint16_t c0 = (uint16_t)(vx >> 3), r0 = (uint16_t)(vy >> 3);
+  uint16_t nc = (uint16_t)(((vx + w + 7u) >> 3) - c0);
+  uint16_t nr = (uint16_t)(((vy + h + 7u) >> 3) - r0);
+  uint16_t co = (uint16_t)(c0 + (pxm >> 3)), ro = (uint16_t)(r0 + (pym >> 3));
+  uint16_t r, c;
+  for (r = 0; r < nr; r++) {
+    uint16_t ty = (uint16_t)(ro + r), base;
+    while (ty >= TILES_H) ty = (uint16_t)(ty - TILES_H);
+    base = (uint16_t)(ty << 5);
+    for (c = 0; c < nc; c++) {
+      uint16_t tx = (uint16_t)(co + c);
+      while (tx >= TILES_W) tx = (uint16_t)(tx - TILES_W);
+      dirty[base + tx] = 1;
+    }
+  }
+}
+
+/* --------------------------------------------------------------- panning */
+
+static void set_pan(uint16_t nx, uint16_t ny) {
+  px = nx;
+  py = ny;
+  pxm = px;
+  while (pxm >= FB_W) pxm = (uint16_t)(pxm - FB_W);
+  pym = py;
+  while (pym >= FB_H) pym = (uint16_t)(pym - FB_H);
+}
+
+/* Move the window, one axis at a time.
+ *
+ * One axis, even when both are pending, so that the exposed area is always a
+ * single strip and the bounding box in need_rect() is exact. A diagonal step
+ * would make it the whole window, which is the fourteen-second request this
+ * exists to avoid; the other axis just lands on the next pass.
+ *
+ * The pixels do not move. Only the tilemap does, and only the strip that was
+ * never on screen has to come down the wire. */
+static void apply_pan(void) {
+  uint16_t nx = px, ny = py, ox = px, oy = py, d;
+
+  if (pend_dx) {
+    int16_t dx = pend_dx;
+    pend_dx = 0;
+    if (dx > 0) {
+      nx = (uint16_t)(px + (uint16_t)dx);
+      if (nx > maxpx) nx = maxpx;
+    } else {
+      uint16_t m = (uint16_t)(-dx);
+      nx = (px > m) ? (uint16_t)(px - m) : 0;
+    }
+  } else if (pend_dy) {
+    int16_t dy = pend_dy;
+    pend_dy = 0;
+    if (dy > 0) {
+      ny = (uint16_t)(py + (uint16_t)dy);
+      if (ny > maxpy) ny = maxpy;
+    } else {
+      uint16_t m = (uint16_t)(-dy);
+      ny = (py > m) ? (uint16_t)(py - m) : 0;
+    }
+  }
+  if (nx == ox && ny == oy) return;
+
+  set_pan(nx, ny);
+  write_tilemap();
+
+  /* The strip that has never been on this console. Everything else in the new
+   * window is already in the shadow, at the address it was always at. */
+  if (nx > ox) {
+    d = (uint16_t)(nx - ox);
+    if (d > FB_W) d = FB_W;
+    need_rect((uint16_t)(nx + FB_W - d), ny, d, FB_H);
+  } else if (nx < ox) {
+    d = (uint16_t)(ox - nx);
+    if (d > FB_W) d = FB_W;
+    need_rect(nx, ny, d, FB_H);
+  } else if (ny > oy) {
+    d = (uint16_t)(ny - oy);
+    if (d > FB_H) d = FB_H;
+    need_rect(nx, (uint16_t)(ny + FB_H - d), FB_W, d);
+  } else {
+    d = (uint16_t)(oy - ny);
+    if (d > FB_H) d = FB_H;
+    need_rect(nx, ny, FB_W, d);
+  }
+}
+
+/* Cursor, panning and quit, serviced while a transfer is in flight.
  *
  * This has to run from inside the read loop, not only between updates. A first
- * screen is 48 KB — eighty seconds at 615 B/s — and an application that only
- * checks the keyboard between whole updates ignores you for eighty seconds. The
+ * screen is 48 KB — half a minute even now, and eighty seconds when this was
+ * written — and an application that only checks the keyboard between whole
+ * updates ignores you for all of it. The
  * cursor is a sprite, so moving it mid-transfer costs four bytes of OAM and no
  * network traffic at all.
  *
+ * A PAN, though, cannot happen mid-message. Rectangles are placed using the pan
+ * origin, so moving the origin while one is half-read would put the rest of it
+ * in the wrong place — and only sometimes, only on a large rectangle, which is
+ * the worst kind of bug to own. So `parsing` gates it and the step is held until
+ * the stream is at a message boundary.
+ *
+ * At a boundary it is applied HERE rather than deferred to the main loop, and
+ * that is not an optimisation: a still screen leaves the app blocked in rd()
+ * waiting for a message the server has no reason to send, and a pan deferred to
+ * a loop that is never reached is a pan that never happens. Applying it here
+ * also sends its own request, which is what unblocks the read.
+ *
  * Returns 1 if the user asked to leave. */
 static int poll_input(void) {
-  int moved = 0;
+  int moved = 0, panned = 0;
   for (;;) {
     int c = (int)sys_pollkey();
     if (c == (int)SYS_ERR) break;
@@ -669,22 +1017,120 @@ static int poll_input(void) {
     } else if (c == SNOS_KEY_DOWN) {
       cy = (uint16_t)(cy < FB_H - 8 ? cy + 8 : FB_H - 1);
       moved = 1;
+    } else if (c == 'a' || c == 'A') {
+      pend_dx = (int16_t)(pend_dx - PAN_STEP);
+      panned = 1;
+    } else if (c == 'd' || c == 'D') {
+      pend_dx = (int16_t)(pend_dx + PAN_STEP);
+      panned = 1;
+    } else if (c == 'w' || c == 'W') {
+      pend_dy = (int16_t)(pend_dy - PAN_STEP);
+      panned = 1;
+    } else if (c == 's' || c == 'S') {
+      pend_dy = (int16_t)(pend_dy + PAN_STEP);
+      panned = 1;
     } else if (c == ' ') {
-      /* Press and release at the cursor. The server moves its own pointer there
-       * as a side effect, which is why we do not stream every cursor step: each
-       * one would cost a framebuffer update of the area it left. */
-      pointer(cx, cy, 1);
-      pointer(cx, cy, 0);
+      /* Press and release at the cursor, in SERVER coordinates. The server
+       * moves its own pointer there as a side effect, which is why we do not
+       * stream every cursor step: each one would cost a framebuffer update of
+       * the area it left. */
+      pointer((uint16_t)(px + cx), (uint16_t)(py + cy), 1);
+      pointer((uint16_t)(px + cx), (uint16_t)(py + cy), 0);
     }
   }
   /* Drain the queue first, THEN place the sprite, once. Every key of a held
    * repeat would otherwise wait for its own window, and auto-repeat delivers
    * several per frame. */
-  if (moved) place_cursor();
+  if (moved && ready) place_cursor();
+  if (panned && ready && !parsing) {
+    apply_pan();
+    if (rq_pending) send_request();
+  }
   return 0;
 }
 
 /* ------------------------------------------------------------------ updates */
+
+/* CopyRect, translated through the torus.
+ *
+ * Both ends have to be inside the window: the shadow holds the window and
+ * nothing else, so a source that has scrolled out of view simply is not here to
+ * copy from. Whatever cannot be satisfied is handed to need_rect(), which turns
+ * it into a small non-incremental request rather than a stale band nobody
+ * notices until they read it.
+ *
+ * The row goes via crow[] rather than being copied in place. Source and
+ * destination each wrap at their own point on the torus, so an in-place copy
+ * would need overlap reasoning modulo 256; gathering the row and then scattering
+ * it removes the question entirely. Row ORDER still matters, and that is the
+ * one thing a scratch buffer does not fix — a scroll's source and destination
+ * rows overlap, so the direction is chosen from the sign of the shift. */
+static void copy_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                      uint16_t sx, uint16_t sy) {
+  int32_t dxs = (int32_t)sx - (int32_t)x;
+  int32_t dys = (int32_t)sy - (int32_t)y;
+  uint16_t vx1 = (uint16_t)(px + FB_W), vy1 = (uint16_t)(py + FB_H);
+  uint16_t ax0, ay0, ax1, ay1, bx0, by0, bx1, by1;
+  int32_t lo, hi, k0, k1;
+
+  /* A: the part of the destination that is on screen at all. */
+  ax0 = (x < px) ? px : x;
+  ay0 = (y < py) ? py : y;
+  ax1 = ((uint16_t)(x + w) > vx1) ? vx1 : (uint16_t)(x + w);
+  ay1 = ((uint16_t)(y + h) > vy1) ? vy1 : (uint16_t)(y + h);
+  if (ax1 <= ax0 || ay1 <= ay0) return;
+
+  /* B: the part of A whose SOURCE is on screen too. */
+  lo = (int32_t)px - dxs;
+  hi = (int32_t)vx1 - dxs;
+  k0 = (int32_t)ax0; if (k0 < lo) k0 = lo;
+  k1 = (int32_t)ax1; if (k1 > hi) k1 = hi;
+  bx0 = (uint16_t)k0;
+  bx1 = (uint16_t)((k1 > k0) ? k1 : k0);
+  lo = (int32_t)py - dys;
+  hi = (int32_t)vy1 - dys;
+  k0 = (int32_t)ay0; if (k0 < lo) k0 = lo;
+  k1 = (int32_t)ay1; if (k1 > hi) k1 = hi;
+  by0 = (uint16_t)k0;
+  by1 = (uint16_t)((k1 > k0) ? k1 : k0);
+
+  if (bx1 > bx0 && by1 > by0) {
+    uint16_t ncols = (uint16_t)(bx1 - bx0), nrows = (uint16_t)(by1 - by0);
+    uint16_t sr0 = (uint16_t)((int32_t)by0 + dys);
+    uint16_t sc0 = (uint16_t)((int32_t)bx0 + dxs);
+    uint16_t i;
+    for (i = 0; i < nrows; i++) {
+      /* Source above the destination means the top rows are overwritten first,
+       * so walk from the bottom. This is the only part of a scroll that a row
+       * buffer does not make order-independent. */
+      uint16_t j = (dys < 0) ? (uint16_t)(nrows - 1 - i) : i;
+      uint16_t srow = shrow((uint16_t)((uint16_t)(sr0 + j) - py));
+      uint16_t drow = shrow((uint16_t)((uint16_t)(by0 + j) - py));
+      uint16_t ssc = shcol((uint16_t)(sc0 - px));
+      uint16_t dsc = shcol((uint16_t)(bx0 - px));
+      uint16_t n1, k;
+      n1 = (uint16_t)(FB_W - ssc);
+      if (n1 > ncols) n1 = ncols;
+      for (k = 0; k < n1; k++) crow[k] = fb[srow + ssc + k];
+      for (k = n1; k < ncols; k++) crow[k] = fb[srow + (k - n1)];
+      n1 = (uint16_t)(FB_W - dsc);
+      if (n1 > ncols) n1 = ncols;
+      for (k = 0; k < n1; k++) fb[drow + dsc + k] = crow[k];
+      for (k = n1; k < ncols; k++) fb[drow + (k - n1)] = crow[k];
+    }
+    mark((uint16_t)(bx0 - px), (uint16_t)(by0 - py), ncols, nrows);
+    /* A minus B, as up to four strips. For a plain vertical scroll — the case
+     * that actually happens — exactly one of them is non-empty and the bounding
+     * box need_rect() keeps is therefore exact. */
+    need_rect(ax0, ay0, (uint16_t)(ax1 - ax0), (uint16_t)(by0 - ay0));
+    need_rect(ax0, by1, (uint16_t)(ax1 - ax0), (uint16_t)(ay1 - by1));
+    need_rect(ax0, by0, (uint16_t)(bx0 - ax0), (uint16_t)(by1 - by0));
+    need_rect(bx1, by0, (uint16_t)(ax1 - bx1), (uint16_t)(by1 - by0));
+  } else {
+    /* Nothing of the source survives on screen. */
+    need_rect(ax0, ay0, (uint16_t)(ax1 - ax0), (uint16_t)(ay1 - ay0));
+  }
+}
 
 static int read_update(void) {
   uint16_t nrects, i;
@@ -703,39 +1149,64 @@ static int read_update(void) {
     enc = (int32_t)(((uint32_t)hdr[8] << 24) | ((uint32_t)hdr[9] << 16) |
                     ((uint32_t)hdr[10] << 8) | hdr[11]);
 
-    if (x >= FB_W || y >= FB_H) return 0;  /* a rect we cannot place */
-    if ((uint16_t)(x + w) > FB_W) w = (uint16_t)(FB_W - x);
-    if ((uint16_t)(y + h) > FB_H) h = (uint16_t)(FB_H - y);
+    /* A rectangle larger than the desktop is not a rectangle we misplaced, it
+     * is a stream we have lost sync with — and the arithmetic below would
+     * overflow 16 bits trying to place it. */
+    if (w > srv_w || h > srv_h || x > srv_w || y > srv_h) {
+      say("\nserver sent a rectangle off its own desktop\n");
+      return 0;
+    }
+    if (w == 0 || h == 0) continue;
 
     if (enc == ENC_RAW) {
+      /* Rectangles arrive in SERVER coordinates. Clip to the window, and drop
+       * whatever falls outside it — the shadow byte an off-window pixel would
+       * land on belongs to a different part of the desktop, so writing it there
+       * would corrupt something that IS on screen. */
+      uint16_t vx1 = (uint16_t)(px + FB_W), vy1 = (uint16_t)(py + FB_H);
+      uint16_t cx0 = (x < px) ? px : x;
+      uint16_t cy0 = (y < py) ? py : y;
+      uint16_t cx1 = ((uint16_t)(x + w) > vx1) ? vx1 : (uint16_t)(x + w);
+      uint16_t cy1 = ((uint16_t)(y + h) > vy1) ? vy1 : (uint16_t)(y + h);
+      int any = (cx1 > cx0) && (cy1 > cy0);
+      uint16_t pre = any ? (uint16_t)(cx0 - x) : 0;
+      uint16_t mid = any ? (uint16_t)(cx1 - cx0) : 0;
+      uint16_t post = any ? (uint16_t)((uint16_t)(x + w) - cx1) : 0;
+
       /* Straight into the shadow, a row at a time. No intermediate buffer:
        * a single rectangle can be 26 KB and there is nowhere to put it. */
-      for (row = 0; row < h; row++)
-        if (!rd(&fb[(uint16_t)((y + row) * FB_W + x)], w)) return 0;
-      mark(x, y, w, h);
-      /* Paint it NOW, not after the whole update. A server may split one screen
-       * across several messages, so waiting meant painting a fraction of the
-       * screen with stale VRAM — the console's own font — showing through the
-       * rest. That was the corruption. It also turns an eighty-second first
-       * screen into something you can watch arrive. */
-      flush_dirty();
+      for (row = 0; row < h; row++) {
+        uint16_t sy = (uint16_t)(y + row);
+        uint16_t base, sc, n1;
+        if (!any || sy < cy0 || sy >= cy1) {
+          if (!skipn(w)) return 0;
+          continue;
+        }
+        if (pre && !skipn(pre)) return 0;
+        base = shrow((uint16_t)(sy - py));
+        sc = shcol((uint16_t)(cx0 - px));
+        n1 = (uint16_t)(FB_W - sc);
+        if (n1 > mid) n1 = mid;
+        if (!rd(&fb[base + sc], n1)) return 0;
+        if (n1 < mid && !rd(&fb[base], (uint16_t)(mid - n1))) return 0;
+        if (post && !skipn(post)) return 0;
+      }
+      if (any) {
+        mark((uint16_t)(cx0 - px), (uint16_t)(cy0 - py), mid,
+             (uint16_t)(cy1 - cy0));
+        /* Paint it NOW, not after the whole update. A server may split one
+         * screen across several messages, so waiting meant painting a fraction
+         * of the screen with stale VRAM — the console's own font — showing
+         * through the rest. That was the corruption. It also turns an
+         * eighty-second first screen into something you can watch arrive. */
+        flush_dirty();
+      }
     } else if (enc == ENC_COPYRECT) {
       uint16_t sx, sy;
       if (!rd(hdr, 4)) return 0;
       sx = be16(hdr);
       sy = be16(hdr + 2);
-      for (row = 0; row < h; row++) {
-        uint16_t d = (uint16_t)((y + row) * FB_W + x);
-        uint16_t s = (uint16_t)((sy + row) * FB_W + sx);
-        uint16_t k;
-        /* Direction matters when the regions overlap, which is exactly what a
-         * scroll is. */
-        if (d > s)
-          for (k = w; k--;) fb[d + k] = fb[s + k];
-        else
-          for (k = 0; k < w; k++) fb[d + k] = fb[s + k];
-      }
-      mark(x, y, w, h);
+      copy_rect(x, y, w, h, sx, sy);
     } else {
       /* We advertised only Raw and CopyRect; anything else means the stream is
        * no longer parseable and guessing would make it worse. */
@@ -746,43 +1217,67 @@ static int read_update(void) {
   return 1;
 }
 
-/* Read one server message, handling the ones that are not updates. */
+/* Read one server message, handling the ones that are not updates.
+ *
+ * `parsing` brackets everything after the type byte: while it is set, a pan is
+ * recorded but not applied, because the pan origin is what places every
+ * rectangle in the message being read. The one place it is CLEAR and the app is
+ * blocked is the read of the type byte itself, which is exactly the boundary a
+ * pan is safe at. */
 static int pump(void) {
+  int ok;
   if (!rd(hdr, 1)) return 0;
-  if (hdr[0] == MSG_UPDATE) return read_update();
-  if (hdr[0] == MSG_BELL) return 1;
-  if (hdr[0] == MSG_COLOURMAP) {
+  parsing = 1;
+  if (hdr[0] == MSG_UPDATE) {
+    ok = read_update();
+  } else if (hdr[0] == MSG_BELL) {
+    ok = 1;
+  } else if (hdr[0] == MSG_COLOURMAP) {
     uint16_t n;
-    if (!rd(hdr, 5)) return 0;
-    n = be16(hdr + 3);
-    while (n--) if (!rd(hdr, 6)) return 0;
-    return 1;
-  }
-  if (hdr[0] == MSG_CUT) {
-    uint32_t n;
-    if (!rd(hdr, 7)) return 0;
-    n = ((uint32_t)hdr[3] << 24) | ((uint32_t)hdr[4] << 16) |
-        ((uint32_t)hdr[5] << 8) | hdr[6];
-    while (n) {
-      uint16_t take = (n > sizeof hdr) ? (uint16_t)sizeof hdr : (uint16_t)n;
-      if (!rd(hdr, take)) return 0;
-      n -= take;
+    ok = 0;
+    if (rd(hdr, 5)) {
+      n = be16(hdr + 3);
+      ok = 1;
+      while (n--) if (!rd(hdr, 6)) { ok = 0; break; }
     }
-    return 1;
+  } else if (hdr[0] == MSG_CUT) {
+    uint32_t n;
+    ok = 0;
+    if (rd(hdr, 7)) {
+      n = ((uint32_t)hdr[3] << 24) | ((uint32_t)hdr[4] << 16) |
+          ((uint32_t)hdr[5] << 8) | hdr[6];
+      ok = 1;
+      while (n) {
+        uint16_t take = (n > sizeof hdr) ? (uint16_t)sizeof hdr : (uint16_t)n;
+        if (!rd(hdr, take)) { ok = 0; break; }
+        n -= take;
+      }
+    }
+  } else {
+    say("\nunknown message from the server\n");
+    ok = 0;
   }
-  say("\nunknown message from the server\n");
-  return 0;
+  parsing = 0;
+  return ok;
 }
 
 /* ---------------------------------------------------------------- the loop */
 
 int main(void) {
   uint16_t i;
-  int first = 1;
 
+  /* Assigned here, not at their declarations: an app is linked with
+   * --no-auto-libraries, so an initialised static reads back as zero and a
+   * non-zero initialiser is silently discarded. */
   cx = FB_W / 2;
   cy = FB_H / 2;
   quit = 0;
+  px = 0; py = 0; pxm = 0; pym = 0;
+  maxpx = 0; maxpy = 0;
+  pend_dx = 0; pend_dy = 0;
+  parsing = 0;
+  ready = 0;
+  rq_pending = 0;
 
   snos_getargs(args, sizeof args);
   if (args[0] == 0) {
@@ -837,20 +1332,23 @@ int main(void) {
     return 1;
   }
 
+  /* How far the window may travel. Rounded DOWN to a multiple of 8 so that
+   * every pan origin stays on a tile boundary even at the far edge — the
+   * tilemap cannot express anything else, and a half-tile origin would quietly
+   * turn every pan into a full 768-tile rebuild. */
+  maxpx = (srv_w > FB_W) ? (uint16_t)((srv_w - FB_W) & 0xFFF8u) : 0;
+  maxpy = (srv_h > FB_H) ? (uint16_t)((srv_h - FB_H) & 0xFFF8u) : 0;
+
   say("connected: ");
   sys_putu(srv_w);
   sys_putc('x');
   sys_putu(srv_h);
-  if (srv_w != FB_W || srv_h != FB_H) {
-    /* Say so rather than silently showing a corner. A server sized to the
-     * console shows its whole desktop; anything else is cropped. */
-    say(" (showing the top-left ");
-    sys_putu(FB_W);
-    sys_putc('x');
-    sys_putu(FB_H);
-    sys_putc(')');
-  }
-  say("\nESC quits\n");
+  sys_putc('\n');
+  if (maxpx || maxpy)
+    say("WASD pans the window, arrows move the cursor, space clicks\n");
+  else
+    say("arrows move the cursor, space clicks\n");
+  say("ESC quits\n");
 
   /* Start from a known screen: clear the shadow, and clear VRAM to match it, so
    * anything the server has not sent yet is black rather than whatever the
@@ -866,7 +1364,7 @@ int main(void) {
   }
   for (i = 0; i < NTILES; i++) dirty[i] = 0;
 
-  say("receiving the first screen - about 80s on this link\n");
+  say("receiving the first screen - about 30s on this link\n");
   say("it paints as it arrives; ESC quits\n");
   sys_gfx(1);
   R8(0x2100) = 0x8F;
@@ -887,15 +1385,20 @@ int main(void) {
   load_cursor();
   clear_tiles();
   setup_ppu();
+  ready = 1;
   /* After setup_ppu, so the display is already on when the cursor lands: OAM
    * writes are only reliable while blanking, and place_cursor waits for a vblank
    * to get that. Under the forced blank above it would work either way; doing it
    * here keeps one rule instead of two. */
   place_cursor();
 
+  /* The first screen is the window, in full, and the server has no idea what we
+   * already have — so it is the same non-incremental request a pan uses. */
+  need_rect(px, py, FB_W, FB_H);
+
   while (!quit) {
-    if (!request(first ? 0 : 1)) break;
-    first = 0;
+    if (pend_dx || pend_dy) apply_pan();
+    if (!send_request()) break;
     if (!pump()) break;
     /* Rectangles are painted as they arrive, inside read_update; this catches
      * anything a CopyRect left dirty, since that path marks without painting. */
