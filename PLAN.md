@@ -318,31 +318,60 @@ The `vnc` client made the link's speed the headline problem: a 48 KB screen take
 the measured **615 B/s**. `docs/performance.md` has the full measurement — read it before touching
 any of this, because it also records an attempt that failed and why.
 
+**The goal is iteration speed, not silicon speed** (Ricardo, 2026-07-29: *"testing things in the
+emulator is super slow. If we can get it closer to the real hardware, it would be a lot easier"*).
+That is worth stating because it inverts how these items rank: work that only helps the emulator is
+not a consolation prize here, it is the objective, and it is also the cheap and safe end of the
+list. Real silicon is already ~33× the test rig with none of this done.
+
 The link is **round-trip-bound, not bandwidth-bound**. Frames are already 100% full; 59% of polls
 are retransmissions. The SNES puts something on the wire ~58 times a second and only ~10 of those
 carry new data, because stop-and-wait sends nothing while an ack is outstanding and an ack takes
 ~5–6 emulated frames to come back through two files and two processes.
 
-Ordered by risk-adjusted value, and **the order matters — 2 gates 3 and 4**:
+**Cost is denominated in emulated frames, and that is the lever.** A fixed transfer costs ~800
+emulated frames, reproducible to 1%. Wall time is therefore `frames ÷ (60 × emulation speed)` —
+so running Mesen at 3× makes testing 3× faster for zero code changes and zero panic risk, *if*
+the frame count stays flat. Two reasons to think it does: the Lua bridge is on `endFrame`, so it
+scales with the emulator automatically; and `gateway.py` is purely reactive — it writes only when
+the SNES actually moved a frame, and its 250 Hz spin is an idle wait it skips entirely while data
+flows. Nothing in the path is clocked to wall time. **Unverified, and it is the first thing to
+measure:** if the gateway slips, retransmissions inflate the frame count and eat the gain.
 
-1. **Collapse the bridge's relay hops** *(test-rig only, no kernel risk)*. The Lua bridge acts on
+Ordered by risk-adjusted value against the iteration-speed goal, and **the order matters — 3 gates
+4 and 5**:
+
+1. **Turn up the emulation speed and prove the frame count holds** *(no code at all)*. Measure the
+   same fixed transfer throttled to 1× and unthrottled, and compare *emulated frames*, not seconds.
+   Flat count means the whole speed-up is free and the rest of this list is optional for testing.
+   An inflated count names the gateway as the limiter, and its poll interval is a one-line change.
+   Do this before writing anything: it is the only item that could make the others unnecessary.
+2. **Collapse the bridge's relay hops** *(test-rig only, no kernel risk)*. The Lua bridge acts on
    `endFrame`, so every crossing waits for the next emulated frame, and `gateway.py` polls on its
    own unsynchronised loop on top of that. A Mesen memory callback on the mailbox address could
    respond *within* the same frame instead; the gateway's poll interval is separately tunable.
    Touches no kernel code, so it cannot panic — but it only speeds up the emulator, not silicon.
    Value unmeasured; worth an hour to find out, and cheapest by far.
-2. **Make the frame copy cheap: `MVN` block move.** `net_service` copies frames in and out with a
+3. **Make the frame copy cheap: `MVN` block move.** `net_service` copies frames in and out with a
    C loop at `-O0` (~40–100 cycles/byte) inside NMI. `MVN` does ~7. This is the same
    hand-written-65816-for-the-hot-loop pattern used across this repo, and it is the **prerequisite
    for both items below** — it is what makes a bigger frame affordable in the NMI budget.
-3. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
+4. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
    **Already tried naively and reverted** — the kernel dies with a smashed return address the
    moment the link is claimed, because the `-O0` copy overruns the NMI and the next NMI re-enters
    it on the same stack and direct page. 128 fails identically, so it is not a marginal budget.
-   Do item 2 first.
-4. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
-   change: it needs item 2 *and* a mailbox deeper than one frame per direction, which means the
+   Do item 3 first.
+5. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
+   change: it needs item 3 *and* a mailbox deeper than one frame per direction, which means the
    WRAM layout, both endpoints, the Lua bridge and the gateway all move together.
+
+**Held in reserve: a deliberately cheating debug transport.** The inner loop does not need protocol
+fidelity — "does the cursor move" is not a question about framing. A debug flag could let the bridge
+hand over a whole screen in one shot and skip stop-and-wait entirely, which is worth ~50× rather
+than ~5×. **Not queued, and only if item 1 falls short**, because the cost is real: the bugs it
+hides are exactly the ones that have actually bitten us — the `LINK_FRAME` panic and every flow-
+control fault were properties of the real framing. If it is ever built, the regression suite must
+keep running the real transport, and no demo may ever depend on the fast path.
 
 **Keep the perspective:** all of these numbers measure the *emulator path*. The real cable is
 synchronous, console-clocked, and has no file bridge, no 1-deep mailbox and no 60 Hz ceiling —
