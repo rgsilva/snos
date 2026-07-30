@@ -313,10 +313,27 @@ open browser, listen/accept, and now a plain TCP path for VNC — and the seams 
 channel, a page closed under a running thread, an `S2C_ERR` landing on a freed channel — was a
 teardown bug, and they were separate bugs only because teardown is written four times.
 
-### Performance — link throughput *(queued 2026-07-29, next up)*
-The `vnc` client made the link's speed the headline problem: a 48 KB screen takes ~80 seconds at
-the measured **615 B/s**. `docs/performance.md` has the full measurement — read it before touching
-any of this, because it also records an attempt that failed and why.
+### Performance — link throughput *(queued 2026-07-29; items 1 and 2 done)*
+The `vnc` client made the link's speed the headline problem. **Progress so far, all measured:**
+
+| | 48 KB `vnc` screen | 8192 B via `file://` |
+|---|---|---|
+| baseline (2026-07-28) | ~80 s, 615 B/s | — |
+| after item 1, the asm (`91ec6ab`) | 57.8 s, ~860 B/s | 571 frames, 440 polls, 9.52 s |
+| after item 2, the bridge (`c64d8c3`) | **44.3 s** | **536 frames, 300 polls, 8.93 s** |
+
+`docs/performance.md` has the full method — read it before touching any of this, because it also
+records an attempt that failed and why. **Quote the table above, not the 80 s figure**: that number
+has been repeated in three places after it stopped being true.
+
+**MEASURING THE BRIDGE REQUIRES A THROTTLE, and without one the answer inverts.** `--testrunner`
+runs unthrottled at ~330 fps here, and `gateway.py`'s idle poll is a **wall-clock** 4 ms timer — so
+at 330 fps the gateway looks 5× slower in emulated frames and becomes the bottleneck, swamping
+anything the bridge does. Measured cold, the item-2 bridge looked like a *regression* (631 frames
+against 616, and a deeper down-queue); throttled to 60 fps the same two builds gave 536 against 571,
+reproducible to the frame. `SNOS_FPS=60` in the bench harness is the throttle. An idle keepalive
+rate is likewise worthless as a proxy — the old bridge scored *twice* the new one on it, because
+writing a frame into an unread mailbox every video frame counts as delivery and is actually loss.
 
 **The goal is iteration speed, not silicon speed** (Ricardo, 2026-07-29: *"testing things in the
 emulator is super slow. If we can get it closer to the real hardware, it would be a lot easier"*).
@@ -373,7 +390,20 @@ Ordered by risk-adjusted value against the iteration-speed goal:
    C loop at `-O0` (~40–100 cycles/byte) inside NMI. `MVN` does ~7. This is the same
    hand-written-65816-for-the-hot-loop pattern used across this repo, and it is the **prerequisite
    for both items below** — it is what makes a bigger frame affordable in the NMI budget.
-2. **Make the bridge answer within the frame.** A Mesen memory callback on the mailbox address
+2. ~~**Make the bridge answer within the frame.**~~ **DONE 2026-07-29** (`c64d8c3`), but *not* the
+   way this item described. **Moving only the send half changed nothing — bit-identical, 571
+   frames.** `net_service` is NMI-only so the console polls at 60 Hz regardless, and the seq-write
+   callback fires *after* `link_wram_poll` has already copied RX out, so a frame delivered there
+   waits for the next poll anyway. The win came from the **receive** half: load the mailbox on the
+   console's *read* of `LINK_MB_HOST_SEQ`, the first thing a poll does. Also fixed two real defects
+   found on the way — the bridge had **no flow control** (it wrote into an unread mailbox every
+   video frame, the hole `docs/performance.md` blames for a windowed gateway stalling at 2 KB), and
+   a startup **backlog of two frames** that became permanent latency once reads went 1:1.
+   Two Mesen facts I had recorded wrongly here, both silent when wrong: **write callbacks fire
+   BEFORE the write reaches memory**, and a 16-bit store is two bus writes **low byte first** — so
+   change-detection on the pre-write value latches a stale high byte and every 256th poll runs the
+   exchange twice. Register the low byte alone and act unconditionally.
+   *(original text follows)* **Make the bridge answer within the frame.** A Mesen memory callback on the mailbox address
    instead of `endFrame`, so a reply does not wait for the next video frame. **This is a fidelity
    fix, not a cheat:** the 60 Hz ceiling is a property of `endFrame` alone — not of the protocol,
    the SNES, or the Pico — and the kernel already polls `net_service` from the main loop as well as
@@ -392,6 +422,12 @@ Ordered by risk-adjusted value against the iteration-speed goal:
    moment the link is claimed, because the `-O0` copy overruns the NMI and the next NMI re-enters
    it on the same stack and direct page. 128 fails identically, so it is not a marginal budget.
    Do item 1 first.
+3b. **Find the last poll per data frame.** The floor is now ~2 polls per data frame because `net.c`
+   builds its TX frame *after* the poll, so the ack for a frame received at poll *k* does not leave
+   until *k+1*. `get` measures 2.19 (essentially the floor); **`vnc` measures ~3**, so one poll is
+   probably still recoverable in `net.c`/`gateway.py`. It is **not** in the bridge. At 60 Hz the
+   2-poll floor caps the link near 1800 B/s, so this is worth finding before reaching for item 4.
+
 4. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
    change: it needs item 1 *and* a mailbox deeper than one frame per direction, which means the
    WRAM layout, both endpoints, the Lua bridge and the gateway all move together.
