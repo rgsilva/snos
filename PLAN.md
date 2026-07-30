@@ -322,10 +322,17 @@ The `vnc` client made the link's speed the headline problem. **Progress so far, 
 | after item 1, the asm (`91ec6ab`) | 57.8 s, ~860 B/s | 571 frames, 440 polls, 9.52 s |
 | after item 2, the bridge (`c64d8c3`) | 44.3 s | 536 frames, 300 polls, 8.93 s |
 | after `LINK_FRAME` 128 (`9a68863`) | 44.3 s — *no change, see below* | 556 frames, 295 polls |
-| **after the phase fix (`19b0c55`)** | **32.3 s** | 561 frames, **295 polls** |
+| after the phase fix (`19b0c55`) | 32.3 s | 561 frames, **295 polls** |
+| **after the asm transpose (`08fa773`)** | **18.8 s** | — |
 
-**Total so far: ~80 s → 32.3 s.** The wire is now **38%** of that run and the console side ~48%, so
-the emulator link has stopped being the headline cost.
+**Total: ~80 s → 18.8 s**, reproducible to the frame. **And the bottleneck has swapped back to the
+wire.** The transpose fix cut polls 2156 → 1370 — far more than the paint tail alone, because the app
+had been too busy to drain its receive ring — and of those 1370 the wire needs at least 818 (409 data
+frames × the 2-poll floor). So the wire is **≥60% of the run and ≥76% of what a user actually waits
+for** once the harness's 288-poll startup is excluded.
+
+That is the third time these two have traded places. The order that actually happened was: link →
+console → link, and each fix exposed the other side rather than the next item on any list.
 
 `docs/performance.md` has the full method — read it before touching any of this, because it also
 records an attempt that failed and why. **Quote the table above, not the 80 s figure**: that number
