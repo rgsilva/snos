@@ -16,7 +16,7 @@ local L = dofile("test/lib.lua")
 
 local MB = 0xE000          -- link mailbox, WRAM $7EE000
 local MAGIC = 0x4B4C       -- "LK"
-local FRAME, HDR = 64, 4
+local FRAME, HDR = 128, 4
 -- Derived, not literals -- see the LINK_MB_RX note in kernel/link.h.
 local TXOFF, RXOFF = 0x10, 0x10 + FRAME
 local SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3

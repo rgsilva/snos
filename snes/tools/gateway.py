@@ -45,7 +45,7 @@ import urllib.request
 UP = "/tmp/snos-up.bin"       # SNES -> gateway
 DOWN = "/tmp/snos-down.bin"   # gateway -> SNES
 
-FRAME = 64
+FRAME = 128
 HDR = 4
 SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 F_DATA = 0x01

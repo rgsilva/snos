@@ -35,7 +35,7 @@
 
 #include <stdint.h>
 
-#define LINK_FRAME 64
+#define LINK_FRAME 128
 #define LINK_HDR 4
 #define LINK_PAYLOAD (LINK_FRAME - LINK_HDR) /* 60 bytes of records */
 

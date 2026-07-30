@@ -58,7 +58,7 @@ local DOWN = "/tmp/snos-down.bin" -- gateway -> SNES
 
 local MB = 0xE000                 -- link mailbox, WRAM $7EE000
 local MAGIC = 0x4B4C              -- "LK"
-local FRAME = 64
+local FRAME = 128
 -- Mailbox buffer offsets are DERIVED, never literals: they used to be 0x10 and
 -- 0x50, which is exactly FRAME apart at 64, so a bigger frame overlapped them
 -- silently. See the note on LINK_MB_RX in kernel/link.h.
