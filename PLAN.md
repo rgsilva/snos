@@ -329,49 +329,65 @@ are retransmissions. The SNES puts something on the wire ~58 times a second and 
 carry new data, because stop-and-wait sends nothing while an ack is outstanding and an ack takes
 ~5–6 emulated frames to come back through two files and two processes.
 
-**Cost is denominated in emulated frames, and that is the lever.** A fixed transfer costs ~800
-emulated frames, reproducible to 1%. Wall time is therefore `frames ÷ (60 × emulation speed)` —
-so running Mesen at 3× makes testing 3× faster for zero code changes and zero panic risk, *if*
-the frame count stays flat. Two reasons to think it does: the Lua bridge is on `endFrame`, so it
-scales with the emulator automatically; and `gateway.py` is purely reactive — it writes only when
-the SNES actually moved a frame, and its 250 Hz spin is an idle wait it skips entirely while data
-flows. Nothing in the path is clocked to wall time. **Unverified, and it is the first thing to
-measure:** if the gateway slips, retransmissions inflate the frame count and eat the gain.
+**Turning up the emulation speed is not the answer, and the reason is worth knowing.** It does
+scale throughput — cost is denominated in emulated frames, so wall time is `frames ÷ (60 × speed)`
+— but Ricardo observed more timeouts at speed, and that is mechanical rather than flaky. **Every
+SNOS deadline is counted in frames** (`OPEN_DEADLINE 1800u` against `sys_frames()`, get.c:45) while
+the gateway's work — DNS, connect, fetch, conversion — takes *wall-clock* seconds. At 3× a 30-second
+deadline becomes a 10-second deadline while the work it bounds takes exactly as long as before. The
+two clocks are only coupled because a real frame is 1/60 s, which is true on silicon and false in a
+fast-forwarding emulator. So the frame-denominated deadlines are **correct for hardware** — do not
+"fix" them — and fast-forward is a tool for bulk transfer tests, not a way to run the console.
+Useless for anything interactive anyway (cursors, input timing).
 
-Ordered by risk-adjusted value against the iteration-speed goal, and **the order matters — 3 gates
-4 and 5**:
+**Which hops are artifacts, and which are real** (Ricardo, 2026-07-29: *"the bridge is a hack. The
+actual stuff in the Pico will not work like that"* — correct, and it localises the problem):
 
-1. **Turn up the emulation speed and prove the frame count holds** *(no code at all)*. Measure the
-   same fixed transfer throttled to 1× and unthrottled, and compare *emulated frames*, not seconds.
-   Flat count means the whole speed-up is free and the rest of this list is optional for testing.
-   An inflated count names the gateway as the limiter, and its poll interval is a one-line change.
-   Do this before writing anything: it is the only item that could make the others unnecessary.
-2. **Collapse the bridge's relay hops** *(test-rig only, no kernel risk)*. The Lua bridge acts on
-   `endFrame`, so every crossing waits for the next emulated frame, and `gateway.py` polls on its
-   own unsynchronised loop on top of that. A Mesen memory callback on the mailbox address could
-   respond *within* the same frame instead; the gateway's poll interval is separately tunable.
-   Touches no kernel code, so it cannot panic — but it only speeds up the emulator, not silicon.
-   Value unmeasured; worth an hour to find out, and cheapest by far.
-3. **Make the frame copy cheap: `MVN` block move.** `net_service` copies frames in and out with a
+| Hop | Emulator today | Real hardware (M7) |
+|---|---|---|
+| SNES ↔ bridge / Pico | Lua `endFrame`: **one exchange per video frame, 16.7 ms** | serial cable, SNES-clocked, **microseconds**; many exchanges per frame |
+| bridge/Pico ↔ gateway | two files in `/tmp`, 250 Hz poll | WiFi/TCP to the laptop, ~1 ms |
+
+The second hop is **already roughly faithful** — a process boundary with a 4 ms poll is a fair
+stand-in for a WiFi round trip, and not worth much effort. The first is **off by three orders of
+magnitude**, and that single artifact is the whole story.
+
+Ordered by risk-adjusted value against the iteration-speed goal, and **the order matters — 2 gates
+3 and 4**:
+
+1. **Make the bridge answer within the frame.** A Mesen memory callback on the mailbox address
+   instead of `endFrame`, so a reply does not wait for the next video frame. **This is a fidelity
+   fix, not a cheat:** the 60 Hz ceiling is a property of `endFrame` alone — not of the protocol,
+   the SNES, or the Pico — and the kernel already polls `net_service` from the main loop as well as
+   NMI, so the console can drive faster than 60 Hz the moment something answers it. Removing the
+   ceiling makes the rig *more* like the cable. Touches no kernel code, so it cannot panic. If it
+   lands, the round trip becomes hop-2-bound (~1–8 ms), which puts stop-and-wait at 64 bytes in the
+   8–32 KB/s range — i.e. **in the neighbourhood of the real cable's ~20 KB/s**, which is exactly
+   the goal. That would demote items 3 and 4 to silicon work rather than test-loop work.
+2. **Make the frame copy cheap: `MVN` block move.** `net_service` copies frames in and out with a
    C loop at `-O0` (~40–100 cycles/byte) inside NMI. `MVN` does ~7. This is the same
    hand-written-65816-for-the-hot-loop pattern used across this repo, and it is the **prerequisite
    for both items below** — it is what makes a bigger frame affordable in the NMI budget.
-4. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
+3. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
    **Already tried naively and reverted** — the kernel dies with a smashed return address the
    moment the link is claimed, because the `-O0` copy overruns the NMI and the next NMI re-enters
    it on the same stack and direct page. 128 fails identically, so it is not a marginal budget.
-   Do item 3 first.
-5. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
-   change: it needs item 3 *and* a mailbox deeper than one frame per direction, which means the
+   Do item 2 first.
+4. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
+   change: it needs item 2 *and* a mailbox deeper than one frame per direction, which means the
    WRAM layout, both endpoints, the Lua bridge and the gateway all move together.
 
-**Held in reserve: a deliberately cheating debug transport.** The inner loop does not need protocol
-fidelity — "does the cursor move" is not a question about framing. A debug flag could let the bridge
-hand over a whole screen in one shot and skip stop-and-wait entirely, which is worth ~50× rather
-than ~5×. **Not queued, and only if item 1 falls short**, because the cost is real: the bugs it
-hides are exactly the ones that have actually bitten us — the `LINK_FRAME` panic and every flow-
-control fault were properties of the real framing. If it is ever built, the regression suite must
-keep running the real transport, and no demo may ever depend on the fast path.
+**Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
+you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
+this section originally had). **The framing, seq/ack and stop-and-wait are the contract; the file
+relay is not.** Anything that speeds up the relay while leaving the frame mechanism untouched hides
+no protocol bug, because the protocol is not involved — item 1 is exactly this, and the earlier note
+calling it a "cheat held in reserve" was wrong.
+
+What stays dead is the version that breaks the contract: handing over a whole screen in one shot and
+skipping the framing. That is worth ~50× and it is not worth having, because the bugs it hides are
+precisely the ones that have actually bitten us — the `LINK_FRAME` panic and every flow-control
+fault were properties of the real framing. **Keep the frames, speed up everything else.**
 
 **Keep the perspective:** all of these numbers measure the *emulator path*. The real cable is
 synchronous, console-clocked, and has no file bridge, no 1-deep mailbox and no 60 Hz ceiling —
