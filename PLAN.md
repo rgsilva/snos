@@ -432,13 +432,26 @@ Ordered by risk-adjusted value against the iteration-speed goal:
    change: it needs item 1 *and* a mailbox deeper than one frame per direction, which means the
    WRAM layout, both endpoints, the Lua bridge and the gateway all move together.
 
-**`build_frame()` is now the dominant cost, by subtraction rather than by measurement.** After the
-asm, 41.3 scanlines is ~9,400 cycles a poll, and the two new routines account for only ~1,550 of it;
-the 173 samples in the `<=16` buckets are the NMIs where `net_service` was skipped entirely. That
-leaves ~6,000–8,000 cycles in `build_frame` plus the frame accounting around it — an 8-channel loop
-and per-byte packing, still C at `-O0`. **This is inference from a histogram, not a measurement**, so
-profile it before optimising it; the whole reason the number above is trustworthy is that the last
-two display bugs were fixed twice by inference and once by instrumentation.
+**Where the remaining 9,399 cycles go — MEASURED 2026-07-30**, by marker timestamps at
+`snos_nmi` / `net_service` / `link_wram_poll` / `build_frame` / the `rti`:
+
+| span | cycles | scanlines | share |
+|---|---|---|---|
+| stub prologue → `net_service` | 941 | 4.1 | 10% |
+| `net_service` → `link_wram_poll` | 333 | 1.5 | 3.5% |
+| **`link_wram_poll` → `build_frame`** | **3,767** | 16.6 | **40%** |
+| **`build_frame` → `rti`** | **4,523** | 19.9 | **48%** |
+| total | 9,399 | 41.3 | |
+
+**An earlier note here put `build_frame` at 6,000–8,000 cycles by subtracting from a histogram. It
+is ~4,523 including the stub epilogue — the inference was ~50% high**, which is exactly why it was
+labelled as inference. The receive side is the surprise: the two `MVN` copies plus the rx checksum
+are only ~1,545 cycles of that 3,767, so ~2,200 sit in `net_service`'s own C — ack processing,
+`rx_resync`, delivery and channel dispatch — none of which anyone had suspected.
+
+Method, so it can be repeated: `build_frame` is `static` and has no symbol, so make it non-static
+temporarily and **re-read every address from `build/snos.map` afterwards** — `net_service` and
+`link_wram_poll` both moved when its linkage changed.
 
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
 you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
