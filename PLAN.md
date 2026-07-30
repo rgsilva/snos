@@ -347,7 +347,8 @@ The `vnc` client made the link's speed the headline problem. **Progress so far, 
 | after item 2, the bridge (`c64d8c3`) | 44.3 s | 536 frames, 300 polls, 8.93 s |
 | after `LINK_FRAME` 128 (`9a68863`) | 44.3 s — *no change, see below* | 556 frames, 295 polls |
 | after the phase fix (`19b0c55`) | 32.3 s | 561 frames, **295 polls** |
-| **after the asm transpose (`08fa773`)** | **18.8 s** | — |
+| after the asm transpose (`08fa773`) | 18.8 s | — |
+| **after splitting the poll (`27e964b`)** | **15.8 s** | 551 frames, **255 polls** |
 
 **Total: ~80 s → 18.8 s**, reproducible to the frame. **And the bottleneck has swapped back to the
 wire.** The transpose fix cut polls 2156 → 1370 — far more than the paint tail alone, because the app
@@ -588,11 +589,30 @@ wrongly at least once): a **write** callback fires *before* the write reaches me
 callback fires *after* the value the CPU gets has been taken; a callback's own `emu.write` *is* visible
 to a later CPU read in the same video frame; and Lua reads do **not** re-enter memory callbacks.
 
-**Still open, and labelled as hypotheses because they were not measured:** three console stalls cost
-543 polls / 9.1 s (20% of the run) — seq 210 alone resent **441 times** with the console's ack frozen
-and the gateway holding 4146 B. That looks like `frame_fits()` refusing a full receive ring, i.e. the
-`vnc` app not draining, but confirming it needs kernel instrumentation. And the 404-poll tail is the
-console painting — that is the transpose, not the link.
+**THE STALL HYPOTHESIS WAS WRONG, and so was the inference I drew from its apparent fix.** I recorded
+that three stalls (607 polls, 441 resends of one frame) looked like `frame_fits()` refusing a full
+receive ring, and later that the asm transpose had cured them because polls fell 2156 → 1370.
+Instrumented properly with a `net_stat_refused` counter (2026-07-30), **both claims fail**:
+
+- Current build, full screen: **refused = 0**. The exact historical configuration — baseline kernel
+  with `apps/vnc/vnc.c` at `08fa773^` — also gives **refused = 0**, and the stalls do not reproduce at
+  all. So the ring-space mechanism is measurably not what happened, and what did remains unknown; it
+  may have been environmental, since the container is a live desktop rather than fixed content.
+- **The 2156 → 1370 drop was *entirely* the paint tail**, not the app finally draining:
+
+| | pre-command | transfer | paint tail | cycle |
+|---|---|---|---|---|
+| old kernel + old transpose | 291 | 837 | **932** | 2.00 |
+| old kernel + fast transpose | 291 | 840 | **238** | 2.00 |
+
+  The transfer phase is unchanged to within noise. And running the *old* transpose against the *new*
+  kernel gives **refused = 213**, the identical count the fast transpose gives — so the drain rate does
+  not depend on the transpose at all. **`vnc`'s receive path and its paint path are decoupled**, which
+  is the thing the hypothesis got backwards.
+
+**Backpressure was never the old problem and is now the only one.** It appeared the moment the link
+outpaced the app, and at 213 refusals it is the sole thing between the link and 1.00 polls per data
+frame — worth ~3.5 s more.
 
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
 you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
