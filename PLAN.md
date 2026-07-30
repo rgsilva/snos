@@ -320,7 +320,12 @@ The `vnc` client made the link's speed the headline problem. **Progress so far, 
 |---|---|---|
 | baseline (2026-07-28) | ~80 s, 615 B/s | — |
 | after item 1, the asm (`91ec6ab`) | 57.8 s, ~860 B/s | 571 frames, 440 polls, 9.52 s |
-| after item 2, the bridge (`c64d8c3`) | **44.3 s** | **536 frames, 300 polls, 8.93 s** |
+| after item 2, the bridge (`c64d8c3`) | 44.3 s | 536 frames, 300 polls, 8.93 s |
+| after `LINK_FRAME` 128 (`9a68863`) | 44.3 s — *no change, see below* | 556 frames, 295 polls |
+| **after the phase fix (`19b0c55`)** | **32.3 s** | 561 frames, **295 polls** |
+
+**Total so far: ~80 s → 32.3 s.** The wire is now **38%** of that run and the console side ~48%, so
+the emulator link has stopped being the headline cost.
 
 `docs/performance.md` has the full method — read it before touching any of this, because it also
 records an attempt that failed and why. **Quote the table above, not the 80 s figure**: that number
@@ -520,6 +525,37 @@ modal fresh-to-fresh gap exactly 2 polls.** The 2-poll floor is reachable with t
 **The named suspects were all measurably innocent:** the two file hops cost **18 µs** total, and the
 gateway's 4 ms sleep contributes 0 ms median / 2.3 ms p95 of detection lag — under 7% of a 66.6 ms
 round trip. Every extra poll is "wait for the next video frame".
+
+**FIXED 2026-07-30 (`19b0c55`) — and the cycle is now at the protocol floor.** The old hook was on the
+console's read of `HOST_SEQ`, which cannot work: the bump it triggers lands *after* the read that
+triggered it has taken its value, so the frame stays invisible until the next poll. Hooking the read of
+**`MAGIC`** instead — `net_up()` → `link_wram_present()`, several instructions earlier in the same poll
+— puts the frame and the bumped counter in memory before `link_wram_poll` looks. That also makes
+clearing `rx_pending` in `exchange()` genuinely correct: a poll that reaches the `SNES_SEQ` write has
+certainly copied the mailbox. The same inference at the old hook was false, which *was* the bug.
+
+The ratchet is fixed by handing over the **newest** complete frame and dropping the ones behind it,
+which is safe *because of* stop-and-wait — the gateway builds no new data frame until the last is
+acked, so at most one queued frame can carry unseen payload. Tested by injecting a refusal on 1 poll
+in 7: delivery lag stayed at 1 throughout, where before a single such event cost a poll on every
+exchange for the rest of the session.
+
+| | before | after |
+|---|---|---|
+| 48 KB screen | 2660 frames, 44.33 s | **1940 frames, 32.33 s** (1.37×) |
+| steady-state cycle | 4.00 polls/data frame | **2.00 — the floor** |
+| deliveries never read | 1437 of 2873 (50.0%) | **0 of 2154** |
+| delivery lag | 2 polls on 2565 | **1 poll on all 2154** |
+
+`get` control unchanged at 295 polls, which is the guard against a fix that only helps by luck.
+A latent bug was also caught: the skip-to-end now rounds **up** to a frame boundary, where joining the
+stream mid-append misframed every frame for the rest of a session — a link that is up and carries
+garbage.
+
+**Mesen callback semantics, now pinned by measurement rather than assumption** (all three were guessed
+wrongly at least once): a **write** callback fires *before* the write reaches memory; a **read**
+callback fires *after* the value the CPU gets has been taken; a callback's own `emu.write` *is* visible
+to a later CPU read in the same video frame; and Lua reads do **not** re-enter memory callbacks.
 
 **Still open, and labelled as hypotheses because they were not measured:** three console stalls cost
 543 polls / 9.1 s (20% of the run) — seq 210 alone resent **441 times** with the console's ack frozen
