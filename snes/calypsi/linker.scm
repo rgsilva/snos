@@ -73,6 +73,15 @@
 
     ;; WRAM $7E2000-$7EDFFF: kernel far data (console shadow, ROMFS cache,
     ;; network rings).  $7EE000 is the link mailbox, $7EF000 the test mailbox.
+    ;;
+    ;; ONE BANK, AND kernel/netasm.s DEPENDS ON IT.  The link's frame copy is an
+    ;; MVN block move, whose bank operands are instruction immediates, so it
+    ;; hard-codes $7E for both ends -- which is sound only while every `zfar`
+    ;; object and the mailbox share a bank.  Today overflowing this region is a
+    ;; link error, which is the property that makes that safe.  Widening HiRAM
+    ;; across banks means netasm.s has to take its banks from the pointers
+    ;; instead; a 64-byte move to the wrong bank is not a failure the emulator
+    ;; will show you afterwards.
     (memory HiRAM
             (address (#x7e2000 . #x7edfff))
             (type RAM)

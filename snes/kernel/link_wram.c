@@ -28,16 +28,21 @@ int link_wram_present(void) { return LINK_MB_MAGIC == LINK_MAGIC; }
 
 int link_wram_poll(const uint8_t *tx, uint8_t *rx) {
   int got = 0;
-  int i;
 
-  /* Read first, then write: see the comment on link_poll in link.h. */
+  /* Read first, then write: see the comment on link_poll in link.h.
+   *
+   * These two copies are an MVN block move (kernel/netasm.s) rather than the
+   * obvious byte loop because this runs inside NMI: at -O0 the loop cost ~103
+   * cycles a byte, and 128 bytes of it per poll was most of a handler that ran
+   * for 55% of every frame. MVN does ~7. Nothing about the exchange changes —
+   * same 64 bytes, same order, same sequence bump. */
   if (LINK_MB_HOST_SEQ != last_host_seq) {
-    for (i = 0; i < LINK_FRAME; i++) rx[i] = LINK_MB_RX[i];
+    link_mb_move(rx, (const uint8_t *)LINK_MB_RX, LINK_FRAME);
     last_host_seq = LINK_MB_HOST_SEQ;
     got = 1;
   }
 
-  for (i = 0; i < LINK_FRAME; i++) LINK_MB_TX[i] = tx[i];
+  link_mb_move((uint8_t *)LINK_MB_TX, tx, LINK_FRAME);
   LINK_MB_SNES_SEQ = (uint16_t)(LINK_MB_SNES_SEQ + 1);
 
   return got;

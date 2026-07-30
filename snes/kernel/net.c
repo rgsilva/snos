@@ -151,14 +151,25 @@ static uint8_t net_ready;
 
 static void build_frame(void);
 
-static uint8_t checksum(const uint8_t *f) {
-  uint16_t s = 0;
-  int i;
-  for (i = 0; i < LINK_FRAME; i++) {
-    if (i != LINK_SUM) s = (uint16_t)(s + f[i]);
-  }
-  return (uint8_t)(s & 0xFFu);
-}
+/* kernel/netasm.s. The 8-bit sum of every frame byte except f[LINK_SUM], which
+ * is what the C loop this replaces computed:
+ *
+ *   for (i = 0; i < LINK_FRAME; i++) if (i != LINK_SUM) s += f[i];
+ *
+ * In assembly because it is called twice per poll from inside NMI, and at -O0
+ * each of those 64 far byte reads cost ~103 cycles. Two of them plus the frame
+ * copies had net_service() running for 55% of every frame while an application
+ * owned the PPU. n must be a non-zero multiple of 16; see the file for why. */
+extern uint8_t net_checksum(const uint8_t *f, uint16_t n);
+
+/* ...and here is that "must", made non-negotiable. The sum is unrolled sixteen
+ * bytes at a time, so a LINK_FRAME that is not a multiple of 16 would quietly
+ * sum only the whole blocks. The link would then die rather than corrupt — every
+ * frame failing a checksum both ends compute differently — but it would look
+ * like a dead cable, which is a bad way to find out. PLAN.md's item 3 raises
+ * LINK_FRAME to 256, so this WILL be edited; a negative array size stops the
+ * build if the new value does not fit the routine. */
+typedef char net_checksum_needs_16_byte_frames[(LINK_FRAME % 16) == 0 ? 1 : -1];
 
 void net_init(void) {
   int i, j;
@@ -680,7 +691,7 @@ static void build_frame(void) {
 
   while (o < LINK_FRAME) txframe[o++] = LINK_CH_PAD;
   txframe[LINK_SUM] = 0;
-  txframe[LINK_SUM] = checksum(txframe);
+  txframe[LINK_SUM] = net_checksum(txframe, LINK_FRAME);
 }
 
 void net_service(void) {
@@ -688,7 +699,7 @@ void net_service(void) {
 
   if (link_poll(txframe, rxframe)) {
     net_stat_rx_frames++;
-    if (rxframe[LINK_SUM] != checksum(rxframe)) {
+    if (rxframe[LINK_SUM] != net_checksum(rxframe, LINK_FRAME)) {
       /* Corrupt. Do nothing at all — no ack, no state change — and the peer
        * retransmits. Silently ignoring is the correct response; anything
        * cleverer risks acting on bytes we know are wrong. */
@@ -761,6 +772,6 @@ void net_service(void) {
     net_stat_resent++;
     txframe[LINK_ACK] = (uint8_t)(rx_next - 1);
     txframe[LINK_SUM] = 0;
-    txframe[LINK_SUM] = checksum(txframe);
+    txframe[LINK_SUM] = net_checksum(txframe, LINK_FRAME);
   }
 }

@@ -96,4 +96,18 @@ void link_serial_init(void);
 int link_serial_present(void);
 int link_serial_poll(const uint8_t *tx, uint8_t *rx);
 
+/* Move n bytes within WRAM bank $7E, as one MVN (kernel/netasm.s).
+ *
+ * The emulated backend's two frame copies are the reason it exists: they run
+ * inside NMI, and a C byte loop at -O0 costs ~103 cycles a byte there. Only the
+ * EMULATED backend has them — link_serial.c shifts bits straight out of the
+ * frame — so this is a test-rig speedup, which PLAN.md's performance section
+ * says is exactly the point.
+ *
+ * BOTH ENDS MUST BE IN BANK $7E: MVN's bank operands are immediates. That holds
+ * by construction here — linker.scm gives kernel far data one HiRAM region
+ * inside $7E, and LINK_MB above is fixed at $7EE000 — and netasm.s explains
+ * what to change if that ever stops being true. n must be at least 1. */
+void link_mb_move(void *dst, const void *src, uint16_t n);
+
 #endif
