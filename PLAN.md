@@ -453,6 +453,34 @@ Method, so it can be repeated: `build_frame` is `static` and has no symbol, so m
 temporarily and **re-read every address from `build/snos.map` afterwards** — `net_service` and
 `link_wram_poll` both moved when its linkage changed.
 
+**THE END-TO-END PATH IS ROUND-TRIP-BOUND, AND FRAME SIZE DOES NOT TOUCH IT — measured 2026-07-30.**
+This is the most important number in this section and it reorders what is left.
+
+A 48 KB `vnc` screen through the real bridge, real `gateway.py` and a real VNC server takes
+**44.33 s / 2660 frames at `LINK_FRAME` 64 — and 44.33 s / 2660 frames at 128. Bit-identical.**
+
+| | hermetic `test-vnc` | end-to-end, real bridge |
+|---|---|---|
+| 64 → 128 | 10427 → 6271 frames (**1.66×**) | 2660 → 2660 frames (**1.00×**) |
+| what binds it | frame size | the round trip |
+
+**Do not conflate those two harnesses.** The hermetic one has no file hop and no second process, so it
+is frame-size-bound and shows the full 1.66×; the real one is round-trip-bound and shows nothing. A
+1.66× measured on `test-vnc` is *not* a user-visible speed-up, and this table exists because I nearly
+reported it as one.
+
+Why: frames are only **13.8% full** end-to-end — 17.1 payload bytes per frame against a 124-byte
+capacity. The old "frames are already 100% full" note was measured on `get`, and never held for `vnc`.
+The cause is in `gateway.py`'s `next_out()`: `if any_data: self.awaiting = True` — **the gateway is
+stop-and-wait on its own send side** and will not build a new frame until the console acks, resending
+the same one meanwhile. So throughput is payload ÷ round trip, the round trip is ~7 console polls, and
+124 bytes / ~117 ms = ~1060 B/s against 1109 measured. Doubling the payload doubled nothing, which
+means the round trip scales with frame size and cancels the gain.
+
+**So item 4 is the lever, not item 3.** A window is the one change that removes the round-trip
+dependence rather than trying to carry more per round trip. Item 3b — find where those ~7 polls go —
+is the cheap prerequisite, and it is now the top of this list rather than a footnote.
+
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
 you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
 this section originally had). **The framing, seq/ack and stop-and-wait are the contract; the file
