@@ -35,17 +35,31 @@
  * ----------------------------------------------------------- the honest cost
  *
  * The SNES stores 8bpp as EIGHT BITPLANES, and RFB delivers linear bytes, so
- * every pixel has to be transposed. That sounds fatal and is not: the link
- * moves ~615 B/s while the transpose runs at roughly a screen per two seconds,
- * so the wire is thirty to a hundred times slower than the conversion. Even at
- * M7's 20 KB/s they are comparable. The CPU was never the problem.
+ * every pixel has to be transposed. That is affordable but not free, and the
+ * figure that used to be here — "roughly a screen per two seconds" — was an
+ * estimate and was wrong by an order of magnitude. MEASURED: rebuilding all 768
+ * tiles takes about 1015 frames, so seventeen seconds a screen, or 1.3 frames a
+ * tile at -O0. The link needs eighty seconds for that screen, so the wire is
+ * still the bottleneck — by about five times, not a hundred. At M7's 20 KB/s the
+ * transpose becomes the bottleneck outright, and it is the thing to hand-write
+ * in 65816 when that day comes.
  *
- * What it does cost is memory. Server rectangles are NOT tile-aligned — a real
+ * What it also costs is memory. Server rectangles are NOT tile-aligned — a real
  * server sent `123x21 at (133,104)` — so a rectangle lands across partial
  * tiles, and a tile cannot be rebuilt from a fragment. So the client keeps a
  * linear shadow of the framebuffer, writes rectangles into that, and rebuilds
  * whole tiles from it. 256x192 is 48 KB, which is why this lives in the app
  * arena in bank $7F rather than anywhere near bank $00's eight.
+ *
+ * ------------------------------------------------- when it is allowed to draw
+ *
+ * The one thing here that is genuinely counter-intuitive: AN APPLICATION ON
+ * THIS MACHINE HAS NO VBLANK. NMI moves a link frame on every one of them while
+ * an app owns the PPU, and at -O0 that runs from the top of the window into the
+ * middle of the next frame. So every VRAM and OAM write in this file happens
+ * inside a forced blank over scanlines 192-223 — the strip below the picture,
+ * which is deliberately black — rather than in a vblank that does not exist. See
+ * "the write window" below; it answers both of the bugs this app has had.
  */
 #include "snos_abi.h"
 
@@ -62,9 +76,13 @@
  *   $0000-$BFFF  768 image tiles, 8bpp
  *   $C000-$DFFF  cursor sprite (OBSEL base 3)
  *   $E000-$E7FF  BG1 tilemap
+ *   $F000-$F03F  one all-zero tile, for the display below the picture
  */
 #define VRAM_OBJ 0xC000
 #define VRAM_MAP 0xE000
+#define VRAM_BLANK 0xF000
+/* 960 — and a tilemap entry's index field is 10 bits, so it reaches. */
+#define TILE_BLANK (VRAM_BLANK / 64)
 
 #define R8(a) (*(volatile __far uint8_t *)(uint32_t)(a))
 
@@ -77,10 +95,25 @@
 #define ENC_RAW 0
 #define ENC_COPYRECT 1
 
+/* How many tiles are staged in WRAM and offered to one write window.
+ *
+ * Eight, and eight is generous. console.h explains why byte-counting a budget
+ * gives an answer ten times too big — the register setup costs about nine times
+ * the transfer at -O0, so transfers per window are scarce, not bytes.
+ * Then the window here is smaller again than the console's; see below.
+ *
+ * The binding constraint is the other way round anyway: the transpose runs at
+ * about 1.3 frames per tile, so the display need only move ONE tile a frame to
+ * stay ahead of the thing feeding it. Eight small transfers are also cheaper to
+ * abandon halfway than one big coalesced one, which is what the first attempt
+ * tried and what never fitted. */
+#define BATCH 8
+
 static char args[SNOS_ARGV_MAX];
 static uint8_t fb[FB_SIZE];       /* linear shadow, bank $7F */
 static uint8_t dirty[NTILES];
-static uint16_t tile[32];         /* one tile, as PPU words */
+static uint16_t stage[BATCH][32]; /* tiles as PPU words, built before a window */
+static uint16_t stage_t[BATCH];   /* which tile each staged entry is */
 static uint8_t hdr[32];
 static uint16_t ch;
 static uint16_t cx, cy;
@@ -96,6 +129,92 @@ static int poll_input(void);
 static void vaddr(uint16_t w) {
   R8(0x2116) = (uint8_t)w;
   R8(0x2117) = (uint8_t)(w >> 8);
+}
+
+/* --------------------------------------------------------- the write window
+ *
+ * THERE IS NO USABLE VBLANK HERE, and that is measured, not assumed. It is the
+ * most surprising thing about an application that paints and downloads at the
+ * same time on this machine, so it is worth stating plainly:
+ *
+ *   NMI runs net_service on EVERY frame while an application owns the PPU. The
+ *   kernel defers it only for the console — con_dirty_pending() returns 0 while
+ *   gfx_owned, deliberately, and `vnc` is the very app whose link died in the
+ *   handshake when it did not. NMI fires at the top of vblank, and at -O0 that
+ *   handler runs until about scanline 100 of the NEXT frame.
+ *
+ * So a foreground that waits for vblank is handed a window that has already
+ * gone. The first attempt at fixing the flicker did exactly that, and
+ * `make test-vnc` caught it: it logs the scanline of every DMA, every one landed
+ * between 104 and 122 — the middle of the picture — and the vblank check failed
+ * on 96 batches out of 96. con_flush's ten transfers per window are ten only
+ * because the kernel gets NMI out of its own way first, and an app cannot.
+ *
+ * So the app takes a window of its own. The picture is 192 lines of a 224-line
+ * display, and the tilemap rows below it point at an all-zero tile — so
+ * scanlines 192-223 are solid black whatever else is happening. A forced blank
+ * asserted and released inside that strip covers nothing anybody can see, VRAM
+ * and OAM are both writable for all of it, and NMI is nowhere near it.
+ *
+ * WIN_END leaves margin. One 64-byte transfer and its check cost about four
+ * scanlines at -O0, and a blank still asserted when vblank arrived would be held
+ * by NMI across the top hundred lines of the next frame — which is precisely the
+ * artefact all of this exists to remove. */
+#define WIN_TOP FB_H     /* 192: the first scanline below the picture */
+#define WIN_END 210      /* offer no further transfer past here */
+
+/* The PPU's V counter. Read $213F to reset the low/high toggle, $2137 to latch,
+ * then $213D twice. */
+static uint16_t vcount(void) {
+  uint16_t v;
+  R8(0x213F);
+  R8(0x2137);
+  v = (uint16_t)R8(0x213D);
+  return (uint16_t)(v | ((uint16_t)(R8(0x213D) & 1) << 8));
+}
+
+/* Park the beam at the TOP of the strip — leaving whichever window we may
+ * already be standing in — and then blank. Entering from above is what makes "at
+ * least one transfer always lands" true, and therefore what makes the sweep in
+ * flush_dirty finite. */
+static void win_open(void) {
+  uint16_t guard = 0;
+  /* Both waits are bounded, for the reason pad_latch's are: a spin that can
+   * never finish hangs the machine, and ~4000 iterations is around ten frames of
+   * them. If NMI ever grew to swallow the strip as well, this would paint in the
+   * wrong place — visibly — rather than stop. */
+  while (vcount() >= WIN_TOP && ++guard < 4000u) ;
+  guard = 0;
+  while (vcount() < WIN_TOP && ++guard < 4000u) ;
+  R8(0x2100) = 0x8F;
+}
+
+static void win_close(void) { R8(0x2100) = 0x0F; }
+
+static int win_room(void) {
+  uint16_t v = vcount();
+  return v >= WIN_TOP && v < WIN_END;
+}
+
+/* One DMA from the WRAM staging buffer into VRAM, channel 0.
+ *
+ * Channel 0 is free: con_flush owns it but is a no-op while an application holds
+ * the PPU, and the keyboard panel's HDMA (channels 3/4/5) is disabled for the
+ * same reason. Nothing in NMI does DMA at all, so there is no one to collide
+ * with mid-setup. */
+static void dma_tiles(uint16_t vword, const uint16_t *src, uint16_t nwords) {
+  uint32_t s = (uint32_t)src;
+  uint16_t bytes = (uint16_t)(nwords * 2);
+  R8(0x2116) = (uint8_t)vword;
+  R8(0x2117) = (uint8_t)(vword >> 8);
+  R8(0x4300) = 0x01;                   /* A->B, mode 1: low,high -> $2118,$2119 */
+  R8(0x4301) = 0x18;
+  R8(0x4302) = (uint8_t)s;
+  R8(0x4303) = (uint8_t)(s >> 8);
+  R8(0x4304) = (uint8_t)(s >> 16);     /* source bank, $7F */
+  R8(0x4305) = (uint8_t)bytes;
+  R8(0x4306) = (uint8_t)(bytes >> 8);
+  R8(0x420B) = 0x01;
 }
 
 /* ------------------------------------------------------------------- stream */
@@ -299,7 +418,26 @@ static void load_cursor(void) {
   R8(0x2122) = 0x00; R8(0x2122) = 0x00;   /* black */
 }
 
+/* Move the cursor sprite — WHILE BLANKING, which is the whole of the second bug.
+ *
+ * OAM is not like VRAM. A write to $2104 during active display does not land
+ * where OAMADDR points: sprite evaluation is using the OAM address counter
+ * itself, so the byte goes wherever the renderer happens to be. The nine writes
+ * below therefore did nothing at all, and the cursor sat where it was drawn.
+ *
+ * That is precisely why ESC worked and the arrow keys did not, and it is worth
+ * spelling out because it looked exactly like a lost keystroke and sent me
+ * hunting through Mesen's bindings, kbdbridge's key names and the kernel's d-pad
+ * mapping — all three of which were fine. ESC has an effect that is not an OAM
+ * write; an arrow key has nothing else. The harness settled it in one run: after
+ * a RIGHT, OAM byte 0 was unchanged at 128 while the app's own pointer event
+ * reported x=136. The key arrived, `cx` moved, and only the OAM write was lost.
+ *
+ * The fix is the same window the tiles use, for the same reason: below the
+ * picture, forced blank, OAM writable. One frame of latency per move, and only
+ * when something actually moved. */
 static void place_cursor(void) {
+  win_open();
   R8(0x2102) = 0;
   R8(0x2103) = 0;
   R8(0x2104) = (uint8_t)cx;
@@ -309,6 +447,7 @@ static void place_cursor(void) {
   R8(0x2102) = 0x00;
   R8(0x2103) = 0x01;
   R8(0x2104) = (uint8_t)((cx > 255) ? 0x01 : 0x00);
+  win_close();
 }
 
 static void hide_sprites(void) {
@@ -326,12 +465,25 @@ static void hide_sprites(void) {
 static void setup_ppu(void) {
   uint16_t r, c;
 
+  /* One tile of solid black, for the four displayed rows below the picture.
+   *
+   * They used to show tile 0 — the top-left tile of the desktop — repeated
+   * thirty-two times across the bottom of the screen, which was its own small
+   * eyesore. Making the strip genuinely black also makes it USEFUL: it is where
+   * every VRAM and OAM write in this app now happens, under a forced blank that
+   * covers only these lines. See "the write window" above. */
+  vaddr(VRAM_BLANK >> 1);
+  for (r = 0; r < 32; r++) {
+    R8(0x2118) = 0;
+    R8(0x2119) = 0;
+  }
+
   /* Identity tilemap: tile (r,c) shows tile number r*32+c, so the tile grid is
    * the pixel grid and a shadow offset converts to a tile index by shifting. */
   vaddr(VRAM_MAP >> 1);
   for (r = 0; r < 32; r++) {
     for (c = 0; c < 32; c++) {
-      uint16_t t = (r < TILES_H) ? (uint16_t)(r * TILES_W + c) : 0;
+      uint16_t t = (r < TILES_H) ? (uint16_t)(r * TILES_W + c) : TILE_BLANK;
       R8(0x2118) = (uint8_t)t;
       R8(0x2119) = (uint8_t)(t >> 8);
     }
@@ -360,12 +512,17 @@ static void setup_ppu(void) {
   R8(0x2100) = 0x0F;
 }
 
-/* Rebuild one tile from the shadow and push it to VRAM.
+/* Rebuild one tile from the shadow into the staging buffer.
  *
  * This is the transpose: the shadow is linear bytes, the PPU wants eight
  * bitplanes, and a tile is 8 rows of 8 pixels producing 32 words in the order
- * (planes 0&1) x8, (planes 2&3) x8, (4&5) x8, (6&7) x8. */
-static void flush_tile(uint16_t t) {
+ * (planes 0&1) x8, (planes 2&3) x8, (4&5) x8, (6&7) x8.
+ *
+ * It runs OUTSIDE any window, which is why the result goes to WRAM rather than
+ * straight to $2118: measured, the transpose plus 64 register writes cost about
+ * 1.3 FRAMES per tile at -O0, so a tile has never fitted in a window and never
+ * will. Staged in WRAM it becomes one DMA, which does. */
+static void build_tile(uint16_t t, uint16_t *out) {
   uint16_t tx = (uint16_t)(t % TILES_W), ty = (uint16_t)(t / TILES_W);
   uint16_t base = (uint16_t)(ty * 8u * FB_W + tx * 8u);
   uint16_t r, i;
@@ -385,38 +542,91 @@ static void flush_tile(uint16_t t) {
       if (v & 0x40) p6 = (uint8_t)(p6 | bit);
       if (v & 0x80) p7 = (uint8_t)(p7 | bit);
     }
-    tile[r] = (uint16_t)(p0 | ((uint16_t)p1 << 8));
-    tile[8 + r] = (uint16_t)(p2 | ((uint16_t)p3 << 8));
-    tile[16 + r] = (uint16_t)(p4 | ((uint16_t)p5 << 8));
-    tile[24 + r] = (uint16_t)(p6 | ((uint16_t)p7 << 8));
-  }
-
-  vaddr((uint16_t)(t * 32u));
-  for (i = 0; i < 32; i++) {
-    R8(0x2118) = (uint8_t)tile[i];
-    R8(0x2119) = (uint8_t)(tile[i] >> 8);
+    out[r] = (uint16_t)(p0 | ((uint16_t)p1 << 8));
+    out[8 + r] = (uint16_t)(p2 | ((uint16_t)p3 << 8));
+    out[16 + r] = (uint16_t)(p4 | ((uint16_t)p5 << 8));
+    out[24 + r] = (uint16_t)(p6 | ((uint16_t)p7 << 8));
   }
 }
 
-static void flush_dirty(void) {
-  uint16_t t;
-  /* Re-assert VMAIN on every flush, not once at startup. Anything that runs
+/* Push a staged batch through one write window. Returns how many tiles landed.
+ *
+ * A tile is only marked clean once its transfer has been issued inside the
+ * window, which is con_flush's rule and there for the same reason: a write the
+ * hardware ignores leaves no trace except a stale square on screen for ever, so
+ * the flag must follow the transfer rather than the intention. */
+static uint16_t flush_batch(uint16_t n) {
+  uint16_t i, done = 0;
+
+  /* Re-assert VMAIN on every pass, not once at startup. Anything that runs
    * between two flushes — and sys_yield() reaches the console and the keyboard
    * panel — can leave the VRAM increment mode somewhere else, and the result is
    * scrambled bitplanes on whichever tiles were written afterwards: scattered
    * noise on an otherwise black screen. One register write is cheaper than
    * reasoning about who else might have touched it. */
   R8(0x2115) = 0x80;
-  /* Forced blank: VRAM takes writes only while blanking, and a full screen is
-   * far more than one vblank's worth. The screen goes dark for the duration,
-   * which on a first update is the honest cost of 48 KB arriving. */
-  R8(0x2100) = 0x8F;
-  for (t = 0; t < NTILES; t++) {
-    if (!dirty[t]) continue;
-    flush_tile(t);
-    dirty[t] = 0;
+  win_open();
+  for (i = 0; i < n; i++) {
+    if (!win_room()) break;
+    dma_tiles((uint16_t)(stage_t[i] * 32u), stage[i], 32);
+    dirty[stage_t[i]] = 0;
+    done++;
   }
-  R8(0x2100) = 0x0F;
+  win_close();
+  return done;
+}
+
+/* Paint every dirty tile, without ever blanking anything that is on screen.
+ *
+ * The forced blank this replaces was the flicker. `R8(0x2100) = 0x8F` around the
+ * whole flush is correct — VRAM takes writes only while blanking — but
+ * flush_dirty runs once per RECEIVED RECTANGLE, and a rectangle is hundreds of
+ * tiles at 1.5 frames each, so the WHOLE SCREEN went dark and light again for
+ * every one of them. Measured against a server sending a screen as six bands:
+ * six episodes of 207 frames, 1242 frames of black alternating with the picture.
+ * That is exactly the "alternating between data and black" Ricardo saw.
+ *
+ * The cost is unchanged — the transpose was always the expensive part — and the
+ * blanking now happens where nothing is displayed. */
+static void flush_dirty(void) {
+  uint16_t from = 0;
+  int missed = 0;
+
+  for (;;) {
+    uint16_t t, n = 0;
+    for (t = from; t < NTILES && n < BATCH; t++) {
+      if (!dirty[t]) continue;
+      build_tile(t, stage[n]);
+      stage_t[n] = t;
+      n++;
+    }
+    from = t;
+    if (n && flush_batch(n) < n) missed = 1;
+    if (from >= NTILES) {
+      /* Normally one linear sweep and done. Tiles a window ran out on are still
+       * dirty, so sweep again — and since every window lands at least one tile,
+       * every sweep makes progress. */
+      if (!missed) return;
+      from = 0;
+      missed = 0;
+    }
+  }
+}
+
+/* The one blank that is honest: VRAM still holds the console's font when an app
+ * takes the PPU, so the tiles are zeroed before the display is turned back on.
+ *
+ * No transpose and no window to wait for — every tile is the same 64 zero bytes
+ * and the display is not on yet — so this is a couple of frames. Painting 768
+ * black tiles through flush_dirty instead took 1015 frames of blank screen at
+ * startup, and every one of them was spent transposing zeroes. */
+static void clear_tiles(void) {
+  uint16_t n, i, t;
+  for (n = 0; n < BATCH; n++)
+    for (i = 0; i < 32; i++) stage[n][i] = 0;
+  R8(0x2115) = 0x80;
+  for (t = 0; t < NTILES; t = (uint16_t)(t + BATCH))
+    dma_tiles((uint16_t)(t * 32u), stage[0], (uint16_t)(BATCH * 32u));
 }
 
 static void mark(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
@@ -439,21 +649,39 @@ static void mark(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
  *
  * Returns 1 if the user asked to leave. */
 static int poll_input(void) {
+  int moved = 0;
   for (;;) {
     int c = (int)sys_pollkey();
-    if (c == (int)SYS_ERR) return 0;
+    if (c == (int)SYS_ERR) break;
     if (c == 0x1B) {
       quit = 1;
       return 1;
     }
-    if (c == SNOS_KEY_LEFT) { cx = (uint16_t)(cx >= 8 ? cx - 8 : 0); }
-    else if (c == SNOS_KEY_RIGHT) { cx = (uint16_t)(cx < FB_W - 8 ? cx + 8 : FB_W - 1); }
-    else if (c == SNOS_KEY_UP) { cy = (uint16_t)(cy >= 8 ? cy - 8 : 0); }
-    else if (c == SNOS_KEY_DOWN) { cy = (uint16_t)(cy < FB_H - 8 ? cy + 8 : FB_H - 1); }
-    else if (c == ' ') { pointer(cx, cy, 1); pointer(cx, cy, 0); continue; }
-    else continue;
-    place_cursor();
+    if (c == SNOS_KEY_LEFT) {
+      cx = (uint16_t)(cx >= 8 ? cx - 8 : 0);
+      moved = 1;
+    } else if (c == SNOS_KEY_RIGHT) {
+      cx = (uint16_t)(cx < FB_W - 8 ? cx + 8 : FB_W - 1);
+      moved = 1;
+    } else if (c == SNOS_KEY_UP) {
+      cy = (uint16_t)(cy >= 8 ? cy - 8 : 0);
+      moved = 1;
+    } else if (c == SNOS_KEY_DOWN) {
+      cy = (uint16_t)(cy < FB_H - 8 ? cy + 8 : FB_H - 1);
+      moved = 1;
+    } else if (c == ' ') {
+      /* Press and release at the cursor. The server moves its own pointer there
+       * as a side effect, which is why we do not stream every cursor step: each
+       * one would cost a framebuffer update of the area it left. */
+      pointer(cx, cy, 1);
+      pointer(cx, cy, 0);
+    }
   }
+  /* Drain the queue first, THEN place the sprite, once. Every key of a held
+   * repeat would otherwise wait for its own window, and auto-repeat delivers
+   * several per frame. */
+  if (moved) place_cursor();
+  return 0;
 }
 
 /* ------------------------------------------------------------------ updates */
@@ -624,7 +852,7 @@ int main(void) {
   }
   say("\nESC quits\n");
 
-  /* Start from a known screen: clear the shadow and paint every tile once, so
+  /* Start from a known screen: clear the shadow, and clear VRAM to match it, so
    * anything the server has not sent yet is black rather than whatever the
    * console left in VRAM. "Not arrived" then looks like not arrived. */
   /* One index, no multiply. The nested version of this guarded against a 16-bit
@@ -636,7 +864,7 @@ int main(void) {
     uint16_t k;
     for (k = 0; k < FB_SIZE; k++) fb[k] = 0;
   }
-  for (i = 0; i < NTILES; i++) dirty[i] = 1;
+  for (i = 0; i < NTILES; i++) dirty[i] = 0;
 
   say("receiving the first screen - about 80s on this link\n");
   say("it paints as it arrives; ESC quits\n");
@@ -657,39 +885,25 @@ int main(void) {
   load_palette();
   hide_sprites();
   load_cursor();
-  place_cursor();
+  clear_tiles();
   setup_ppu();
-  flush_dirty();
+  /* After setup_ppu, so the display is already on when the cursor lands: OAM
+   * writes are only reliable while blanking, and place_cursor waits for a vblank
+   * to get that. Under the forced blank above it would work either way; doing it
+   * here keeps one rule instead of two. */
+  place_cursor();
 
   while (!quit) {
     if (!request(first ? 0 : 1)) break;
     first = 0;
     if (!pump()) break;
+    /* Rectangles are painted as they arrive, inside read_update; this catches
+     * anything a CopyRect left dirty, since that path marks without painting. */
     flush_dirty();
-
     /* Drain the keys that arrived while a screenful was being read. The cursor
      * moves locally with no round trip, which is the whole reason it is a
      * sprite — at 615 B/s a server-drawn cursor would lag by a second. */
-    for (;;) {
-      int c = (int)sys_pollkey();
-      if (c == (int)SYS_ERR) break;
-      if (c == 0x1B) {
-        quit = 1;
-        break;
-      }
-      if (c == SNOS_KEY_LEFT) { cx = (uint16_t)(cx >= 8 ? cx - 8 : 0); }
-      else if (c == SNOS_KEY_RIGHT) { cx = (uint16_t)(cx < FB_W - 8 ? cx + 8 : FB_W - 1); }
-      else if (c == SNOS_KEY_UP) { cy = (uint16_t)(cy >= 8 ? cy - 8 : 0); }
-      else if (c == SNOS_KEY_DOWN) { cy = (uint16_t)(cy < FB_H - 8 ? cy + 8 : FB_H - 1); }
-      else if (c == ' ') {
-        /* Press and release at the cursor. The server moves its own pointer
-         * there as a side effect, which is why we do not stream every cursor
-         * step: each one would cost a framebuffer update of the area it left. */
-        pointer(cx, cy, 1);
-        pointer(cx, cy, 0);
-      }
-      place_cursor();
-    }
+    poll_input();
   }
 
   R8(0x2100) = 0x8F;

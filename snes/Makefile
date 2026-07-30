@@ -48,7 +48,7 @@ KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps bridge test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager clean
+.PHONY: all kernel apps bridge test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager test-vnc clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -201,6 +201,16 @@ test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/history.lua
+
+# Deliberately NOT in `test`: it receives a whole 48 KB framebuffer through the
+# emulated link, which is two minutes on its own — as long as the other twelve
+# together. Run it when touching apps/vnc or anything an application reaches for
+# to paint: it is the only coverage `vnc` has, and it asserts the two things that
+# went wrong there, that the picture is right THROUGH THE TILEMAP and that no
+# forced blank lands where the picture is displayed.
+test-vnc: $(BUILD)/snos.sfc $(BUILD)/test/vnc.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/vnc.lua
 
 test-shadow: $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
 	$(call check_env)

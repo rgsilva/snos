@@ -372,12 +372,18 @@ that name only means anything *inside* a container.
 ### What to expect
 
 The first screen is a full 48 KB framebuffer: **about 80 seconds at the
-emulator's 615 B/s**, and roughly 2.5 at M7's cable speed. It paints in one go
-when it arrives rather than progressively, because a tile cannot be built from
-part of a rectangle.
+emulator's 615 B/s**, and roughly 2.5 at M7's cable speed. It **paints
+progressively**, one server rectangle at a time, so you watch it arrive.
 
 After that, updates are incremental — a still screen sends **nothing at all**,
 measured. Anything that changes sends only the rectangles that changed.
+
+The bottom 32 scanlines are black. The picture is 192 lines of a 224-line
+display, and that strip is not just leftover: it is where every VRAM and OAM
+write happens (see below), so it has to stay black.
+
+Arrow keys move the cursor and space clicks, from **either** a host keyboard
+through the bridge or a controller d-pad. Typing does not work yet.
 
 ### Sanity checks if it does not work
 
@@ -416,8 +422,49 @@ panel's HDMA still rewriting the BG tilemap base every scanline, which makes the
 PPU fetch tiles from the wrong address: flickering noise over a picture that is
 correct in VRAM. `$2115` should read `80` whenever tile data is being written.
 
+**`$2100` toggling between `8F` and `0F` many times a second is EXPECTED** and is
+not the flicker. It used to be: the app held forced blank across a whole
+rectangle's repaint and repaints once per rectangle, so the screen went black for
+seconds at a time, several times a screen — 1242 frames of black in one measured
+run. Now each blank lasts about twenty scanlines and lands entirely between
+scanlines 192 and 224, below the picture, where nothing is displayed.
+
+**Why blank at all, when the rule is "write VRAM in vblank"?** Because an
+application does not get one. NMI moves a link frame on every frame while an app
+owns the PPU — `con_dirty_pending()` returns 0 while `gfx_owned`, deliberately,
+or the link dies mid-handshake — and at `-O0` that handler runs from the top of
+vblank until about scanline 100 of the *next* frame. The first attempt at fixing
+the flicker waited for vblank and `make test-vnc` caught it: every DMA landed at
+scanline 104-122, in the middle of the picture, and the vblank check failed on 96
+batches out of 96. `con_flush`'s ten-transfers-per-vblank budget only exists
+because the kernel gets NMI out of its own way first.
+
+**The same applies to OAM, and cost an afternoon.** A write to `$2104` during
+active display does not go where `OAMADDR` points — sprite evaluation owns the
+address counter — so `vnc`'s cursor never moved, while ESC (which is not an OAM
+write) worked perfectly. It looks exactly like a lost keystroke, and it is not:
+check the bindings and the key names once, then suspect the write.
+
+### Automated coverage
+
+```sh
+cd snos/snes && make test-vnc
+```
+
+`test/vnc.lua` is a **Lua RFB server** behind the Lua gateway — the real protocol,
+not a stub — and it asserts the two failures above: the picture is checked by
+following the tilemap the way the PPU does, and every forced blank is checked for
+falling inside the strip. It also drives both input paths and reads the cursor
+back out of OAM. Not part of `make test`: it moves a whole 48 KB framebuffer
+through the emulated link, which takes as long as the other twelve tests
+together.
+
 ### Known gaps
 
 No keyboard yet — the cursor and clicks work, typing does not. `CopyRect` is
 advertised to the server but its path has never executed; it will fire the first
-time something on screen scrolls.
+time something on screen scrolls, and `make test-vnc` does not cover it either.
+
+The transpose costs **1.3 frames per tile at -O0**, so a full screen is 17
+seconds of CPU against 80 seconds of wire. Fine now; at M7's cable speed it
+becomes the bottleneck, and it is the obvious candidate for hand-written 65816.

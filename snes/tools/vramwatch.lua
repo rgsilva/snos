@@ -16,8 +16,9 @@
 -- $2107  BG1 tilemap base. Should be written once by the app and then left.
 -- $2115  VRAM address increment. If this is not $80 when the app writes tile
 --        data, every 16-bit write splits across two addresses.
+-- $2100  INIDISP. See below: WHERE it is written matters, not whether.
 local WATCH = { [0x420C] = "$420C HDMA-enable", [0x2107] = "$2107 BG1SC",
-                [0x2115] = "$2115 VMAIN", [0x2100] = "$2100 INIDISP" }
+                [0x2115] = "$2115 VMAIN" }
 local seen = {}
 
 for addr, name in pairs(WATCH) do
@@ -30,4 +31,36 @@ for addr, name in pairs(WATCH) do
   end, emu.callbackType.write, addr, addr, emu.cpuType.snes)
 end
 
-emu.log("vramwatch: watching $420C $2107 $2115 $2100 for changes")
+-- $2100 gets its own rule, because "it changed" stopped being the interesting
+-- fact.
+--
+-- An application on this machine has NO VBLANK to write VRAM or OAM in — NMI
+-- moves a link frame on every frame while an app owns the PPU, and at -O0 that
+-- runs from the top of the window into the middle of the next frame. So `vnc`
+-- writes under a deliberate forced blank on the scanlines BELOW its picture,
+-- which are black anyway, and toggles $2100 several times a second on purpose.
+-- Logging every change buries the log; logging only the ones that fall where the
+-- picture is displayed turns this into a direct detector for the flicker that
+-- used to be there. Nothing should ever be printed here after the app's display
+-- comes on.
+local STRIP_TOP, STRIP_END = 192, 225
+local blank_at = nil
+
+emu.addMemoryCallback(function(_, value)
+  local ok, st = pcall(emu.getState)
+  local sl = (ok and st and st["ppu.scanline"]) or -1
+  if value >= 0x80 then
+    blank_at = sl
+  elseif blank_at then
+    if blank_at < STRIP_TOP or blank_at >= STRIP_END or
+       sl < STRIP_TOP or sl >= STRIP_END then
+      emu.log(string.format(
+        "$2100 forced blank over scanlines %d..%d - THE PICTURE IS BLANKED",
+        blank_at, sl))
+    end
+    blank_at = nil
+  end
+end, emu.callbackType.write, 0x2100, 0x2100, emu.cpuType.snes)
+
+emu.log("vramwatch: watching $420C $2107 $2115 for changes, and $2100 for a " ..
+        "forced blank outside scanlines 192-224")
