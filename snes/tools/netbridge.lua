@@ -45,9 +45,16 @@
 --   A poll is net_service(), and it touches the mailbox in this order every time:
 --
 --     net_up() -> link_present() -> link_wram_present()   reads LINK_MB_MAGIC
---     link_poll() -> link_wram_poll()                     reads LINK_MB_HOST_SEQ,
---                                                         copies RX, writes TX,
---                                                         bumps LINK_MB_SNES_SEQ
+--     link_recv() -> link_wram_recv()                     reads LINK_MB_HOST_SEQ,
+--                                                         copies RX
+--     (the frame is processed and the answer built, in between)
+--     link_send() -> link_wram_send()                     writes TX, bumps
+--                                                         LINK_MB_SNES_SEQ
+--
+--   The gap in the middle is deliberate and it halves the cycle: the ack for the
+--   frame received above is built before the send below, so it leaves on the poll
+--   that received it instead of the next one. Nothing in that gap touches the
+--   mailbox, which is what keeps the rx_pending inference below sound.
 --
 --   The magic read is therefore the FIRST thing a poll does, and loading the
 --   mailbox there is what makes the console see the frame on the poll that asked
@@ -250,7 +257,7 @@ local function exchange()
   -- SNES -> gateway.
   --
   -- Safe by construction, and this is the linchpin of the whole change:
-  -- link_wram_poll() (kernel/link_wram.c) copies the entire 64-byte frame into
+  -- link_wram_send() (kernel/link_wram.c) copies the entire frame into
   -- LINK_MB_TX and only THEN bumps the sequence counter, so a callback on the
   -- counter cannot see a half-written frame.
   local bytes = {}
@@ -267,7 +274,7 @@ end
 -- entire reason this callback moved on 2026-07-30.
 --
 -- WHY NOT THE HOST_SEQ READ, WHICH IS WHERE THIS USED TO SIT
---   link_wram_poll() copies RX only `if (LINK_MB_HOST_SEQ != last_host_seq)`, so
+--   link_wram_recv() copies RX only `if (LINK_MB_HOST_SEQ != last_host_seq)`, so
 --   the obvious hook is that read: answer the question in the instant it is asked.
 --   It does not work, and the reason is the one Mesen fact that is the mirror
 --   image of the one documented on the write callback below:
@@ -286,7 +293,7 @@ end
 --   dropped on plus the poll its retransmission arrived on.
 --
 --   Hooking the magic read fixes it because the two accesses are separate
---   instructions: the bump lands in memory before link_wram_poll() reads HOST_SEQ,
+--   instructions: the bump lands in memory before link_wram_recv() reads HOST_SEQ,
 --   the change test sees it, and the console copies the frame that was written
 --   microseconds earlier in the same poll. Every poll then consumes exactly one
 --   frame and nothing is dropped. (Measured, same run: a callback write IS visible
@@ -335,7 +342,7 @@ emu.addMemoryCallback(deliver, emu.callbackType.read, 0x7EE000, 0x7EE000,
 --   of extra latency on every exchange from then until the session ends.
 --
 --   Keying on the low byte alone and acting unconditionally avoids all of it.
---   The counter is only ever written by the sequence bump in link_wram_poll() and
+--   The counter is only ever written by the sequence bump in link_wram_send() and
 --   the zeroing in link_wram_init(), and each of those writes the low byte
 --   exactly once, so this fires exactly once per poll — with no assumption about
 --   which byte the compiler emits first, and none about when Mesen applies it.

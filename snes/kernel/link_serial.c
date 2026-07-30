@@ -45,8 +45,18 @@ void link_serial_init(void) {}
  * the network layer reports "no gateway" instead of hanging on a dead port. */
 int link_serial_present(void) { return 0; }
 
-int link_serial_poll(const uint8_t *tx, uint8_t *rx) {
-  (void)tx;
+/* Split into halves to match link.h, and the split costs this backend nothing.
+ *
+ * A synchronous cable cannot receive before it transmits — the bits cross on the
+ * wire — so link_serial_recv() hands back whatever the LAST exchange clocked in
+ * and link_serial_send() performs the exchange. That is exactly what a single
+ * link_serial_poll() would have done, with the same one-frame-per-exchange
+ * behaviour and the same intrinsic two-poll round trip. Only the mailbox backend
+ * gets the one-poll cycle, and only because its two directions are separate
+ * memory accesses rather than one shift register. */
+int link_serial_recv(uint8_t *rx) {
   (void)rx;
   return 0;
 }
+
+void link_serial_send(const uint8_t *tx) { (void)tx; }

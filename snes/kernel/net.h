@@ -87,5 +87,9 @@ int net_write(int ch, const uint8_t *src, int n);
 int net_wspace(int ch);
 extern volatile uint16_t net_stat_bad_sum;
 extern volatile uint16_t net_stat_resent;
+/* Data frames refused for want of receive-ring space, i.e. backpressure events.
+ * Non-zero means an application is not draining fast enough and the peer is
+ * retransmitting at it; see the comment on the definition in net.c. */
+extern volatile uint16_t net_stat_refused;
 
 #endif

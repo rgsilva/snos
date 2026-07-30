@@ -26,24 +26,26 @@ void link_wram_init(void) {
 
 int link_wram_present(void) { return LINK_MB_MAGIC == LINK_MAGIC; }
 
-int link_wram_poll(const uint8_t *tx, uint8_t *rx) {
-  int got = 0;
+/* The two halves of a poll. See the comment on link_recv in link.h for why they
+ * are separate; the ORDER they must be called in — receive, then transmit — is
+ * exactly the order link_wram_poll used, and it is what the Lua bridge's
+ * flow control depends on.
+ *
+ * Both copies are an MVN block move (kernel/netasm.s) rather than the obvious
+ * byte loop because this runs inside NMI: at -O0 the loop cost ~103 cycles a
+ * byte, and 128 bytes of it per poll was most of a handler that ran for 55% of
+ * every frame. MVN does ~7. */
+int link_wram_recv(uint8_t *rx) {
+  if (LINK_MB_HOST_SEQ == last_host_seq) return 0;
+  link_mb_move(rx, (const uint8_t *)LINK_MB_RX, LINK_FRAME);
+  last_host_seq = LINK_MB_HOST_SEQ;
+  return 1;
+}
 
-  /* Read first, then write: see the comment on link_poll in link.h.
-   *
-   * These two copies are an MVN block move (kernel/netasm.s) rather than the
-   * obvious byte loop because this runs inside NMI: at -O0 the loop cost ~103
-   * cycles a byte, and 128 bytes of it per poll was most of a handler that ran
-   * for 55% of every frame. MVN does ~7. Nothing about the exchange changes —
-   * same 64 bytes, same order, same sequence bump. */
-  if (LINK_MB_HOST_SEQ != last_host_seq) {
-    link_mb_move(rx, (const uint8_t *)LINK_MB_RX, LINK_FRAME);
-    last_host_seq = LINK_MB_HOST_SEQ;
-    got = 1;
-  }
-
+void link_wram_send(const uint8_t *tx) {
+  /* The frame is copied in full BEFORE the counter moves, and the bridge's
+   * exchange callback hangs off the counter. That ordering is the reason a
+   * callback can never see a half-written frame — do not reverse it. */
   link_mb_move((uint8_t *)LINK_MB_TX, tx, LINK_FRAME);
   LINK_MB_SNES_SEQ = (uint16_t)(LINK_MB_SNES_SEQ + 1);
-
-  return got;
 }

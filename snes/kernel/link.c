@@ -32,9 +32,17 @@ int link_present(void) {
   return 0;
 }
 
-int link_poll(const uint8_t *tx, uint8_t *rx) {
+int link_recv(uint8_t *rx) {
   if (backend == 0 && !link_present()) return 0;
-  if (backend == 1) return link_wram_poll(tx, rx);
-  if (backend == 2) return link_serial_poll(tx, rx);
+  if (backend == 1) return link_wram_recv(rx);
+  if (backend == 2) return link_serial_recv(rx);
   return 0;
+}
+
+/* No backend re-selection here. link_recv() runs first on every poll and has
+ * already done it; probing again would read the mailbox magic a second time,
+ * and the bridge hangs a frame delivery off that read. */
+void link_send(const uint8_t *tx) {
+  if (backend == 1) link_wram_send(tx);
+  else if (backend == 2) link_serial_send(tx);
 }

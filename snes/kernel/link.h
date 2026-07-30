@@ -2,8 +2,9 @@
  *
  * This is the ONLY thing the network stack knows about how bytes physically
  * reach the gateway. Everything above it — reliability, multiplexing, streams,
- * HTTP — is written against link_poll() and cannot tell the difference between
- * a bit-banged controller port and a Lua script writing into WRAM.
+ * HTTP — is written against link_recv()/link_send() and cannot tell the
+ * difference between a bit-banged controller port and a Lua script writing into
+ * WRAM.
  *
  * That indifference is deliberate and it is the whole M6/M7 strategy. If the
  * emulated backend exchanges exactly one frame per poll with the same header,
@@ -84,22 +85,48 @@
 void link_init(void);
 int link_present(void);
 
-/* Exchange one frame. Reads first, then writes — which is not arbitrary: it is
- * what lets stop-and-wait run at one frame per poll instead of one per two.
- * Reading first means an ack that arrived this poll is already in hand when the
- * outgoing frame is built, so the next sequence can go out immediately.
+/* A POLL IS TWO HALVES, AND THE GAP BETWEEN THEM IS WORTH A ROUND TRIP.
  *
- * Returns 1 if `rx` was filled, 0 if the peer had nothing new. */
-int link_poll(const uint8_t *tx, uint8_t *rx);
+ * link_recv() takes whatever has arrived; link_send() puts a frame on the wire.
+ * They used to be one call, link_poll(tx, rx), and that shape forced a whole
+ * extra poll into every exchange: the frame handed to it was necessarily built
+ * from the PREVIOUS poll's receive, so the ack for a frame that arrived at poll
+ * k could not leave until poll k+1. Splitting them lets net_service() receive,
+ * process, build and send inside one poll, and the steady-state cycle drops
+ * from 2 polls per data frame to 1.
+ *
+ * THE ORDER IS LOAD-BEARING — receive strictly before send, always. The Lua
+ * bridge (tools/netbridge.lua) infers "the console has taken the frame I put in
+ * the mailbox" from the console's write of the sequence counter, which is the
+ * last thing link_send() does. That inference is only sound because nothing
+ * between the two halves can touch the mailbox, and because the receive copy has
+ * already happened by then. Reversing them, or sending twice per receive, breaks
+ * the bridge's flow control silently and costs half the link's throughput.
+ *
+ * link_recv() returns 1 if `rx` was filled, 0 if the peer had nothing new.
+ *
+ * WHY A SYNCHRONOUS CABLE CAN STILL IMPLEMENT THIS. On the real wire bits shift
+ * both ways at once, so a backend cannot literally receive before it transmits.
+ * It does not have to: link_recv() means "hand me what has already arrived",
+ * which for a shift-register backend is the frame the last exchange clocked in,
+ * and link_send() then performs the exchange. That is precisely what link_poll()
+ * did, so the serial backend loses nothing and gains no obligation. The one-poll
+ * cycle is a property of the mailbox backend, where receive and transmit are
+ * genuinely separate memory accesses — and the mailbox is the thing every test
+ * and every iteration of the toolchain actually runs on. */
+int link_recv(uint8_t *rx);
+void link_send(const uint8_t *tx);
 
 /* Backends. link.c picks one at runtime. */
 void link_wram_init(void);
 int link_wram_present(void);
-int link_wram_poll(const uint8_t *tx, uint8_t *rx);
+int link_wram_recv(uint8_t *rx);
+void link_wram_send(const uint8_t *tx);
 
 void link_serial_init(void);
 int link_serial_present(void);
-int link_serial_poll(const uint8_t *tx, uint8_t *rx);
+int link_serial_recv(uint8_t *rx);
+void link_serial_send(const uint8_t *tx);
 
 /* Move n bytes within WRAM bank $7E, as one MVN (kernel/netasm.s).
  *

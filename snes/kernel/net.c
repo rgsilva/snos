@@ -80,6 +80,14 @@ char net_text[NET_TEXT_MAX + 1];   /* gateway ip, or resolved addresses */
 volatile uint16_t net_gw_version;
 volatile uint16_t net_stat_bad_sum;
 volatile uint16_t net_stat_resent;
+/* Backpressure, counted. Every in-sequence data frame that frame_fits() turns
+ * away because a channel's receive ring is full bumps this — which is the only
+ * way to tell "the application is not draining" apart from every other reason a
+ * transfer stalls. It cost 607 polls of a 32 s screen once (PLAN.md), and the
+ * claim that the transpose fixed it was an inference from a total, not a
+ * measurement. The increment sits in a branch that is not taken on a healthy
+ * link, so it is free in the NMI budget. */
+volatile uint16_t net_stat_refused;
 
 static uint8_t ring[NET_CHANNELS][NET_RING];
 static uint16_t ring_head[NET_CHANNELS]; /* NMI writes */
@@ -211,6 +219,7 @@ void net_init(void) {
   net_gw_version = 0;
   net_stat_bad_sum = 0;
   net_stat_resent = 0;
+  net_stat_refused = 0;
   for (j = 0; j < LINK_FRAME; j++) {
     txframe[j] = 0;
     rxframe[j] = 0;
@@ -694,10 +703,22 @@ static void build_frame(void) {
   txframe[LINK_SUM] = net_checksum(txframe, LINK_FRAME);
 }
 
+/* One poll: take what arrived, act on it, build the answer, put it on the wire.
+ *
+ * THE ORDER IS THE POINT, and it used to be receive-then-send-then-build. That
+ * shape put the wire write BEFORE the frame was built, so the frame it wrote was
+ * necessarily the one built at the end of the previous poll — and an ack for
+ * something that arrived at poll k therefore left at poll k+1. Two polls per
+ * data frame, half of them spent carrying a stale ack while the peer
+ * retransmitted at us. Building between the two halves is the whole fix: the ack
+ * for what just arrived goes out in the same poll it arrived on.
+ *
+ * Receive strictly before send is still an invariant, not a preference — see
+ * link.h. Nothing may touch the link mailbox between the two calls. */
 void net_service(void) {
   if (!net_ready || !net_up()) return;
 
-  if (link_poll(txframe, rxframe)) {
+  if (link_recv(rxframe)) {
     net_stat_rx_frames++;
     if (rxframe[LINK_SUM] != net_checksum(rxframe, LINK_FRAME)) {
       /* Corrupt. Do nothing at all — no ack, no state change — and the peer
@@ -749,6 +770,8 @@ void net_service(void) {
           if (frame_fits(rxframe)) {
             frame_deliver(rxframe);
             rx_next++;
+          } else {
+            net_stat_refused++;
           }
           /* If it does not fit we leave rx_next alone, so the frame is not
            * acked and the peer resends it once the application has drained
@@ -774,4 +797,7 @@ void net_service(void) {
     txframe[LINK_SUM] = 0;
     txframe[LINK_SUM] = net_checksum(txframe, LINK_FRAME);
   }
+
+  /* Last, and only now: the frame above carries this poll's ack. */
+  link_send(txframe);
 }
