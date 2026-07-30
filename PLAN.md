@@ -469,13 +469,23 @@ is frame-size-bound and shows the full 1.66×; the real one is round-trip-bound 
 1.66× measured on `test-vnc` is *not* a user-visible speed-up, and this table exists because I nearly
 reported it as one.
 
-Why: frames are only **13.8% full** end-to-end — 17.1 payload bytes per frame against a 124-byte
-capacity. The old "frames are already 100% full" note was measured on `get`, and never held for `vnc`.
-The cause is in `gateway.py`'s `next_out()`: `if any_data: self.awaiting = True` — **the gateway is
-stop-and-wait on its own send side** and will not build a new frame until the console acks, resending
-the same one meanwhile. So throughput is payload ÷ round trip, the round trip is ~7 console polls, and
-124 bytes / ~117 ms = ~1060 B/s against 1109 measured. Doubling the payload doubled nothing, which
-means the round trip scales with frame size and cancels the gain.
+Why — and **the first version of this paragraph got it wrong in a way worth preserving.** I wrote that
+frames were "only 13.8% full" and that `docs/performance.md`'s "frames are already completely full"
+never held for `vnc`. That was 17.1 bytes per **poll**, not per **frame** — two different denominators.
+Checked properly, `vnc`'s data-carrying frames hold **124.1 bytes of a 124-byte capacity**. They are
+completely full, exactly as the doc says, and the doc's conclusion was right all along. A correct
+number about the wrong thing, which is the error class this section keeps producing.
+
+What is actually true is that **only about one poll in seven carries data** — `get` is 5.0 polls per
+data frame, `vnc` 7.3 — so the link idles between round trips. `gateway.py`'s `next_out()` does
+`if any_data: self.awaiting = True`: **the gateway is stop-and-wait on its own send side** and will not
+build a new frame until the console acks, resending the in-flight one meanwhile.
+
+**The part that does not add up yet, and is being measured rather than reasoned about:** frames are
+full at both sizes, and the total poll count is ~2876 either way, so doubling the payload should have
+halved the frames needed and the wall clock with it. It did not move at all. Either the round trip
+grew from ~3.5 polls to ~7.3 for a reason nobody has established, or the 2660 frames are set by
+something outside the link entirely. **Do not build on either guess** — see the poll-accounting task.
 
 **So item 4 is the lever, not item 3.** A window is the one change that removes the round-trip
 dependence rather than trying to carry more per round trip. Item 3b — find where those ~7 polls go —
