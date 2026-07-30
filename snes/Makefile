@@ -142,7 +142,8 @@ $(BUILD)/apps/%/%.raw:
 	@true
 
 define APP_template
-$(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c ../apps/crt0.s ../apps/app.scm.in \
+$(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c $(wildcard ../apps/$(1)/*.s) \
+                             ../apps/crt0.s ../apps/app.scm.in \
                              $(K)/syscall.s $(KERNEL_H) tools/mkappinfo.py \
                              tools/buildapp.sh | $(BUILD)
 	sh tools/buildapp.sh $(1) $(APP_BANK_$(1)) $(CALDIR) $(BUILD) $(or $(APP_ABI_$(1)),1)

@@ -45,18 +45,24 @@
  * The SNES stores 8bpp as EIGHT BITPLANES, and RFB delivers linear bytes, so
  * every pixel has to be transposed. That is affordable but not free, and the
  * figure that used to be here — "roughly a screen per two seconds" — was an
- * estimate and was wrong by an order of magnitude. MEASURED: rebuilding all 768
- * tiles takes about 1015 frames, so seventeen seconds a screen, or 1.3 frames a
- * tile at -O0.
+ * estimate and was wrong by an order of magnitude. MEASURED: at -O0 one tile
+ * cost 0.93 of a frame, so twelve seconds for a 768-tile screen, and the wire
+ * had been made fast enough by then that this was the larger half of a
+ * thirty-second first screen against TigerVNC through the real gateway.
  *
- * THE WIRE IS NO LONGER THE BOTTLENECK, and that is a change since this was
- * written. It used to need eighty seconds for that screen at 615 B/s; the link
- * work between then and now took it to about 3.5 KB/s, and a first screen
- * measured end to end against TigerVNC through the real gateway, paced to 60 Hz,
- * is THIRTY seconds — roughly seventeen of transpose and fourteen of wire. So
- * the transpose is now the larger half, and hand-writing it in 65816 is the next
- * lever rather than a someday one. Panning feels this directly: half of a pan
- * step is spent transposing 96 tiles.
+ * SO IT IS NOT C ANY MORE. tile.s does the transpose by hand — shift-and-rotate,
+ * fully unrolled, the tile's 64 pixel bytes staged in direct page — and measures
+ * 40.2k master clocks a tile against 333.4k, 8.3x. A screen is 1.4 seconds of
+ * transpose rather than twelve, and a 96-tile pan step a quarter of a second
+ * rather than two. THE WIRE IS THE BOTTLENECK AGAIN, which is where a thin
+ * client ought to be, and the remaining console-side cost is spread thinly
+ * enough that no one part of it is worth the next hand-written routine.
+ *
+ * It stays on the console on purpose. tools/gateway.py is a dumb pipe for this
+ * app — pump() is sock.recv(512) straight through, no transformation anywhere —
+ * so the SNES is a real VNC client rather than a display for tiles somebody else
+ * interleaved. Sending pre-interleaved tiles would have been less work and would
+ * have made the gateway the client.
  *
  * What it also costs is memory. Server rectangles are NOT tile-aligned — a real
  * server sent `123x21 at (133,104)` — so a rectangle lands across partial
@@ -742,44 +748,33 @@ static void setup_ppu(void) {
   R8(0x2100) = 0x0F;
 }
 
-/* Rebuild one tile from the shadow into the staging buffer.
- *
- * This is the transpose: the shadow is linear bytes, the PPU wants eight
+/* The transpose, in tile.s. The shadow is linear bytes, the PPU wants eight
  * bitplanes, and a tile is 8 rows of 8 pixels producing 32 words in the order
- * (planes 0&1) x8, (planes 2&3) x8, (4&5) x8, (6&7) x8.
+ * (planes 0&1) x8, (planes 2&3) x8, (4&5) x8, (6&7) x8 — 512 bit extractions,
+ * which is why the C that used to be here cost 0.93 of a frame per tile at -O0
+ * and why it is hand-written 65816 now. See tile.s for what it does, what it
+ * costs, and the two faster-looking shapes that were costed and lost. */
+extern void tile_transpose(const uint8_t *src, uint16_t *out);
+
+/* Rebuild one tile from the shadow into the staging buffer.
  *
  * `t` is a SHADOW tile, not a screen position — the tilemap is what decides
  * where it appears — so this is untouched by panning.
  *
  * It runs OUTSIDE any window, which is why the result goes to WRAM rather than
- * straight to $2118: measured, the transpose plus 64 register writes cost about
- * 1.3 FRAMES per tile at -O0, so a tile has never fitted in a window and never
- * will. Staged in WRAM it becomes one DMA, which does. */
+ * straight to $2118: even at 63k master clocks a tile the transpose is a fifth
+ * of a frame, so a tile has never fitted in a window and never will. Staged in
+ * WRAM it becomes one DMA, which does.
+ *
+ * TILES_W is 32 and FB_W is 256, both powers of two, so none of the arithmetic
+ * below reaches for the software multiply and divide that a 65816 needs for
+ * anything else — check the listing rather than the source if that ever changes,
+ * because a `* FB_W` that stops folding into shifts costs more than the
+ * transpose it feeds. */
 static void build_tile(uint16_t t, uint16_t *out) {
   uint16_t tx = (uint16_t)(t % TILES_W), ty = (uint16_t)(t / TILES_W);
   uint16_t base = (uint16_t)(ty * 8u * FB_W + tx * 8u);
-  uint16_t r, i;
-
-  for (r = 0; r < 8; r++) {
-    uint8_t p0 = 0, p1 = 0, p2 = 0, p3 = 0, p4 = 0, p5 = 0, p6 = 0, p7 = 0;
-    uint16_t row = (uint16_t)(base + r * FB_W);
-    for (i = 0; i < 8; i++) {
-      uint8_t v = fb[row + i];
-      uint8_t bit = (uint8_t)(0x80u >> i);
-      if (v & 0x01) p0 = (uint8_t)(p0 | bit);
-      if (v & 0x02) p1 = (uint8_t)(p1 | bit);
-      if (v & 0x04) p2 = (uint8_t)(p2 | bit);
-      if (v & 0x08) p3 = (uint8_t)(p3 | bit);
-      if (v & 0x10) p4 = (uint8_t)(p4 | bit);
-      if (v & 0x20) p5 = (uint8_t)(p5 | bit);
-      if (v & 0x40) p6 = (uint8_t)(p6 | bit);
-      if (v & 0x80) p7 = (uint8_t)(p7 | bit);
-    }
-    out[r] = (uint16_t)(p0 | ((uint16_t)p1 << 8));
-    out[8 + r] = (uint16_t)(p2 | ((uint16_t)p3 << 8));
-    out[16 + r] = (uint16_t)(p4 | ((uint16_t)p5 << 8));
-    out[24 + r] = (uint16_t)(p6 | ((uint16_t)p7 << 8));
-  }
+  tile_transpose(&fb[base], out);
 }
 
 /* Push a staged batch through one write window. Returns how many tiles landed.

@@ -31,6 +31,20 @@ python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s" "$MINABI"
 "$CALDIR/bin/cc65816" -o "$OUT/$NAME.o"   "$SRC/$NAME.c"    $CFLAGS \
     --list-file="$OUT/$NAME.lst"
 
+# An app may carry hand-written assembly of its own, as apps/vnc does for the
+# Mode 3 transpose. Anything matching apps/<name>/*.s is assembled with the SAME
+# flags as the kernel's and linked in alongside the C. The .lst is not optional:
+# as65816 tracks neither register widths nor direct-page-vs-absolute, so the
+# emitted bytes are the only way to check an addressing mode (see
+# docs/calypsi-asm-syntax.md).
+APPOBJ=""
+for s in "$SRC"/*.s; do
+    [ -e "$s" ] || continue
+    b=$(basename "$s" .s)
+    "$CALDIR/bin/as65816" -o "$OUT/$b.o" "$s" $AFLAGS --list-file="$OUT/$b.lst"
+    APPOBJ="$APPOBJ $OUT/$b.o"
+done
+
 # No SNES clib: an app has no reset vector, no cartridge header and no C
 # startup to run. The kernel has already set the stack, direct page and data
 # bank before jumping in, so crt0.s only has to call main.
@@ -45,7 +59,7 @@ python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s" "$MINABI"
 "$CALDIR/bin/ln65816" -o "$OUT/$NAME.raw" "$OUT/app.scm" \
     --output-format=raw --no-auto-libraries --program-root app_start \
     --list-file="$OUT/$NAME.map" \
-    "$OUT/appinfo.o" "$OUT/crt0.o" "$OUT/syscall.o" "$OUT/$NAME.o" \
+    "$OUT/appinfo.o" "$OUT/crt0.o" "$OUT/syscall.o" "$OUT/$NAME.o" $APPOBJ \
     "$CALDIR/lib/clib-lc-ld-snes-noppu.a"
 
 echo "  app $NAME -> bank \$$BANK ($(wc -c < "$OUT/$NAME.raw") bytes)"
