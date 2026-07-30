@@ -295,6 +295,30 @@ configuration. Not designed yet. Deliberately not started.
 
 **Done when:** the SNES answers a ping from another machine on the LAN at its own address.
 
+### Backlog — parked deliberately, with the reason *(agreed with Ricardo 2026-07-30)*
+Not "someday" items: each was considered, costed, and put down for a stated reason. The task list
+holds only actionable work; this is the durable record.
+
+- **`build_frame`** — 4,523 cycles, 48% of the NMI handler. Parked because the handler is only 16% of
+  a frame and nothing is starved. Becomes worth doing if `LINK_FRAME` grows (the payload copy scales)
+  or at M7, where a fast cable runs it far more often. *A consequence of other decisions, not a
+  decision.*
+- **DMA coalescing in the write window** — since the transpose went 8×, painting is **141 frames of
+  window-and-DMA against 100 of building**, so most of it is waiting for the beam. The lever is
+  **fewer, bigger transfers**, not a bigger `BATCH`: setup costs ~9× the transfer, and eight tiles
+  bound for consecutive VRAM addresses could be one 512-byte DMA. Parked because that window's timing
+  margin is what the flicker fix rests on.
+- **`LINK_FRAME` 128 → 256** — 128 shipped (`9a68863`). 256 **is a data bug, not the old panic**:
+  mean 54.4 scanlines, worst 108.3, re-entry 0, but `net` fails and `pager` never reports, and the
+  failing sub-tests are the ones that deliberately drop frames — so look at retransmission. Parked
+  because bigger frames measurably do **not** help end-to-end.
+- **Sliding window** — parked hardest. The `get` control run reaches the 2-poll floor with the
+  *current* protocol, so stop-and-wait is not what costs the round trip, and `next_out()`'s
+  stop-and-wait measures 20 µs. Revisit only if the 2-poll floor itself proves worth beating.
+- **`apps/web/web.c` has the signed-constant bug** — unsuffixed `VRAM_MAP 0xE000` *and* a `$2107`
+  line missing the `>> 1`, so it likely selects the wrong base. Parked because `web` is the retired
+  browser app and is slated for deletion in the clean-up below. **Delete it rather than fix it.**
+
 ### Housekeeping — the gateway needs a clean-up *(agreed 2026-07-29, not urgent)*
 `gateway.py` has grown by accretion — HTTP fetch, image conversion, a `render:` scheme, a held-
 open browser, listen/accept, and now a plain TCP path for VNC — and the seams show. Known debt:
