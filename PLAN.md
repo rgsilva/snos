@@ -352,10 +352,28 @@ The second hop is **already roughly faithful** — a process boundary with a 4 m
 stand-in for a WiFi round trip, and not worth much effort. The first is **off by three orders of
 magnitude**, and that single artifact is the whole story.
 
-Ordered by risk-adjusted value against the iteration-speed goal, and **the order matters — 2 gates
-3 and 4**:
+**A measurement from the `vnc` flicker work (2026-07-29) reorders this list and caps what it can
+buy.** Two findings, neither of them predicted:
 
-1. **Make the bridge answer within the frame.** A Mesen memory callback on the mailbox address
+- **`net_service()` in NMI runs from the top of vblank to scanline ~104 of the *next* frame** — over
+  half of every frame's CPU, spent whenever the link is up. That is not a link problem, it is the
+  headline performance bug of the whole system: every app pays it. It also means the console
+  **cannot poll much faster than ~120 Hz no matter what the bridge does**, which invalidates the
+  earlier note here that poll rate equals syscall rate. So the `MVN` copy is not merely a
+  prerequisite for bigger frames — it is the dominant cost, and it gates item 1's value rather than
+  the reverse.
+- **`vnc`'s tile transpose costs ~1.3 frames per tile, ~17 s a screen.** Against 80 s on the wire
+  the wire leads by only ~5×, so a link that were *free* would take the `vnc` loop from 80 s to
+  ~17 s and stop. **The honest ceiling for this list is ~4–5× on `vnc`, not "real cable speed."**
+  Text, `get` and IRC have no transpose and do get the full win.
+
+Ordered by risk-adjusted value against the iteration-speed goal:
+
+1. **Make the frame copy cheap: `MVN` block move.** *(promoted — it is the dominant cost, see above)* `net_service` copies frames in and out with a
+   C loop at `-O0` (~40–100 cycles/byte) inside NMI. `MVN` does ~7. This is the same
+   hand-written-65816-for-the-hot-loop pattern used across this repo, and it is the **prerequisite
+   for both items below** — it is what makes a bigger frame affordable in the NMI budget.
+2. **Make the bridge answer within the frame.** A Mesen memory callback on the mailbox address
    instead of `endFrame`, so a reply does not wait for the next video frame. **This is a fidelity
    fix, not a cheat:** the 60 Hz ceiling is a property of `endFrame` alone — not of the protocol,
    the SNES, or the Pico — and the kernel already polls `net_service` from the main loop as well as
@@ -363,18 +381,15 @@ Ordered by risk-adjusted value against the iteration-speed goal, and **the order
    ceiling makes the rig *more* like the cable. Touches no kernel code, so it cannot panic. If it
    lands, the round trip becomes hop-2-bound (~1–8 ms), which puts stop-and-wait at 64 bytes in the
    8–32 KB/s range — i.e. **in the neighbourhood of the real cable's ~20 KB/s**, which is exactly
-   the goal. That would demote items 3 and 4 to silicon work rather than test-loop work.
-2. **Make the frame copy cheap: `MVN` block move.** `net_service` copies frames in and out with a
-   C loop at `-O0` (~40–100 cycles/byte) inside NMI. `MVN` does ~7. This is the same
-   hand-written-65816-for-the-hot-loop pattern used across this repo, and it is the **prerequisite
-   for both items below** — it is what makes a bigger frame affordable in the NMI budget.
+   the goal — but see the poll-rate cap above: without item 1 the console cannot ask often
+   enough to collect it.
 3. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
    **Already tried naively and reverted** — the kernel dies with a smashed return address the
    moment the link is claimed, because the `-O0` copy overruns the NMI and the next NMI re-enters
    it on the same stack and direct page. 128 fails identically, so it is not a marginal budget.
-   Do item 2 first.
+   Do item 1 first.
 4. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
-   change: it needs item 2 *and* a mailbox deeper than one frame per direction, which means the
+   change: it needs item 1 *and* a mailbox deeper than one frame per direction, which means the
    WRAM layout, both endpoints, the Lua bridge and the gateway all move together.
 
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
