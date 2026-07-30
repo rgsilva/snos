@@ -17,6 +17,8 @@ local L = dofile("test/lib.lua")
 local MB = 0xE000          -- link mailbox, WRAM $7EE000
 local MAGIC = 0x4B4C       -- "LK"
 local FRAME, HDR = 64, 4
+-- Derived, not literals -- see the LINK_MB_RX note in kernel/link.h.
+local TXOFF, RXOFF = 0x10, 0x10 + FRAME
 local SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 local F_DATA = 0x01
 local F_SYN = 0x02
@@ -257,7 +259,7 @@ local function write_frame(f)
   for i = 0, FRAME - 1 do
     local v = f[i]
     if corrupt and i == SUM then v = (v + 1) & 0xFF end
-    wb(0x50 + i, v)
+    wb(RXOFF + i, v)
   end
   wu16(0x04, ru16(0x04) + 1)
 end
@@ -278,7 +280,7 @@ local function service()
       gw.drop_snes = gw.drop_snes - 1     -- pretend the frame never arrived
     else
       local f = {}
-      for i = 0, FRAME - 1 do f[i] = rb(0x10 + i) end
+      for i = 0, FRAME - 1 do f[i] = rb(TXOFF + i) end
       if f[SUM] == sum_of(f) then
         -- Cumulative ack: release every window frame up to and including it.
         while #gw.window > 0 and seq_le(gw.window[1].seq, f[ACK]) do

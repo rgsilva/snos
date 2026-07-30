@@ -74,7 +74,12 @@
 #define LINK_MB_SNES_SEQ (*(volatile __far uint16_t *)(LINK_MB + 0x02))
 #define LINK_MB_HOST_SEQ (*(volatile __far uint16_t *)(LINK_MB + 0x04))
 #define LINK_MB_TX ((volatile __far uint8_t *)(LINK_MB + 0x10))
-#define LINK_MB_RX ((volatile __far uint8_t *)(LINK_MB + 0x50))
+/* DERIVED from LINK_FRAME, never a literal. The two buffers used to be 0x10 and
+ * 0x50 -- exactly LINK_FRAME apart at 64 -- so raising the frame size silently
+ * overlapped them, and four separate files carried the same literal. A frame
+ * size that disagrees with a buffer offset is not a build error: it is a link
+ * that carries the first 64 bytes and garbage after them. */
+#define LINK_MB_RX ((volatile __far uint8_t *)(LINK_MB + 0x10 + LINK_FRAME))
 
 void link_init(void);
 int link_present(void);
