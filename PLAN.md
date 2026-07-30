@@ -369,7 +369,7 @@ buy.** Two findings, neither of them predicted:
 
 Ordered by risk-adjusted value against the iteration-speed goal:
 
-1. **Make the frame copy cheap: `MVN` block move.** *(promoted — it is the dominant cost, see above)* `net_service` copies frames in and out with a
+1. ~~**Make the frame copy cheap: `MVN` block move.**~~ **DONE 2026-07-29** (`91ec6ab`), and it did what the promotion predicted: `kernel/netasm.s` replaced the two mailbox copies with one `MVN` (~7.4 cycles/byte) and `checksum()` with an unrolled absolute,Y loop (~9.3), against ~103 before. **Mean NMI 144.8 → 41.3 scanlines, 55% → 15.8% of a frame; worst 498.8 → 116.8; re-entry 1 → 0.** Only the checksum half helps silicon — `link_wram.c`'s copies exist solely in the emulated backend. Two things follow, below. `net_service` copies frames in and out with a
    C loop at `-O0` (~40–100 cycles/byte) inside NMI. `MVN` does ~7. This is the same
    hand-written-65816-for-the-hot-loop pattern used across this repo, and it is the **prerequisite
    for both items below** — it is what makes a bigger frame affordable in the NMI budget.
@@ -384,6 +384,10 @@ Ordered by risk-adjusted value against the iteration-speed goal:
    the goal — but see the poll-rate cap above: without item 1 the console cannot ask often
    enough to collect it.
 3. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
+   **The reason it panicked may now be gone:** the handler no longer overruns its own frame (worst
+   116.8 of 262 scanlines), so NMI no longer re-enters itself, which was the suspected mechanism.
+   Retry it before assuming the old failure still applies — but re-measure with `tools/nmiprof.lua`
+   first, because `build_frame` is what scales with the constant and it is now the dominant cost.
    **Already tried naively and reverted** — the kernel dies with a smashed return address the
    moment the link is claimed, because the `-O0` copy overruns the NMI and the next NMI re-enters
    it on the same stack and direct page. 128 fails identically, so it is not a marginal budget.
@@ -391,6 +395,14 @@ Ordered by risk-adjusted value against the iteration-speed goal:
 4. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
    change: it needs item 1 *and* a mailbox deeper than one frame per direction, which means the
    WRAM layout, both endpoints, the Lua bridge and the gateway all move together.
+
+**`build_frame()` is now the dominant cost, by subtraction rather than by measurement.** After the
+asm, 41.3 scanlines is ~9,400 cycles a poll, and the two new routines account for only ~1,550 of it;
+the 173 samples in the `<=16` buckets are the NMIs where `net_service` was skipped entirely. That
+leaves ~6,000–8,000 cycles in `build_frame` plus the frame accounting around it — an 8-channel loop
+and per-byte packing, still C at `-O0`. **This is inference from a histogram, not a measurement**, so
+profile it before optimising it; the whole reason the number above is trustworthy is that the last
+two display bugs were fixed twice by inference and once by instrumentation.
 
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
 you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
