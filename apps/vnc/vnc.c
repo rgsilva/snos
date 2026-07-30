@@ -4,6 +4,7 @@
  *
  *     arrow keys   move the cursor
  *     W A S D      pan the window over a larger desktop
+ *     J K          scroll down / up, as mouse-wheel clicks
  *     space        click
  *     ESC          quit
  *
@@ -122,6 +123,63 @@
  *     that wrong and space clicks the right link until the first pan and the
  *     wrong one after it, which reads as a regression rather than an omission.
  *
+ * ---------------------------------------------------- scrolling, J and K
+ *
+ * PANNING AND SCROLLING ARE NOT THE SAME THING and the app does both. A pan
+ * moves the console's window over a desktop that has not changed; a scroll asks
+ * the far side to move the PAGE, and the desktop underneath the window changes.
+ * Once the window is smaller than the desktop you need both, or half of every
+ * page is unreachable: WASD reaches the parts of the desktop the window is not
+ * over, J and K reach the parts of the document the desktop is not showing.
+ *
+ * J and K go out as WHEEL CLICKS — PointerEvent with button 4 (mask bit 3,
+ * value 8) for up and button 5 (mask bit 4, value 16) for down, each a press
+ * followed by a release — rather than as Page Up / Page Down KeyEvents. Three
+ * reasons, in order of how much they mattered:
+ *
+ *   1. IT SCROLLS WHAT IS UNDER THE CURSOR. That is what a wheel does, and it
+ *      is the only version that reaches an inner scrollable pane. Page Up/Down
+ *      go to whatever has keyboard focus, which on a freshly loaded page is
+ *      often nothing at all.
+ *
+ *   2. It reuses the pointer path the space click already uses, so it needs no
+ *      KeyEvent, no keysym table, and no new coordinate rule — the coordinates
+ *      are the same `px + cx, py + cy` in SERVER space, and getting THAT wrong
+ *      shows up only after a pan, which is exactly how it would slip through.
+ *
+ *   3. A wheel click is one message either way; a KeyEvent is two, and the
+ *      keysym for Page Down is a number this file would have to carry.
+ *
+ * What comes back is the CopyRect path's first real workout: a server answers a
+ * scroll with "this rectangle is already on your screen, n rows away" plus raw
+ * pixels for the band that has newly come into view. Everything copy_rect does
+ * about the torus and about row order was written against the test's synthetic
+ * scroll before any of it had met a browser.
+ *
+ * WHAT IT COSTS, and the number is not the one the design predicts. Measured
+ * end to end against TigerVNC and Chromium on news.ycombinator.com, the console
+ * held at 60 fps:
+ *
+ *     first screen   1284 frames (21.4 s)    926 tiles   1.21 screens
+ *     one pan         176 frames ( 2.9 s)     99 tiles   0.13 screens
+ *     one J or K     ~2380 frames (39.6 s)  ~1670 tiles  2.17 screens
+ *
+ * The wire rate is the same in all three — about eighteen seconds a screenful —
+ * so the tile column is the whole story, and it says a wheel click repaints TWO
+ * AND A LITTLE SCREENS where a pan repaints an eighth of one. That is not
+ * CopyRect failing: the pan figure proves the strip arithmetic works, and 99
+ * tiles is the 96 the exposed strip contains. It is CHROMIUM'S SMOOTH SCROLLING.
+ * One wheel click is an animation, the animation is a dozen framebuffer updates
+ * as the page glides, and the client faithfully fetches every intermediate
+ * position of a page that was on its way somewhere else.
+ *
+ * So the lever, if this ever matters enough, is on the far side and not here —
+ * `--disable-smooth-scrolling` in tools/vncbox/start.sh should turn one wheel
+ * click back into one CopyRect and one band, which is what the arithmetic says
+ * it should have been. Left alone deliberately: the container is Ricardo's to
+ * tune, and a forty-second scroll that is CORRECT is a better thing to hand over
+ * than a four-second one that has not been measured.
+ *
  * ------------------------------------------------- when it is allowed to draw
  *
  * The one thing here that is genuinely counter-intuitive: AN APPLICATION ON
@@ -131,6 +189,60 @@
  * inside a forced blank over scanlines 192-223 — the strip below the picture,
  * which is deliberately black — rather than in a vblank that does not exist. See
  * "the write window" below; it answers both of the bugs this app has had.
+ *
+ * ------------------------------------------------------------------ the minimap
+ *
+ * The black strip is not entirely spent, and the reason is worth stating because
+ * it is the opposite of what the strip looks like:
+ *
+ *   FORCED BLANK IS NOT A REGION. $2100 bit 7 blanks the WHOLE screen for as
+ *   long as it is set. The strip is black only because that is where the beam
+ *   happens to be while the blank is up — 192 at the earliest, and measured to
+ *   release by scanline 213 at the latest. THE LINES BELOW THAT ARE NEVER
+ *   BLANKED. Ten of them, 214-223, are as displayable as any line of the
+ *   picture, and nothing but the assumption that "the strip is the blank" was
+ *   keeping them empty.
+ *
+ * So they hold a box within a box: an outer rectangle standing for the whole
+ * server desktop, and an inner marker showing where the 256x192 window sits in
+ * it. That is the one thing panning cannot tell you from the picture — every
+ * pan looks like a page that scrolled, and after four of them there is nothing
+ * on screen that says whether you are at the top or the bottom of the desktop.
+ *
+ * The split follows what each half has to do:
+ *
+ *   THE OUTER FRAME NEVER MOVES, so it is tile data — eight 8bpp tiles at
+ *   $F040 — with the strip's tilemap rows pointed at them instead of at the
+ *   all-zero tile they used to share. Written once in setup_ppu, costing not one
+ *   byte per frame afterwards.
+ *
+ *   Putting a SHAPE in the strip is also what finally showed that its tilemap
+ *   entries had had both flip bits set all along. An all-zero tile is its own
+ *   mirror image, so nothing could see it. See the note on the VRAM addresses.
+ *
+ *   ONLY THE MARKER MOVES, and it moves once per pan, so it is a sprite: two
+ *   8x8 objects side by side, eight bytes of OAM. Two small sprites rather than
+ *   one 16x16, because the large-object bit lives in the OAM high table's
+ *   packed two-bits-per-sprite byte that place_cursor also writes — a shared
+ *   byte between two writers, for a shape that saves four bytes.
+ *
+ * IT SHOWS PAN POSITION AND NOTHING ELSE. RFB carries pixels, not page state,
+ * so the console cannot know the browser's scroll offset; after a J or K the
+ * picture changes and the marker correctly does not. Inferring scroll from
+ * pixel motion was considered and is not worth being wrong about.
+ *
+ * The frame is a fixed 32x10 whatever the desktop is, and the MARKER is what
+ * carries the proportion — its size is the window's share of the desktop and
+ * its travel is the rest.
+ *
+ * SO THE BOX IS NOT TO SCALE, and that is a choice rather than an oversight.
+ * Ten lines is all the strip has, so a 4:3 desktop drawn true would be thirteen
+ * pixels wide: a marker six pixels across with seven pixels to cross in nine
+ * pan steps, which is a thing you have to be told is moving. 32x10 is 3.2:1
+ * against the desktop's 1.33:1 — stretched two and a half times sideways — and
+ * buys a marker that steps two pixels per press and is legible on a television.
+ * The proportions that carry information, the marker's SHARE of the frame and
+ * its position within it, are exact in both axes.
  */
 #include "snos_abi.h"
 
@@ -154,15 +266,92 @@
 
 /* VRAM, laid out so nothing overlaps — the same arithmetic `web` uses:
  *   $0000-$BFFF  768 image tiles, 8bpp
- *   $C000-$DFFF  cursor sprite (OBSEL base 3)
+ *   $C000-$DFFF  sprites: tile 0 the cursor, tiles 1-2 the minimap marker
  *   $E000-$E7FF  BG1 tilemap
  *   $F000-$F03F  one all-zero tile, for the display below the picture
+ *   $F040-$F23F  eight tiles holding the minimap's outer frame
  */
-#define VRAM_OBJ 0xC000
-#define VRAM_MAP 0xE000
-#define VRAM_BLANK 0xF000
+/* THE SHIFTS BELOW ARE NOT A DIVISION WRITTEN SHORT, and the `u` suffixes are
+ * not decoration. Both are working around a Calypsi constant-folding bug that
+ * this app has been quietly carrying since the strip existed.
+ *
+ * Every address here is above 0x7FFF, and Calypsi types such a hexadecimal
+ * constant as a SIGNED int rather than the unsigned one C requires. So 0xF000
+ * is -4096, and DIVISION folds signed: measured, cc65816 5.17 at -O0,
+ *
+ *     0xF000u / 64u              ->  lda ##-64      wrong
+ *     ((uint16_t)0xF000u) / 64u  ->  lda ##-64      wrong; the cast does not help
+ *     0xF000UL / 64u             ->  lda ##0x3c0    right
+ *     0xF000u >> 6               ->  lda ##0x3c0    right
+ *
+ * The shift is right and the divide is wrong for the same constant, which is
+ * why this is spelled as a shift.
+ *
+ * On the ADDRESSES the bug cancelled and hid: `VRAM_MAP >> 1` came out as
+ * 0xF000 rather than 0x7000, and VRAM is 32K words, so the wrap landed it back
+ * on the right place — including $2107, which was being handed 0xF0 while the
+ * comment beside it explained why it must be 0x70. The `u` makes those the
+ * numbers they always claimed to be.
+ *
+ * ON A TILEMAP ENTRY IT DOES NOT CANCEL. -64 is 0xFFC0: the low ten bits are
+ * the right tile, and the top six are the palette, the priority, and BOTH FLIP
+ * BITS. The strip pointed at an all-zero tile, which is its own mirror image,
+ * so it was wrong and looked right for as long as the strip was blank.
+ *
+ * The minimap is the first thing below the picture with a shape, and it came
+ * out rotated 180 degrees — the frame's top edge below where the tile data put
+ * it, its sides seven pixels in from the ends. The tile data was perfect and so
+ * was the entry's index field, which is exactly why the check that decoded them
+ * agreed with itself: it masked the entry with 0x3FF, which is to say it masked
+ * off the bug. test/vnc.lua now asserts the WHOLE entry. */
+#define VRAM_OBJ 0xC000u
+#define VRAM_MAP 0xE000u
+#define VRAM_BLANK 0xF000u
+#define VRAM_MM 0xF040u
 /* 960 — and a tilemap entry's index field is 10 bits, so it reaches. */
-#define TILE_BLANK (VRAM_BLANK / 64)
+#define TILE_BLANK (VRAM_BLANK >> 6)
+/* 961-968, still inside the 10 bits. */
+#define TILE_MM (VRAM_MM >> 6)
+
+/* ---------------------------------------------------------- minimap geometry
+ *
+ * MM_H IS MEASURED, not chosen. The write window opens at scanline 192 and
+ * offers no further transfer past WIN_END, and one transfer plus its check runs
+ * about four scanlines past that — so the blank releases at 212 or 213, every
+ * time, over the three hundred-odd of them `make test-vnc` checks (it prints
+ * the worst as "latest close"). 214 is therefore the first line that is never
+ * covered, and 224 is the last line displayed. The margin is one scanline, and
+ * it is structural rather than lucky: win_room() refuses to START a transfer
+ * past WIN_END, so the worst case is bounded by the cost of one transfer.
+ *
+ * If WIN_END ever moves, this moves with it: a box whose top row falls inside
+ * the blank flickers on every repaint, which is the artefact the write window
+ * exists to remove. */
+#define MM_W 32
+#define MM_H 10
+#define MM_Y0 (224 - MM_H)          /* 214, the top line of the frame */
+#define MM_R0 (MM_Y0 / 8)           /* 26 — the first tilemap row it touches */
+#define MM_TR (28 - MM_R0)          /* 2 rows; 28 rows of 8 are displayed */
+#define MM_TW (MM_W / 8)            /* 4 tile columns */
+/* log2(MM_TW). The 65816 has no multiply, so the tile index below is a shift
+ * and this is the one place that has to be kept in step with MM_W. */
+#define MM_TSH 2
+#define MM_C0 ((32 - MM_TW) / 2)    /* centred: columns 14-17 */
+#define MM_X0 (MM_C0 * 8)           /* 112 */
+
+/* The frame's colour, as an index into the 3:3:2 cube load_palette() builds:
+ * r=5, g=5, b=2 of 7/7/3, which lands near 70% grey. Deliberately not white —
+ * the marker is white, and a marker that shares the frame's colour disappears
+ * into it exactly when it reaches the edge. */
+#define MM_INK ((5 << 5) | (5 << 2) | 2)
+
+/* What the marker sprite can draw: two 8x8 objects, so 16 wide, and one row of
+ * them, so 8 tall. A desktop close to the console's size wants a marker larger
+ * than that; it is clamped for drawing, while its TRAVEL still comes from the
+ * true proportion, so the marker under-fills rather than overshooting the
+ * frame. */
+#define MM_MARK_W 16
+#define MM_MARK_H 8
 
 #define R8(a) (*(volatile __far uint8_t *)(uint32_t)(a))
 
@@ -213,6 +402,14 @@ static int quit;
  * per rectangle row and the 65816 has no divide either. */
 static uint16_t px, py, pxm, pym;
 static uint16_t maxpx, maxpy;
+
+/* The minimap marker: how big it is drawn, and how far it may travel inside the
+ * frame. Both are the window's share of the desktop, so both are settled once,
+ * from ServerInit's size, and never again. mm_on is 0 when the desktop is no
+ * bigger than the console — there is then nothing a position indicator could
+ * say, so the strip stays entirely black. */
+static uint16_t mm_mw, mm_mh, mm_travx, mm_travy;
+static int mm_on;
 static int16_t pend_dx, pend_dy;  /* pan asked for but not yet safe to apply */
 static int parsing;               /* 1 while a server message is half-read */
 static int ready;                 /* 1 once the app owns the PPU and has set it up */
@@ -232,6 +429,33 @@ static int poll_input(void);
 static void vaddr(uint16_t w) {
   R8(0x2116) = (uint8_t)w;
   R8(0x2117) = (uint8_t)(w >> 8);
+}
+
+/* n * num / den, rounded, by repeated addition.
+ *
+ * The 65816 has neither a multiply nor a divide, and the note on build_tile is
+ * about what that costs PER PIXEL. This is the other end of the same rule: it
+ * runs once per pan — a pan already costs six hundred frames — so the shape
+ * that is obviously right beats one that needs a shift table and a special case
+ * for every desktop size that is not a power of two.
+ *
+ * Callers pass eighths (px >> 3, maxpx >> 3), which changes no ratio and keeps
+ * the loop under a few hundred passes on any plausible desktop. acc starts at
+ * half the denominator, which is what makes this round rather than floor: with
+ * a marker that travels five pixels over seven pan stops, flooring wastes one
+ * of the five on a step nothing ever lands in. */
+static uint16_t scale(uint16_t n, uint16_t num, uint16_t den) {
+  uint16_t acc, out = 0, i;
+  if (den == 0 || num == 0) return 0;
+  acc = (uint16_t)(den >> 1);
+  for (i = 0; i < n; i++) {
+    acc = (uint16_t)(acc + num);
+    while (acc >= den) {
+      acc = (uint16_t)(acc - den);
+      out++;
+    }
+  }
+  return out;
 }
 
 /* --------------------------------------------------------- the write window
@@ -557,6 +781,22 @@ static int pointer(uint16_t x, uint16_t y, uint8_t mask) {
   return wr(m, 6);
 }
 
+/* One wheel click: press and release at the cursor, in SERVER coordinates.
+ *
+ * A wheel is a BUTTON in RFB — 4 is up, 5 is down, so bit 3 and bit 4 of the
+ * mask — and a click of it is the same press/release pair a real button gets.
+ * There is no "wheel released" state to hold, so the two messages go out back
+ * to back rather than being spread over two key events.
+ *
+ * The coordinates matter as much as the mask: a wheel event scrolls whatever is
+ * under the pointer, so `px + cx` is what makes J and K reach an inner pane
+ * rather than always moving the outermost document — and the pan origin is
+ * exactly the part a click got wrong once already. */
+static void wheel(uint8_t mask) {
+  pointer((uint16_t)(px + cx), (uint16_t)(py + cy), mask);
+  pointer((uint16_t)(px + cx), (uint16_t)(py + cy), 0);
+}
+
 /* ------------------------------------------------------------------ display */
 
 /* CGRAM as the 3:3:2 cube the server is now sending indices into. Built here
@@ -634,6 +874,102 @@ static void place_cursor(void) {
   win_close();
 }
 
+/* The marker's two sprite tiles, sized to the window's share of the desktop.
+ *
+ * Colour 1 — the same white the cursor's body uses, so no third CGRAM entry is
+ * spent on this. 4bpp: plane 0 carries the whole shape and planes 1-3 are zero.
+ *
+ * The BOTTOM half of each tile is written as well, and that is not tidiness: the
+ * sprite tile base is $C000, clear_tiles only reaches $BFFF, and what is left up
+ * there is whatever the console's font put in VRAM before the app took the PPU.
+ * An unwritten row of a sprite tile is not blank, it is somebody else's glyph. */
+static void load_marker(void) {
+  uint16_t t, row;
+  R8(0x2115) = 0x80;
+  vaddr((VRAM_OBJ + 32) >> 1);              /* sprite tiles 1 and 2 */
+  for (t = 0; t < 2; t++) {
+    uint16_t x0 = (uint16_t)(t << 3);
+    uint16_t n = (mm_mw > x0) ? (uint16_t)(mm_mw - x0) : 0;
+    if (n > 8) n = 8;
+    for (row = 0; row < 8; row++) {
+      /* 0xFF << (8 - n) truncated to a byte: n pixels, left-aligned. */
+      R8(0x2118) = (uint8_t)((row < mm_mh && n) ? (0xFF << (8 - n)) : 0);
+      R8(0x2119) = 0;                       /* plane 1 */
+    }
+    for (row = 0; row < 8; row++) {         /* planes 2 and 3 */
+      R8(0x2118) = 0;
+      R8(0x2119) = 0;
+    }
+  }
+}
+
+/* Move the marker. Same window rule and same reason as place_cursor: OAM takes
+ * writes only while blanking, and there is no vblank to have them in.
+ *
+ * Sprite Y is one less than the scanline the sprite appears on, which is why
+ * place_cursor writes cy - 1; MM_Y0 is 214 so nothing here can underflow. */
+static void place_marker(void) {
+  uint16_t mx, my;
+  if (!mm_on) return;
+  mx = (uint16_t)(MM_X0 + scale((uint16_t)(px >> 3), mm_travx,
+                                (uint16_t)(maxpx >> 3)));
+  my = (uint16_t)(MM_Y0 + scale((uint16_t)(py >> 3), mm_travy,
+                                (uint16_t)(maxpy >> 3)));
+  win_open();
+  R8(0x2102) = 0x02;                        /* OAM word 2 = sprite 1, byte 4 */
+  R8(0x2103) = 0x00;
+  R8(0x2104) = (uint8_t)mx;
+  R8(0x2104) = (uint8_t)(my - 1);
+  R8(0x2104) = 0x01;                        /* sprite tile 1 */
+  R8(0x2104) = 0x30;                        /* priority 3, palette 0 */
+  R8(0x2104) = (uint8_t)(mx + 8);           /* sprite 2, straight after it */
+  R8(0x2104) = (uint8_t)(my - 1);
+  R8(0x2104) = 0x02;                        /* sprite tile 2 */
+  R8(0x2104) = 0x30;
+  win_close();
+}
+
+/* The outer frame: eight 8bpp tiles, a one-pixel rectangle MM_W x MM_H whose
+ * bottom edge is the last displayed scanline.
+ *
+ * Called from setup_ppu, under the forced blank main() is still holding, so
+ * there is no window to wait for.
+ *
+ * 8bpp tile data is four PAIRS of bitplanes, eight rows each, low plane in the
+ * low byte — the same order tile.s produces and the same order the test decodes
+ * in. A solid-colour shape needs no per-pixel work: every plane byte is either
+ * the row's mask or zero, depending on one bit of the colour index. */
+static void load_minimap(void) {
+  uint16_t tr, tc, row, pl;
+  uint8_t mask[8];
+  R8(0x2115) = 0x80;
+  vaddr(VRAM_MM >> 1);
+  for (tr = 0; tr < MM_TR; tr++) {
+    for (tc = 0; tc < MM_TW; tc++) {
+      for (row = 0; row < 8; row++) {
+        /* Which row of the box this tile row is, if any. The first tile row
+         * starts above MM_Y0, so its top rows are outside the box. */
+        uint16_t sy = (uint16_t)(((MM_R0 + tr) << 3) + row);
+        uint8_t m = 0;
+        if (sy >= MM_Y0 && sy < MM_Y0 + MM_H) {
+          if (sy == MM_Y0 || sy == MM_Y0 + MM_H - 1) {
+            m = 0xFF;                       /* top and bottom edges */
+          } else {
+            if (tc == 0) m = 0x80;          /* left edge */
+            if (tc == MM_TW - 1) m = (uint8_t)(m | 0x01);
+          }
+        }
+        mask[row] = m;
+      }
+      for (pl = 0; pl < 8; pl = (uint16_t)(pl + 2))
+        for (row = 0; row < 8; row++) {
+          R8(0x2118) = (MM_INK & (1 << pl)) ? mask[row] : 0;
+          R8(0x2119) = (MM_INK & (1 << (pl + 1))) ? mask[row] : 0;
+        }
+    }
+  }
+}
+
 static void hide_sprites(void) {
   int i;
   R8(0x2102) = 0;
@@ -660,7 +996,17 @@ static void hide_sprites(void) {
  * and therefore what keeps the write window usable. */
 static uint16_t map_entry(uint16_t r, uint16_t c) {
   uint16_t ty, tx;
-  if (r >= TILES_H) return TILE_BLANK;
+  if (r >= TILES_H) {
+    /* The minimap's own cells, and only while there is something to pan over.
+     * Everything else below the picture stays on the all-zero tile — the write
+     * window's blank covers scanlines 192 to about 213, so whatever those rows
+     * show is torn in and out several times a second, and black tears
+     * invisibly. See "the minimap" at the top. */
+    if (mm_on && r >= MM_R0 && r < MM_R0 + MM_TR &&
+        c >= MM_C0 && c < MM_C0 + MM_TW)
+      return (uint16_t)(TILE_MM + ((r - MM_R0) << MM_TSH) + (c - MM_C0));
+    return TILE_BLANK;
+  }
   ty = (uint16_t)((pym >> 3) + r);
   while (ty >= TILES_H) ty = (uint16_t)(ty - TILES_H);
   tx = (uint16_t)((pxm >> 3) + c);
@@ -713,9 +1059,14 @@ static void setup_ppu(void) {
     R8(0x2119) = 0;
   }
 
+  /* The minimap's frame, before the map that points at it. */
+  load_minimap();
+
   /* The whole map, written directly: the display is still under the forced
    * blank main() asserted, so there is no window to wait for. At pan (0,0)
-   * map_entry() is the identity this used to spell out inline. */
+   * map_entry() is the identity this used to spell out inline — except for the
+   * strip's minimap cells, which is why the rows below the picture are no
+   * longer all the same entry. */
   vaddr(VRAM_MAP >> 1);
   for (r = 0; r < 32; r++) {
     for (c = 0; c < 32; c++) {
@@ -739,7 +1090,12 @@ static void setup_ppu(void) {
    * That is why it survived every check I made. My verification decoded tile
    * data in assumed tilemap order, which bypasses the tilemap entirely — so it
    * confirmed the one thing that was never broken. Ricardo's register log found
-   * it in a single run. */
+   * it in a single run.
+   *
+   * It emits 0x70 now, which is what this note always claimed. Until VRAM_MAP
+   * gained its `u` it was emitting 0xF0 — a base of 60 K-words on a 32 K-word
+   * VRAM, which wrapped to the same place and worked. See the note on the VRAM
+   * addresses for why the constant was negative and what else it cost. */
   R8(0x2107) = (uint8_t)((((uint16_t)(VRAM_MAP >> 1)) >> 10) << 2);
   R8(0x210B) = 0x00;                             /* BG1 tiles at $0000 */
   R8(0x2101) = 0x03;                             /* OBSEL: 8x8, base $C000 */
@@ -947,6 +1303,9 @@ static void apply_pan(void) {
 
   set_pan(nx, ny);
   write_tilemap();
+  /* The one thing on screen that says where in the desktop this window is. Four
+   * bytes of OAM per sprite, in the same window write_tilemap just used. */
+  place_marker();
 
   /* The strip that has never been on this console. Everything else in the new
    * window is already in the shadow, at the address it was always at. */
@@ -1024,6 +1383,10 @@ static int poll_input(void) {
     } else if (c == 's' || c == 'S') {
       pend_dy = (int16_t)(pend_dy + PAN_STEP);
       panned = 1;
+    } else if (c == 'j' || c == 'J') {
+      wheel(16);                             /* button 5 — wheel down */
+    } else if (c == 'k' || c == 'K') {
+      wheel(8);                              /* button 4 — wheel up */
     } else if (c == ' ') {
       /* Press and release at the cursor, in SERVER coordinates. The server
        * moves its own pointer there as a side effect, which is why we do not
@@ -1273,6 +1636,8 @@ int main(void) {
   parsing = 0;
   ready = 0;
   rq_pending = 0;
+  mm_mw = 0; mm_mh = 0; mm_travx = 0; mm_travy = 0;
+  mm_on = 0;
 
   snos_getargs(args, sizeof args);
   if (args[0] == 0) {
@@ -1334,16 +1699,35 @@ int main(void) {
   maxpx = (srv_w > FB_W) ? (uint16_t)((srv_w - FB_W) & 0xFFF8u) : 0;
   maxpy = (srv_h > FB_H) ? (uint16_t)((srv_h - FB_H) & 0xFFF8u) : 0;
 
+  /* The marker is the window's share of the desktop, and its travel is the rest
+   * of the frame — so the two together always fill it exactly, whatever the
+   * server's size. Settled once, here, because ServerInit is the only place the
+   * desktop's size is ever learned.
+   *
+   * Travel comes from the TRUE share even when the drawn width is clamped to
+   * what two sprites can cover: under-filling the frame is a marker that reads
+   * slightly small, whereas travelling by the clamped figure would walk it off
+   * the right-hand edge. */
+  mm_on = (maxpx != 0 || maxpy != 0);
+  mm_mw = scale((uint16_t)(FB_W >> 3), MM_W, (uint16_t)(srv_w >> 3));
+  mm_mh = scale((uint16_t)(FB_H >> 3), MM_H, (uint16_t)(srv_h >> 3));
+  if (mm_mw < 1) mm_mw = 1;
+  if (mm_mh < 1) mm_mh = 1;
+  mm_travx = (mm_mw < MM_W) ? (uint16_t)(MM_W - mm_mw) : 0;
+  mm_travy = (mm_mh < MM_H) ? (uint16_t)(MM_H - mm_mh) : 0;
+  if (mm_mw > MM_MARK_W) mm_mw = MM_MARK_W;
+  if (mm_mh > MM_MARK_H) mm_mh = MM_MARK_H;
+
   say("connected: ");
   sys_putu(srv_w);
   sys_putc('x');
   sys_putu(srv_h);
   sys_putc('\n');
   if (maxpx || maxpy)
-    say("WASD pans the window, arrows move the cursor, space clicks\n");
+    say("WASD pans, arrows move the cursor, space clicks\n");
   else
     say("arrows move the cursor, space clicks\n");
-  say("ESC quits\n");
+  say("J and K scroll the page; ESC quits\n");
 
   /* Start from a known screen: clear the shadow, and clear VRAM to match it, so
    * anything the server has not sent yet is black rather than whatever the
@@ -1378,6 +1762,7 @@ int main(void) {
   load_palette();
   hide_sprites();
   load_cursor();
+  load_marker();
   clear_tiles();
   setup_ppu();
   ready = 1;
@@ -1386,6 +1771,10 @@ int main(void) {
    * to get that. Under the forced blank above it would work either way; doing it
    * here keeps one rule instead of two. */
   place_cursor();
+  /* After place_cursor, which is what clears the OAM high table byte the two of
+   * them share — both sprites are 8x8 and neither ever passes x=255, so every
+   * bit in it is zero, but it has to be written by somebody. */
+  place_marker();
 
   /* The first screen is the window, in full, and the server has no idea what we
    * already have — so it is the same non-incremental request a pan uses. */

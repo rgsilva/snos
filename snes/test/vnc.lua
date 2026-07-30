@@ -64,6 +64,31 @@
 --      it, and a scroll's rows overlap — neither of which is visible while the
 --      pan origin is (0,0), which is the only place the old code ever ran.
 --
+-- ------------------------------------------------------- scrolling and the map
+--
+-- Two more things the app grew, and the ways each of them can be silently
+-- wrong:
+--
+--   6. J AND K ARE WHEEL CLICKS, not Page Up/Down keystrokes: PointerEvent with
+--      button 5 (mask 16) for down and button 4 (mask 8) for up, each a press
+--      followed by a release. The mask is asserted because a wheel sent as
+--      button 1 would still make a browser do SOMETHING, and the COORDINATES
+--      are asserted twice — at the origin and again after a pan, because pan
+--      origin plus cursor is exactly the arithmetic a click got wrong once
+--      before, and at (0,0) the wrong answer is the right one.
+--
+--   7. THE MINIMAP lives in the strip below the picture — the outer frame in
+--      tile data the strip's tilemap rows now point at, the moving marker in
+--      two sprites. Both halves are checked, and the frame is checked THROUGH
+--      THE TILEMAP for the same reason the picture is: repointing those rows is
+--      the sort of change that decodes correctly in assumed order and displays
+--      as garbage. The whole strip is decoded, so a cell that should still be
+--      black and is not fails here too.
+--
+--      The marker is checked against (px, py) after every pan. It is the only
+--      thing on screen that says where in the desktop the window is, so a
+--      marker that does not move is a feature that is present and useless.
+--
 -- NOT part of `make test`: it is a two-minute run on its own, against an app
 -- with no other coverage. `make test-vnc`.
 local L = dofile("test/lib.lua")
@@ -541,6 +566,133 @@ end
 
 local function oam(i) return emu.read(i, OAM) end
 
+-- ---------------------------------------------------------------- minimap
+-- Mirrors apps/vnc/vnc.c's geometry. The numbers are small and fixed, but they
+-- are derived here the same way the app derives them so that a change to MM_W
+-- or MM_H is a change in one place on each side rather than a table of magic
+-- constants to hunt through.
+local MM_W, MM_H = 32, 10
+local MM_Y0 = 224 - MM_H              -- 214: the first line never blanked
+local MM_R0 = MM_Y0 // 8              -- 26
+local MM_TR = 28 - MM_R0              -- 2 tilemap rows
+local MM_TW = MM_W // 8               -- 4 tile columns
+local MM_C0 = (32 - MM_TW) // 2       -- centred
+local MM_X0 = MM_C0 * 8
+local MM_INK = (5 << 5) | (5 << 2) | 2
+local TILE_BLANK = 0xF000 // 64
+local TILE_MM = 0xF040 // 64
+local MM_MARK_W, MM_MARK_H = 16, 8
+
+-- n * num / den, rounded — the app's scale(), which it spells out by repeated
+-- addition because a 65816 has no divide. Mirrored rather than simplified to
+-- `math.floor(n * num / den + 0.5)`: the point is to assert the number the app
+-- actually produces, and the two agree only if the rounding does.
+local function mmscale(n, num, den)
+  if den == 0 or num == 0 then return 0 end
+  local acc, out = den // 2, 0
+  for _ = 1, n do
+    acc = acc + num
+    while acc >= den do acc = acc - den; out = out + 1 end
+  end
+  return out
+end
+
+local MAXPX = (SRV_W - VIEW_W) & 0xFFF8
+local MAXPY = (SRV_H - VIEW_H) & 0xFFF8
+local mm_mw = mmscale(VIEW_W >> 3, MM_W, SRV_W >> 3)
+local mm_mh = mmscale(VIEW_H >> 3, MM_H, SRV_H >> 3)
+local mm_travx = (mm_mw < MM_W) and (MM_W - mm_mw) or 0
+local mm_travy = (mm_mh < MM_H) and (MM_H - mm_mh) or 0
+if mm_mw > MM_MARK_W then mm_mw = MM_MARK_W end
+if mm_mh > MM_MARK_H then mm_mh = MM_MARK_H end
+
+-- Where the marker's top-left pixel belongs for a given pan origin.
+local function marker_at(panx, pany)
+  return MM_X0 + mmscale(panx >> 3, mm_travx, MAXPX >> 3),
+         MM_Y0 + mmscale(pany >> 3, mm_travy, MAXPY >> 3)
+end
+
+-- The marker is two 8x8 sprites side by side, OAM entries 1 and 2. Sprite Y is
+-- one less than the scanline the sprite appears on, which is why the app writes
+-- y - 1 and why this expects it back.
+local function check_marker(r, panx, pany, what)
+  local wx, wy = marker_at(panx, pany)
+  local gx, gy, gt = oam(4), oam(5), oam(6)
+  local hx, hy, ht = oam(8), oam(9), oam(10)
+  print(string.format("minimap marker at pan (%d,%d): OAM (%d,%d) tile %d + (%d,%d) tile %d",
+                      panx, pany, gx, gy, gt, hx, hy, ht))
+  r.check(gx == wx and gy == wy - 1, string.format(
+    "%s: the minimap marker is at (%d,%d), expected (%d,%d) for pan (%d,%d)",
+    what, gx, gy, wx, wy - 1, panx, pany))
+  r.check(hx == wx + 8 and hy == wy - 1 and gt == 1 and ht == 2, string.format(
+    "%s: the marker's second half is at (%d,%d) tiles %d/%d, expected (%d,%d) tiles 1/2",
+    what, hx, hy, gt, ht, wx + 8, wy - 1))
+end
+
+-- Every displayed pixel BELOW the picture, decoded through the tilemap exactly
+-- as check_picture does it. Two things have to hold at once:
+--
+--   the cells the minimap claims point at its own tiles, everything else still
+--   points at the all-zero tile — repointing a row is how the strip stops being
+--   black, and a black strip is what makes the forced-blank window invisible;
+--
+--   and what those tiles actually contain is the box: a one-pixel rectangle in
+--   MM_INK with nothing inside it.
+--
+-- Decoding the minimap's tile data in assumed order would confirm neither.
+--
+-- THE WHOLE 16-BIT ENTRY IS COMPARED, not `entry & 0x3FF`, and that is the
+-- point of this check rather than a detail of it. The strip's entries were
+-- 0xFFC0 — right tile, and every one of the palette, priority and FLIP bits
+-- set, because Calypsi folds `0xF000 / 64` to -64 (see the note on VRAM_MM in
+-- vnc.c). An all-zero tile is its own mirror image, so nothing showed it; the
+-- minimap came out rotated 180 degrees the moment the strip had a shape in it.
+-- Masking with 0x3FF is masking off exactly the bits that were wrong.
+local function check_strip()
+  local bad, first = 0, nil
+  local function note(s) bad = bad + 1; first = first or s end
+  for ty = VIEW_H // 8, 27 do
+    for tx = 0, 31 do
+      local entry = map_at(tx, ty)
+      local inbox = ty >= MM_R0 and ty < MM_R0 + MM_TR and
+                    tx >= MM_C0 and tx < MM_C0 + MM_TW
+      local want_entry = inbox
+        and (TILE_MM + (ty - MM_R0) * MM_TW + (tx - MM_C0)) or TILE_BLANK
+      if entry ~= want_entry then
+        note(string.format(
+          "strip cell (%d,%d) entry is %04X, expected %04X (flip/priority bits "
+          .. "in the top six are as wrong as a wrong tile)",
+          tx, ty, entry, want_entry))
+      end
+      local base = (entry & 0x3FF) * 64
+      for row = 0, 7 do
+        local p = {}
+        for pl = 0, 7 do
+          p[pl] = emu.read(base + (pl >> 1) * 16 + row * 2 + (pl & 1), VRAM)
+        end
+        for col = 0, 7 do
+          local bit, v = 0x80 >> col, 0
+          for pl = 0, 7 do
+            if (p[pl] & bit) ~= 0 then v = v | (1 << pl) end
+          end
+          local sx, sy = tx * 8 + col, ty * 8 + row
+          local want = 0
+          if sx >= MM_X0 and sx < MM_X0 + MM_W and
+             sy >= MM_Y0 and sy < MM_Y0 + MM_H then
+            if sx == MM_X0 or sx == MM_X0 + MM_W - 1 or
+               sy == MM_Y0 or sy == MM_Y0 + MM_H - 1 then want = MM_INK end
+          end
+          if v ~= want then
+            note(string.format("strip pixel (%d,%d) is %d, want %d (entry %04X)",
+                               sx, sy, v, want, entry))
+          end
+        end
+      end
+    end
+  end
+  return bad, first
+end
+
 -- ------------------------------------------------------------------ test
 local r = L.new_report("vnc")
 local step, at, claimed = 1, nil, false
@@ -564,6 +716,30 @@ local PANS = {
   { key = "w", req = { 0, 0, 256, 32 },    at = { 0, 0 } },
 }
 local pan_i, pan_t0, pan_want, pan_cost = 0, 0, 0, {}
+
+-- RFB button 4 is wheel-up and button 5 is wheel-down, so bit 3 and bit 4 of
+-- the PointerEvent mask. J scrolls down and K scrolls up, which is Ricardo's
+-- choice of keys and the one thing here that is a preference rather than a
+-- protocol.
+local WHEEL_DOWN, WHEEL_UP = 16, 8
+local wheel_base, click_base = 0, 0
+
+-- A wheel click is a PRESS AND A RELEASE at the same point, so two events. Both
+-- are checked: a client that sent only the press would leave a button held down
+-- for the rest of the session, which a server is entitled to treat as a drag.
+local function check_wheel(r, base, mask, wantx, wanty, what)
+  local a, b = rfb.pointers[base + 1], rfb.pointers[base + 2]
+  r.check(a ~= nil and b ~= nil, what .. ": expected a press and a release, got " ..
+          tostring(#rfb.pointers - base))
+  if not (a and b) then return end
+  print(string.format("%s: mask %d then %d at (%d,%d)", what, a.mask, b.mask, a.x, a.y))
+  r.check(a.mask == mask and b.mask == 0, string.format(
+    "%s: masks were %d/%d, expected %d/0", what, a.mask, b.mask, mask))
+  r.check(a.x == wantx and a.y == wanty and b.x == wantx and b.y == wanty,
+          string.format(
+    "%s: wheel landed at (%d,%d)/(%d,%d) in server coordinates, expected (%d,%d)",
+    what, a.x, a.y, b.x, b.y, wantx, wanty))
+end
 
 emu.addEventCallback(function()
   if pad then emu.setInput(pad, 0) end
@@ -624,6 +800,15 @@ emu.addEventCallback(function()
     print(string.format("cursor at rest: OAM x=%d y=%d high=%02X",
                         cursor0, oam(1), oam(0x200)))
     r.check(cursor0 == VIEW_W / 2, "the cursor did not start in the middle")
+    do
+      local sbad, sfirst = check_strip()
+      print(string.format("strip: %d wrong pixels of %d",
+                          sbad, 32 * 8 * (224 - VIEW_H)))
+      r.check(sbad == 0, string.format(
+        "the strip below the picture is wrong in %d places; first: %s",
+        sbad, tostring(sfirst)))
+      check_marker(r, 0, 0, "at the origin")
+    end
     L.feed("\31")                            -- SNOS_KEY_RIGHT, as kbdbridge sends it
     step = 4
     at = frame + 120
@@ -666,6 +851,33 @@ emu.addEventCallback(function()
     print(string.format("after LEFT on the d-pad: OAM x=%d", after_pad))
     r.check(after_pad == cursor0, string.format(
       "the d-pad did not move the cursor: x was %d, now %d", after_key, after_pad))
+    step = 20
+    at = frame + 1
+    return
+  end
+
+  -- ------------------------------------------------------- the wheel, J and K
+  -- At the origin first, where a client that forgot the pan origin still looks
+  -- perfect. The pair after the pan below is the one that catches it.
+  if step == 20 then
+    wheel_base = #rfb.pointers
+    L.feed("j")
+    step = 21
+    at = frame + 120
+    return
+  end
+
+  if step == 21 then
+    check_wheel(r, wheel_base, WHEEL_DOWN, cursor0, VIEW_H / 2, "J at the origin")
+    wheel_base = #rfb.pointers
+    L.feed("k")
+    step = 22
+    at = frame + 120
+    return
+  end
+
+  if step == 22 then
+    check_wheel(r, wheel_base, WHEEL_UP, cursor0, VIEW_H / 2, "K at the origin")
     step = 8
     at = frame + 1
     return
@@ -712,7 +924,11 @@ emu.addEventCallback(function()
       r.check(bad == 0, string.format(
         "pan '%s': %d pixels wrong through the tilemap; first: %s",
         p.key, bad, tostring(first)))
+      -- The marker is the only thing on screen that says where in the desktop
+      -- this window is, so it is checked on every pan rather than once.
+      check_marker(r, p.at[1], p.at[2], "pan '" .. p.key .. "'")
       if p.click then
+        click_base = #rfb.pointers
         L.feed(" ")
         step = 11
         at = frame + 120
@@ -754,7 +970,7 @@ emu.addEventCallback(function()
   -- thing that can have changed is whether the app adds the pan origin.
   if step == 11 then
     local want = { x = PANS[pan_i].at[1] + cursor0, y = PANS[pan_i].at[2] + VIEW_H / 2 }
-    local p = rfb.pointers[3]
+    local p = rfb.pointers[click_base + 1]
     r.check(p ~= nil, "space after a pan produced no pointer event")
     if p then
       print(string.format("pointer after panning to (%d,%d): x=%d y=%d",
@@ -763,6 +979,20 @@ emu.addEventCallback(function()
         "a click after panning landed at (%d,%d) in server coordinates, expected (%d,%d)",
         p.x, p.y, want.x, want.y))
     end
+    -- And the wheel from the same place. A pan origin dropped from a wheel
+    -- event scrolls whatever happens to be under (cx, cy) on the SERVER's
+    -- top-left corner instead of under the cursor, which on a page with one
+    -- scrollable region looks exactly like it worked.
+    wheel_base = #rfb.pointers
+    L.feed("j")
+    step = 23
+    at = frame + 120
+    return
+  end
+
+  if step == 23 then
+    check_wheel(r, wheel_base, WHEEL_DOWN, PANS[pan_i].at[1] + cursor0,
+                PANS[pan_i].at[2] + VIEW_H / 2, "J after panning")
     step = 13                                -- the CopyRect case, still panned
     at = frame + 1
     return
@@ -770,6 +1000,17 @@ emu.addEventCallback(function()
 
   if step == 12 then
     local lo, hi, out = dma_span()
+    -- The strip again, at the end: four pans and a CopyRect later, the picture
+    -- rows have been rewritten three times over and the minimap must be exactly
+    -- as it was. write_tilemap() touches rows 0-23 only, and this is what says
+    -- so.
+    do
+      local sbad, sfirst = check_strip()
+      print(string.format("strip after four pans and a scroll: %d wrong pixels", sbad))
+      r.check(sbad == 0, string.format(
+        "the strip is wrong in %d places after panning; first: %s",
+        sbad, tostring(sfirst)))
+    end
     print(string.format("first screen painted by frame %d", painted_at))
     print("pan cost, frames: " .. table.concat(pan_cost, " "))
     print(string.format("DMA: %d transfers, scanlines %d..%d, %d above the strip",
