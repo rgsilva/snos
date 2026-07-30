@@ -19,8 +19,10 @@ WHY EACH HALF IS WRAPPED IN A FUNCTION rather than simply concatenated:
     declaration shadowed the first. It happens to work today. That is not a
     property to rely on.
 
-Each half registers its own endFrame callback, which Mesen is happy to do, so
-they run independently once started.
+Each half registers its own endFrame callback — and the gateway half also a
+memory callback on the link's sequence counter, which is where its data exchange
+now lives — all of which Mesen is happy to do, so they run independently once
+started.
 """
 import os
 import sys
