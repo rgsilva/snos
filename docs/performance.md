@@ -171,6 +171,37 @@ mailbox deeper than one frame per direction — becomes affordable.
 Reverted to 64 rather than left half-done. A correct 615 B/s beats a 2400 B/s
 that panics.
 
+**RESOLVED 2026-07-30 — and the re-entrancy hypothesis above was right.** With the
+copy in `MVN` and the checksum hand-written (`kernel/netasm.s`, `91ec6ab`), the
+NMI handler went from a mean of 144.8 scanlines to 41.3, and `LINK_FRAME 128`
+went from instant death to a clean 12/12 (`9a68863`). The frame buffers also sat
+at mailbox `+0x10` and `+0x50` — exactly `LINK_FRAME` apart at 64 — with that
+literal repeated in four files, so any bump silently overlapped TX and RX in all
+of them; the RX offset is now derived (`c07e8e0`).
+
+**256 does not panic. It is a data bug.** At 256 the handler is mean 54.4
+scanlines, worst 108.3, re-entry 0 — comfortably inside a frame, nothing smashed.
+What fails is `net` (downloads never complete, "2 copies of the body seen") and
+`pager` never reporting at all, and the failing sub-tests are specifically the
+ones that deliberately drop frames mid-window, so the retransmission path is
+where to look. Already ruled out: the record length field (max payload 250, fits
+a byte), `CMSG_MAX` (288, bounds-checked), the rings (1024/512/512 — one frame
+fits), and any hardcoded payload size in the test gateway. So the sentence above
+about 2400 B/s "that panics" is no longer true, and neither is the folklore it
+became.
+
+**But bigger frames buy nothing end-to-end, which is the more useful result.** A
+48 KB `vnc` screen through the real bridge, real `gateway.py` and a real VNC
+server takes 44.33 s / 2660 frames at `LINK_FRAME` 64 **and** 44.33 s / 2660
+frames at 128 — bit-identical. The hermetic `make test-vnc` harness shows 1.66×
+for the same change because it has no file hop and no second process; it is
+frame-size-bound where the real path is round-trip-bound. **Never quote a
+`test-vnc` speed-up as a user-visible one.** The conclusion of the section above
+stands and is now the whole story: this link is round-trip-bound, only about one
+poll in seven carries data (`get` 5.0 polls per data frame, `vnc` 7.3), and
+`gateway.py`'s `next_out()` is stop-and-wait on its own send side. A window, not
+a bigger frame, is the lever.
+
 **Real hardware is a different question.** None of this constrains the cable: a
 synchronous exchange has no file bridge, no 1-deep mailbox and no 60 Hz ceiling.
 These numbers measure the emulator path, which is the one being developed
