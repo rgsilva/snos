@@ -313,6 +313,43 @@ open browser, listen/accept, and now a plain TCP path for VNC — and the seams 
 channel, a page closed under a running thread, an `S2C_ERR` landing on a freed channel — was a
 teardown bug, and they were separate bugs only because teardown is written four times.
 
+### Performance — link throughput *(queued 2026-07-29, next up)*
+The `vnc` client made the link's speed the headline problem: a 48 KB screen takes ~80 seconds at
+the measured **615 B/s**. `docs/performance.md` has the full measurement — read it before touching
+any of this, because it also records an attempt that failed and why.
+
+The link is **round-trip-bound, not bandwidth-bound**. Frames are already 100% full; 59% of polls
+are retransmissions. The SNES puts something on the wire ~58 times a second and only ~10 of those
+carry new data, because stop-and-wait sends nothing while an ack is outstanding and an ack takes
+~5–6 emulated frames to come back through two files and two processes.
+
+Ordered by risk-adjusted value, and **the order matters — 2 gates 3 and 4**:
+
+1. **Collapse the bridge's relay hops** *(test-rig only, no kernel risk)*. The Lua bridge acts on
+   `endFrame`, so every crossing waits for the next emulated frame, and `gateway.py` polls on its
+   own unsynchronised loop on top of that. A Mesen memory callback on the mailbox address could
+   respond *within* the same frame instead; the gateway's poll interval is separately tunable.
+   Touches no kernel code, so it cannot panic — but it only speeds up the emulator, not silicon.
+   Value unmeasured; worth an hour to find out, and cheapest by far.
+2. **Make the frame copy cheap: `MVN` block move.** `net_service` copies frames in and out with a
+   C loop at `-O0` (~40–100 cycles/byte) inside NMI. `MVN` does ~7. This is the same
+   hand-written-65816-for-the-hot-loop pattern used across this repo, and it is the **prerequisite
+   for both items below** — it is what makes a bigger frame affordable in the NMI budget.
+3. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
+   **Already tried naively and reverted** — the kernel dies with a smashed return address the
+   moment the link is claimed, because the `-O0` copy overruns the NMI and the next NMI re-enters
+   it on the same stack and direct page. 128 fails identically, so it is not a marginal budget.
+   Do item 2 first.
+4. **Stop-and-wait → sliding window.** The larger win of the two protocol changes, and the larger
+   change: it needs item 2 *and* a mailbox deeper than one frame per direction, which means the
+   WRAM layout, both endpoints, the Lua bridge and the gateway all move together.
+
+**Keep the perspective:** all of these numbers measure the *emulator path*. The real cable is
+synchronous, console-clocked, and has no file bridge, no 1-deep mailbox and no 60 Hz ceiling —
+~20 KB/s is the documented ballpark, about **33× what the test rig gets**. So M7 on real silicon
+is faster than any of this, and items 3 and 4 are worth doing on their own merits rather than
+because the demo depends on them.
+
 ### M12 — Services, not proxies *(follows M11)*
 Once the console has its own address, the gateway stops being a shim everything flows through
 and becomes **an ordinary host offering a service**. The relationship inverts: today every new
