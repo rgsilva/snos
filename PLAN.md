@@ -469,27 +469,63 @@ is frame-size-bound and shows the full 1.66×; the real one is round-trip-bound 
 1.66× measured on `test-vnc` is *not* a user-visible speed-up, and this table exists because I nearly
 reported it as one.
 
-Why — and **the first version of this paragraph got it wrong in a way worth preserving.** I wrote that
-frames were "only 13.8% full" and that `docs/performance.md`'s "frames are already completely full"
-never held for `vnc`. That was 17.1 bytes per **poll**, not per **frame** — two different denominators.
-Checked properly, `vnc`'s data-carrying frames hold **124.1 bytes of a 124-byte capacity**. They are
-completely full, exactly as the doc says, and the doc's conclusion was right all along. A correct
-number about the wrong thing, which is the error class this section keeps producing.
+**MEASURED HOP BY HOP 2026-07-30, and it is a phase bug, not a bandwidth one.** Two premises in the
+paragraph above were wrong and the trace killed both:
 
-What is actually true is that **only about one poll in seven carries data** — `get` is 5.0 polls per
-data frame, `vnc` 7.3 — so the link idles between round trips. `gateway.py`'s `next_out()` does
-`if any_data: self.awaiting = True`: **the gateway is stop-and-wait on its own send side** and will not
-build a new frame until the console acks, resending the in-flight one meanwhile.
+- **Frames are 97% full, not 13.8%.** 409 distinct data frames carry 49,268 bytes — **120.5 B of a
+  124-byte capacity**. The 17.1 B/poll figure is 49,268 ÷ 2876 polls, and the gap is not packing: the
+  gateway puts 2163 data frames on the wire for 409 distinct ones, **sending each 5.3 times**.
+- **`next_out()`'s stop-and-wait costs no latency at all.** Reading the ack to writing the next fresh
+  frame is **20 µs**. It generates the retransmissions; it does not delay anything. My "the gateway is
+  stop-and-wait on its own send side, therefore that is the cost" was a plausible mechanism attached
+  to a real symptom, which is the worst kind of wrong.
 
-**The part that does not add up yet, and is being measured rather than reasoned about:** frames are
-full at both sizes, and the total poll count is ~2876 either way, so doubling the payload should have
-halved the frames needed and the wall clock with it. It did not move at all. Either the round trip
-grew from ~3.5 polls to ~7.3 for a reason nobody has established, or the 2660 frames are set by
-something outside the link entirely. **Do not build on either guess** — see the poll-accounting task.
+Where the 2876 polls actually go (polls are one per video frame; 16.6441 ms/frame = 60.081 fps,
+regressed independently of the harness clock):
 
-**So item 4 is the lever, not item 3.** A window is the one change that removes the round-trip
-dependence rather than trying to carry more per round trip. Item 3b — find where those ~7 polls go —
-is the cheap prerequisite, and it is now the top of this list rather than a footnote.
+| phase | polls | s |
+|---|---|---|
+| before the command is typed (harness waits for frame 400) | 288 | 4.80 |
+| command → first framebuffer byte | 31 | 0.52 |
+| **bulk transfer of the 48 KB** | **2153** | **35.88** |
+| after the last data frame — console still painting, gateway idle | 404 | 6.73 |
+
+Inside the transfer: 405 fresh frames, **1746 retransmits**. Strip three console stalls and the cycle
+is exactly **4.00 polls per data frame**:
+
+| poll | what happens | |
+|---|---|---|
+| k+0 | fresh frame written into the mailbox and **overwritten unread** | +1 |
+| k+1 | the *retransmission* is the copy the console actually takes | 1 |
+| k+2 | `net.c` builds TX after the poll, so the ack leaves now | +1 *(known)* |
+| k+3 | the reply sits one frame deep in the DOWN file | +1 |
+
+**406 of 409 fresh data frames, and 50.0% of all deliveries, are never read.** The console reads
+`LINK_MB_HOST_SEQ` twice on one poll and once on the next in strict alternation, while the bridge
+writes a new frame every poll regardless — and `rx_pending`, which exists to stop precisely this, is
+**cleared unconditionally in `exchange()`**. That is a bug in `c64d8c3`.
+
+**It locks on one event.** At video frame 494 two polls occurred in one frame (`net_service` runs from
+NMI *and* the main loop), the gateway wrote two DOWN frames 60 µs apart, and poll 310 found the file
+empty — the transfer's only starved poll. The gateway writes one DOWN per UP and the bridge consumes
+at most one per poll, so **the queue ratchets 0 → 1 and can never drain**; the odd poll flipped the
+parity, and a 4-poll cycle preserves parity. Before poll 310 fresh frames were consumed on arrival;
+from 321 on, every one was destroyed.
+
+**The control run is what makes this conclusive.** `get file://` on the same bridge, gateway and
+instruments: **zero starvation, delivery lag 1 throughout, 67 of 68 fresh frames consumed on arrival,
+modal fresh-to-fresh gap exactly 2 polls.** The 2-poll floor is reachable with this exact code.
+`vnc`'s 4 is the ratchet, not the protocol.
+
+**The named suspects were all measurably innocent:** the two file hops cost **18 µs** total, and the
+gateway's 4 ms sleep contributes 0 ms median / 2.3 ms p95 of detection lag — under 7% of a 66.6 ms
+round trip. Every extra poll is "wait for the next video frame".
+
+**Still open, and labelled as hypotheses because they were not measured:** three console stalls cost
+543 polls / 9.1 s (20% of the run) — seq 210 alone resent **441 times** with the console's ack frozen
+and the gateway holding 4146 B. That looks like `frame_fits()` refusing a full receive ring, i.e. the
+`vnc` app not draining, but confirming it needs kernel instrumentation. And the 404-poll tail is the
+console painting — that is the transpose, not the link.
 
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
 you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
