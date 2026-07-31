@@ -225,6 +225,13 @@ int main(void) {
       if (n > 0 && n != SYS_ERR) {
         for (i = 0; i < n; i++) sys_putc(buf[i]);
         got += n;
+        /* Checked on EVERY pass, exactly like the save loop below and for
+         * the reason its comment gives: a wait that only checks when the
+         * ring runs dry is uninterruptible exactly when it is longest. */
+        if (sys_pollkey() != SYS_ERR) {
+          say("\n[aborted]\n");
+          break;
+        }
         continue;
       }
       if (sys_pollkey() != SYS_ERR) {

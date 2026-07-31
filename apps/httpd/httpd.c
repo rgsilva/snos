@@ -191,11 +191,15 @@ int main(void) {
             sys_puts("200 ");
             sys_puts(name);
             sys_putc('\n');
+            /* No Content-Length, deliberately: sys_fsize returns the LOW 16
+             * BITS (snos_abi.h), so a >=64 KB file would advertise a wrapped
+             * length and the client would truncate or hang. Connection:
+             * close means the socket end delimits the body — correct
+             * HTTP/1.1, and correct at every size. */
+            (void)size;
             send_str(ch, "HTTP/1.1 200 OK\r\nContent-Type: ");
             send_str(ch, mime_for(name));
-            send_str(ch, "\r\nConnection: close\r\nContent-Length: ");
-            send_u32(ch, size);
-            send_str(ch, "\r\n\r\n");
+            send_str(ch, "\r\nConnection: close\r\n\r\n");
             for (;;) {
               uint16_t n = sys_read_f(buf, BUF);
               if (n == 0 || n == SYS_ERR) break;
@@ -210,16 +214,29 @@ int main(void) {
        * rather than just closing: sys_net_hangup refuses while bytes are still
        * queued, so retrying here is what guarantees the client sees the whole
        * page instead of however much had drained when we let go. */
-      while (sys_net_hangup(ch) == SYS_ERR) {
-        if (sys_net_state(ch) == NET_ST_ERROR) break;
-        if (sys_pollkey() != SYS_ERR) goto done;
-        sys_yield();
+      {
+        /* Bounded: a client that stops draining must not pin a background
+         * server forever (pollkey never answers back there). ~5 s, then
+         * drop the connection and rebind. */
+        uint16_t give_up = (uint16_t)(sys_frames() + 300u);
+        while (sys_net_hangup(ch) == SYS_ERR) {
+          if (sys_net_state(ch) == NET_ST_ERROR) break;
+          if ((int16_t)(sys_frames() - give_up) >= 0) {
+            sys_net_close(ch);
+            ch = sys_net_listen(port);
+            if (ch == SYS_ERR) goto done;
+            break;
+          }
+          if (sys_pollkey() != SYS_ERR) goto done;
+          sys_yield();
+        }
       }
       continue;
     }
 
     if (st == NET_ST_ERROR) {
-      sys_puts("listen failed - is the port already in use?\n");
+      sys_puts(served ? "connection error\n"
+                      : "listen failed - is the port already in use?\n");
       break;
     }
     if (sys_pollkey() != SYS_ERR) break;

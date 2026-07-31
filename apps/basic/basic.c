@@ -735,8 +735,8 @@ static void cmd_save(void) {
   /* Every byte checked: the volume can fill mid-save, and reporting 'saved'
    * over a truncated program is how the next LOAD loses half of it. */
   {
-    int err = 0;
-    for (i = 0; i < (int)nlines && !err; i++) {
+    int werr = 0; /* not `err`: that name is the error-reporting function */
+    for (i = 0; i < (int)nlines && !werr; i++) {
       const char *p;
       uint16_t n = ln_num[i];
       char digits[6];
@@ -746,15 +746,15 @@ static void cmd_save(void) {
         digits[d++] = (char)('0' + (n % 10));
         n = (uint16_t)(n / 10);
       }
-      while (d && !err)
-        err = sys_putc_f((uint16_t)(unsigned char)digits[--d]) == SYS_ERR;
-      if (!err) err = sys_putc_f(' ') == SYS_ERR;
-      for (p = &pool[ln_off[i]]; *p && !err; p++)
-        err = sys_putc_f((uint16_t)(unsigned char)*p) == SYS_ERR;
-      if (!err) err = sys_putc_f('\n') == SYS_ERR;
+      while (d && !werr)
+        werr = sys_putc_f((uint16_t)(unsigned char)digits[--d]) == SYS_ERR;
+      if (!werr) werr = sys_putc_f(' ') == SYS_ERR;
+      for (p = &pool[ln_off[i]]; *p && !werr; p++)
+        werr = sys_putc_f((uint16_t)(unsigned char)*p) == SYS_ERR;
+      if (!werr) werr = sys_putc_f('\n') == SYS_ERR;
     }
     sys_close();
-    if (err) {
+    if (werr) {
       /* Drop the truncated file: a program that LOADs half-way is worse than
        * the honest failure. The previous SAVE is already gone (overwrite),
        * which is exactly why the message must not pretend otherwise. */

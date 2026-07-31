@@ -22,7 +22,9 @@ int sl_send_all(uint16_t ch, const char *p, uint16_t n);
 #define SL_OPEN_FAILED 3
 uint16_t sl_wait_open(uint16_t ch, uint16_t frames, int allow_cancel);
 
-/* dst = src, with `suffix` appended when src carries no ':' of its own. */
+/* dst = src, with `suffix` appended when src carries no ':' of its own.
+ * GUARANTEED alias-safe for dst == src (vnc relies on it): the copy is a
+ * forward identity walk, so any rewrite must preserve that property. */
 void sl_hostport(char *dst, int cap, const char *src, const char *suffix);
 
 #endif

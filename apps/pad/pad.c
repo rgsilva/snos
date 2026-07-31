@@ -10,7 +10,6 @@
 
 int main(void) {
   uint16_t last = 0xFFFFu;
-  uint16_t ticks = 0;
 
   sys_puts("pad test: B exits, START+SELECT kills\n");
   sys_trace("PAD-RAN\n");
@@ -27,7 +26,6 @@ int main(void) {
       sys_puts("pad: clean exit\n");
       return 7;
     }
-    ticks++;
     sys_yield(); /* hand the frame back: the OSK and console keep working */
   }
 }

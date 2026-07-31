@@ -185,6 +185,15 @@ static void scat(char *d, const char *s, uint16_t max) {
 
 static char lowerc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
+/* Characters that can be part of an IRC nick (RFC 1459's set, near enough):
+ * used to word-bound the mention scan. */
+static int is_nickc(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '[' ||
+         c == ']' || c == '\\' || c == '`' || c == '^' || c == '{' ||
+         c == '}' || c == '|';
+}
+
 /* IRC names are case-insensitive, which matters here rather than being a nicety:
  * a server that answers JOIN #SNOS to a JOIN #snos would otherwise open a second
  * tab for the channel you are already in. */
@@ -263,6 +272,14 @@ static void tab_close(int t) {
     for (j = 0; j < USERS_MAX; j++) scpy(users[i][j], users[i + 1][j], USER_LEN + 1);
   }
   ntabs--;
+  /* Everything above the closed tab shifted down one; a view (or overlay
+   * selection) pointing above it must follow, or the pane silently switches
+   * to the closed tab's neighbour and typed text goes to a channel the user
+   * did not pick. Hid in two-tab testing: it needs four tabs and a
+   * below-view close (a KICK from an earlier channel). */
+  if (cur > (uint8_t)t) cur--;
+  if (ovsel > (uint8_t)t) ovsel--;
+  if (ovtop > (uint8_t)t) ovtop--;
   if (cur >= ntabs) cur = (uint8_t)(ntabs - 1);
   bar_dirty = 1;
   pane_force = 1;
@@ -679,8 +696,11 @@ static void handle_line(char *s) {
     if ((uint8_t)text[0] == 0x01) return;
     if (target[0] == '#' || target[0] == '&') {
       t = tab_get(target);
-      /* Our nick in channel text = a mention. Case-insensitive scan, the
-       * same folding ieq uses. */
+      /* Our nick in channel text = a mention. Case-insensitive, and WORD
+       * BOUNDED on both sides: the default nick is 'snes', and on this
+       * machine's natural channels a substring match would fire on
+       * 'snesbot', 'snes9x' and half of ordinary chatter -- an attention
+       * cell that cries wolf trains you to ignore it. */
       {
         char *p2 = text;
         while (*p2) {
@@ -690,8 +710,12 @@ static void handle_line(char *s) {
             b++;
           }
           if (*b == 0) {
-            sys_notify();
-            break;
+            int pre = (p2 == text) || !is_nickc(p2[-1]);
+            int post = !is_nickc(*a);
+            if (pre && post) {
+              sys_notify();
+              break;
+            }
           }
           p2++;
         }

@@ -343,8 +343,8 @@ emu.addEventCallback(function()
     -- Exactly one console copy expected: the foreground cat's. httpd's copy
     -- goes upstream, never to the screen.
     local _, cats = text:gsub("Performance does not matter", "")
-    r.check(cats >= 1,
-            "the foreground cat did not read while httpd served (saw " ..
+    r.check(cats == 1,
+            "expected exactly the foreground cat copy on console (saw " ..
             tostring(cats) .. " copies)")
   end
 

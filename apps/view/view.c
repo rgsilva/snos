@@ -96,7 +96,7 @@ static int show(const char *file) {
       buf[2] != 'M' || buf[3] != 'G') {
     sys_close();
     say("not a picture (no SIMG header)\n");
-    say("fetch one with: image URL NAME\n");
+    say("fetch one with: get URL NAME\n");
     return 0;
   }
   tw = (uint16_t)(buf[8] | (buf[9] << 8));

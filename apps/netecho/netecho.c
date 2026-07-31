@@ -51,7 +51,10 @@ int main(void) {
     /* A client connected. If we are backgrounded, ask for eyes: the kernel
      * shows the attention cell and clears it when we are foregrounded. From
      * the foreground the call is a no-op. */
-    if (st == NET_ST_OPEN && prev_st != NET_ST_OPEN && prev_st != NET_ST_EOF)
+    /* Any entry into OPEN is a fresh client — including EOF->LISTEN->OPEN
+     * inside one polling gap, which the old prev!=EOF exclusion wrongly
+     * suppressed. */
+    if (st == NET_ST_OPEN && prev_st != NET_ST_OPEN)
       sys_notify();
     prev_st = st;
 
@@ -85,17 +88,36 @@ int main(void) {
        * bytes are still on their way out, which is why this retries rather than
        * assuming it worked. */
       if (st == NET_ST_EOF) {
-        if (sys_net_hangup(ch) != SYS_ERR) {
-          sys_puts("client served, ");
-          sl_putu32(served);
-          sys_puts(" bytes so far\n");
+        /* Bounded like irc's drain: hangup refuses while bytes are unsent,
+         * and a client that stops draining would otherwise pin a BACKGROUND
+         * server forever — pollkey never answers back there. Give it ~5 s,
+         * then drop the connection the hard way and return to listening. */
+        uint16_t give_up = (uint16_t)(sys_frames() + 300u);
+        for (;;) {
+          if (sys_net_hangup(ch) != SYS_ERR) {
+            sys_puts("client served, ");
+            sl_putu32(served);
+            sys_puts(" bytes so far\n");
+            break;
+          }
+          if ((int16_t)(sys_frames() - give_up) >= 0) {
+            sys_net_close(ch);
+            ch = sys_net_listen(port);
+            if (ch == SYS_ERR) goto done;
+            break;
+          }
+          if (sys_pollkey() != SYS_ERR) goto done;
+          sys_yield();
         }
         if (sys_pollkey() != SYS_ERR) break;
         sys_yield();
         continue;
       }
     } else if (st == NET_ST_ERROR) {
-      sys_puts("listen failed - is the port already in use?\n");
+      /* Before the first byte this is almost always the bind; after it, it
+       * is the connection dying — two different debugging sessions. */
+      sys_puts(served ? "connection error\n"
+                      : "listen failed - is the port already in use?\n");
       break;
     }
 
