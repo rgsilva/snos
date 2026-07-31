@@ -67,6 +67,9 @@ emu.addEventCallback(function()
   r.check(text:find("wrote NOTES.TXT", 1, true) ~= nil, "write failed")
   r.check(text:find("fstest: 20000 bytes across 3 windows OK", 1, true) ~= nil,
           "SRAM addressing is wrong across window boundaries")
+  r.check(text:find("compact reclaimed and survived recovery", 1, true) ~= nil,
+          "compaction lost data or failed to reclaim")
+  r.check(text:find("COMPACT FAILED", 1, true) == nil, "compact self-test failed")
   r.check(text:find("full-volume overwrite refused, file intact", 1, true) ~= nil,
           "overwriting on a full volume must refuse up front, not destroy the old copy")
 

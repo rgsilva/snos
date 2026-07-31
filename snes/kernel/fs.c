@@ -105,6 +105,7 @@ static void sramfs_format(void) {
   sram_wr(3, 'R');
   sram_wr16(4, 1);              /* version */
   sram_wr32(8, SRAMFS_DATA_OFF); /* bump allocator */
+  sram_wr32(12, 0);              /* compact journal idle */
   for (i = 0; i < SRAMFS_SLOTS; i++) sram_wr(slot_addr((uint16_t)i), 0);
 }
 
@@ -145,6 +146,7 @@ void fs_init(void) {
   }
   write_owner = 0xFF;
   romfs_mount();
+  fs_compact_recover(); /* finish any interrupted compact BEFORE mounting */
   sramfs_mount();
 }
 
@@ -423,4 +425,78 @@ void fs_reap(uint8_t proc) {
   }
   hnd[proc].idx = -1;
   hnd[proc].write = 0;
+}
+
+/* ---- reclaim (compact) ---------------------------------------------------
+ * The bump allocator never rewinds, so deleted files' bytes stay spent until
+ * someone recopies the survivors downward and pulls the pointer back. That is
+ * fs_compact(). It is SLOW (seconds, per-byte SRAM copy) and DELIBERATE: the
+ * shell's explicit `compact` command is the only caller, rm stays instant and
+ * crash-proof, and nothing compacts behind the user's back.
+ *
+ * Crash safety is a redo journal in the SRAM header ($0C..$17): before each
+ * file moves, its slot number+1 and destination land in the journal; the copy
+ * always runs downward (dest < src) in forward order, so an interrupted copy
+ * is simply re-runnable; the slot's offset is committed only after the bytes,
+ * and the journal is cleared only after the commit. Power loss at ANY point
+ * either redoes an idempotent copy or has already committed. fs_init calls
+ * fs_compact_recover() before mounting. */
+#define CJ_SLOT 12u  /* u32: slot number + 1; 0 = journal idle */
+#define CJ_DEST 16u  /* u32: destination offset for that slot's bytes */
+
+static void compact_move(uint16_t slot, uint32_t dst) {
+  uint32_t src = sram_rd32(slot_addr(slot) + 16);
+  uint32_t size = sram_rd32(slot_addr(slot) + 20);
+  uint32_t i;
+  if (src == dst) return;
+  sram_wr32(CJ_DEST, dst);
+  sram_wr32(CJ_SLOT, (uint32_t)slot + 1u); /* arm LAST: dest is valid first */
+  for (i = 0; i < size; i++) sram_wr(dst + i, sram_rd(src + i));
+  sram_wr32(slot_addr(slot) + 16, dst); /* commit the new offset */
+  sram_wr32(CJ_SLOT, 0);                /* only now is the journal idle */
+}
+
+void fs_compact_recover(void) {
+  uint32_t j = sram_rd32(CJ_SLOT);
+  if (j == 0 || j > SRAMFS_SLOTS) return;
+  /* Redo the interrupted move: the source bytes are untouched by design
+   * (moves only ever go downward into dead space), so re-copying is safe
+   * whether the crash hit the copy, the commit, or the clear. */
+  compact_move((uint16_t)(j - 1u), sram_rd32(CJ_DEST));
+}
+
+uint32_t fs_reclaimable(void) {
+  uint32_t live = 0, s;
+  for (s = 0; s < SRAMFS_SLOTS; s++)
+    if (sram_rd(slot_addr((uint16_t)s)) != 0) live += sram_rd32(slot_addr((uint16_t)s) + 20);
+  return sram_rd32(8) - SRAMFS_DATA_OFF - live;
+}
+
+int fs_compact(void) {
+  uint32_t dst = SRAMFS_DATA_OFF;
+  int moved = 0;
+  if (write_owner != 0xFF) return -1; /* never under a live writer */
+  proc_lock(); /* seconds-long, deliberate: background waits its turn */
+  for (;;) {
+    /* Pick the live slot with the lowest offset at or above dst. */
+    int best = -1;
+    uint32_t best_off = 0xFFFFFFFFul, s;
+    for (s = 0; s < SRAMFS_SLOTS; s++) {
+      uint32_t e = slot_addr((uint16_t)s), off;
+      if (sram_rd(e) == 0) continue;
+      off = sram_rd32(e + 16);
+      if (off >= dst && off < best_off) {
+        best_off = off;
+        best = (int)s;
+      }
+    }
+    if (best < 0) break;
+    compact_move((uint16_t)best, dst);
+    if (best_off != dst) moved++;
+    dst += sram_rd32(slot_addr((uint16_t)best) + 20);
+  }
+  sram_wr32(8, dst); /* the allocator rewinds: reclaim is real */
+  fs_init();         /* offsets changed; remount and drop stale handles */
+  proc_unlock();
+  return moved;
 }

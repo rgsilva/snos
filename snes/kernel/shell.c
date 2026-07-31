@@ -84,7 +84,8 @@ static void cmd_help(void) {
   kcon_puts("ls            list files\n");
   kcon_puts("cat NAME      print a file\n");
   kcon_puts("write N T     write text T to file N\n");
-  kcon_puts("rm NAME       delete a file\n");
+  kcon_puts("rm NAME       delete a file (instant; bytes stay spent)\n");
+  kcon_puts("compact       recopy files, reclaim deleted space (slow)\n");
   kcon_puts("net           gateway diagnostics\n");
   kcon_puts("debug         other diagnostics\n");
 }
@@ -119,7 +120,9 @@ static void cmd_mem(void) {
   kcon_putu((uint16_t)(sram_size() >> 10));
   kcon_puts(" KB, free ");
   kcon_putu((uint16_t)(fs_free() >> 10));
-  kcon_puts(" KB\n");
+  kcon_puts(" KB, reclaimable ");
+  kcon_putu((uint16_t)(fs_reclaimable() >> 10));
+  kcon_puts(" KB (see compact)\n");
 }
 
 static void cmd_echo(const char *rest) {
@@ -566,6 +569,25 @@ static void cmd_write(char *rest) {
   kcon_putc('\n');
 }
 
+/* Recopy the surviving files downward and rewind the allocator. Slow and
+ * deliberate -- see fs_compact for the journal that makes it crash-safe. */
+static void cmd_compact(void) {
+  uint32_t before = fs_reclaimable();
+  int moved;
+  kcon_puts("compacting - do not power off...\n");
+  kcon_sync();
+  moved = fs_compact();
+  if (moved < 0) {
+    kcon_puts("cannot compact while a file is open for writing\n");
+    return;
+  }
+  kcon_puts("reclaimed ");
+  kcon_putu((uint16_t)(before >> 10));
+  kcon_puts(" KB (");
+  kcon_putu((uint16_t)moved);
+  kcon_puts(" files moved)\n");
+}
+
 static void cmd_rm(const char *name) {
   if (*name == 0) {
     kcon_puts("usage: rm NAME\n");
@@ -580,6 +602,12 @@ static void cmd_rm(const char *name) {
   kcon_puts("deleted ");
   kcon_puts(name);
   kcon_putc('\n');
+  /* The pages stay spent (bump allocator); say so when it starts to matter,
+   * and leave the decision with the user -- rm stays instant and safe. */
+  if (fs_reclaimable() >= 8u * 1024u) {
+    kcon_putu((uint16_t)(fs_reclaimable() >> 10));
+    kcon_puts(" KB reclaimable - run 'compact' to recover it\n");
+  }
 }
 
 /* Write a known pattern to the SRAM volume and read it back byte for byte.
@@ -663,6 +691,52 @@ static void cmd_fstest(void) {
     }
     sram_wr32(8, saved);
     fs_delete("OVR.TXT");
+  }
+
+  /* Compaction: create A and B, delete A, compact, and demand (a) the space
+   * really came back and (b) B's bytes survived the move byte-for-byte.
+   * Then the torture case: arm the journal AS IF power died mid-move of B,
+   * run recovery, and demand B is still intact -- the redo must be
+   * idempotent whether the crash hit the copy, the commit, or the clear. */
+  {
+    uint32_t i, free0, free1;
+    int ok = 1;
+    fs_open_write("CA.TXT");
+    for (i = 0; i < 512; i++) fs_putc((uint8_t)(i * 3u));
+    fs_close();
+    fs_open_write("CB.TXT");
+    for (i = 0; i < 512; i++) fs_putc((uint8_t)(i * 7u));
+    fs_close();
+    free0 = fs_free();
+    fs_delete("CA.TXT");
+    if (fs_compact() < 0) ok = 0;
+    free1 = fs_free();
+    if (free1 < free0 + 512) ok = 0; /* CA's pages must be back */
+    {
+      const fs_entry_t *b = fs_find("CB.TXT");
+      if (!b || b->size != 512) ok = 0;
+      else
+        for (i = 0; i < 512; i++)
+          if (fs_read_byte(b, i) != (uint8_t)(i * 7u)) { ok = 0; break; }
+    }
+    /* Torture: re-arm the journal for CB as if the move died mid-copy. */
+    {
+      const fs_entry_t *b = fs_find("CB.TXT");
+      if (b) {
+        sram_wr32(16, b->off);            /* dest = where it already lives */
+        sram_wr32(12, (uint32_t)b->slot + 1u);
+        fs_compact_recover();             /* must be a harmless redo */
+        fs_init();
+        b = fs_find("CB.TXT");
+        if (!b) ok = 0;
+        else
+          for (i = 0; i < 512; i++)
+            if (fs_read_byte(b, i) != (uint8_t)(i * 7u)) { ok = 0; break; }
+      }
+    }
+    fs_delete("CB.TXT");
+    kcon_puts(ok ? "fstest: compact reclaimed and survived recovery\n"
+                 : "fstest: COMPACT FAILED\n");
   }
 }
 
@@ -987,6 +1061,7 @@ void shell_run(void) {
     else if (streq(line, "cat")) cmd_cat(rest);
     else if (streq(line, "write")) cmd_write(rest);
     else if (streq(line, "rm")) cmd_rm(rest);
+    else if (streq(line, "compact")) cmd_compact();
     else if (streq(line, "net")) cmd_net(rest);
     else if (streq(line, "debug")) cmd_debug(rest);
     else {

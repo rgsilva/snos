@@ -65,7 +65,10 @@ void fs_close(void);
 uint32_t fs_open_size(void);
 
 int fs_delete(const char *name);
-void fs_reap(uint8_t proc); /* release a dead process handle */
+void fs_reap(uint8_t proc);
+uint32_t fs_reclaimable(void); /* dead bytes a compact would recover */
+int fs_compact(void);          /* slow+deliberate; -1 while a writer is live */
+void fs_compact_recover(void); /* redo an interrupted compact (fs boot) */ /* release a dead process handle */
 
 /* Stream the open file straight into VRAM by DMA, bypassing C entirely.
  * The caller sets the VRAM address and forces blank; this only moves bytes. */
