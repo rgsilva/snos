@@ -1,38 +1,44 @@
 ;; SNOS application memory description. @BANK@ is substituted with the app's
-;; ROM bank (e.g. c8) by tools/buildapp.sh.
+;; ROM bank (e.g. c8) and @ANEAR_LO@/@ANEAR_HI@/@AFAR_LO@/@AFAR_HI@ with the
+;; app's ARENA SLOT bounds by tools/buildapp.sh.
 ;;
 ;; An app is linked for ONE specific bank. That is not a limitation to work
 ;; around — it is the design (PLAN.md §1). Cart ROM is already executable, so
 ;; binding an app to a bank at link time is what removes the need for a loader
-;; and a relocator entirely.
+;; and a relocator entirely. M10 step 4 extends the same move to DATA: an app
+;; is linked for one specific region of the arena, declared in the Makefile
+;; (APP_ARENA_*), and two apps may run at once exactly when their regions are
+;; disjoint. The address ranges below ARE the enforcement — an app that
+;; outgrows its slot fails to link, loudly, today; it does not corrupt its
+;; neighbour at runtime, three weeks from now.
 ;;
 ;; RAM comes in two very different flavours here:
 ;;   - stack and direct page MUST be in bank $00, because the 65816 puts them
-;;     there and nowhere else. The kernel hands the app the slots reserved in
-;;     the kernel's own linker.scm, and both files have to agree.
-;;   - everything else lives in WRAM bank $7F, the app arena. Every app is
-;;     linked to the SAME arena addresses, which is safe precisely because only
-;;     one app runs at a time.
+;;     there and nowhere else. Apps are LINKED against process slot 1's
+;;     addresses, but the linked addresses only fix offsets: Calypsi reaches
+;;     both through the S and D registers, so the kernel can run the same
+;;     binary in any slot (M10 step 3).
+;;   - everything else lives in the app's arena slot in WRAM bank $7F.
 
 (define memories
   '((memory DirectPage
-            (address (#x1900 . #x19ff))   ; app DP slot, per kernel linker.scm
+            (address (#x1900 . #x19ff))   ; slot 1's DP; offsets-only, see above
             (type RAM)
             (section registers ztiny tiny))
 
     (memory Stack
-            (address (#x0c00 . #x18ff))   ; app stack slot, 3328 bytes
-            (type RAM)
+            (address (#x1200 . #x17ff))   ; slot 1's stack, 1536 B (measured:
+            (type RAM)                    ; worst app high-water is 1,123)
             (section stack))
 
     (memory AppNear
-            (address (#x7f0000 . #x7f00ff))
+            (address (#x@ANEAR_LO@ . #x@ANEAR_HI@))
             (type RAM)
             (qualifier near)
             (section data znear near fastregs))
 
     (memory AppFar
-            (address (#x7f0100 . #x7fffff))
+            (address (#x@AFAR_LO@ . #x@AFAR_HI@))
             (type RAM)
             (qualifier far)
             (section heap zfar far huge))
@@ -45,7 +51,7 @@
                      code compactcode farcode cdata cnear cfar chuge switch
                      itiny idata inear ifar ihuge data_init_table))
 
-    (block stack (size #xd00))
+    (block stack (size #x600))
     (base-address _DirectPageStart DirectPage 0)
     (base-address _NearBaseAddress AppNear 0)
     ))

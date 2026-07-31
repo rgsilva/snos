@@ -24,6 +24,12 @@
 #define APPHDR_NAME 0x0C    /* 16 bytes, NUL padded */
 #define APPHDR_SRAM 0x1C    /* SRAM quota, 8 KB blocks */
 #define APPHDR_FLAGS 0x1D
+/* Arena slot (M10 step 4), in 256-byte pages of bank $7F: where this app's
+ * data was LINKED. Two apps may co-run iff their page ranges are disjoint;
+ * the kernel refuses an overlapping spawn deterministically at launch. The
+ * two bytes were the checksum word, which nothing ever computed or checked. */
+#define APPHDR_ARENA_PAGE 0x1E  /* start page: data at $7F:page*256 */
+#define APPHDR_ARENA_PAGES 0x1F /* page count; 0 means all 256 (64 KB) */
 
 typedef struct {
   char name[APP_NAME_LEN + 1];
@@ -32,6 +38,9 @@ typedef struct {
   uint16_t minabi;
   uint8_t banks;
   uint8_t type;
+  uint8_t arena_page;
+  uint8_t arena_pages; /* normalised: 0-in-header stored here as full count
+                        * via uint16 would not fit; kept raw, 0 = 256 */
 } app_entry_t;
 
 void app_scan(void);

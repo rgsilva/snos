@@ -6,13 +6,31 @@
 # kernel/syscall.s, which it links its own copy of so its syscall path is
 # byte-identical to the kernel's.
 #
-# Usage: buildapp.sh <name> <bankhex> <caldir> <builddir> [min-kernel-abi]
+# Usage: buildapp.sh <name> <bankhex> <caldir> <builddir> [min-kernel-abi] \
+#                    [arena-lo-hex] [arena-hi-hex]
+#
+# The arena bounds (M10 step 4, e.g. 7f0000 7f3bff) place the app's DATA the
+# way the bank places its CODE: at build time, by declaration. The first 256
+# bytes of the region are the near segment, the rest far; the linker's own
+# range check is the enforcement — an app that outgrows its declared slot
+# fails RIGHT HERE, not in a neighbour's memory at runtime.
 set -e
 NAME=$1
 BANK=$2
 CALDIR=$3
 BUILD=$4
 MINABI=${5:-1}
+ARENA_LO=${6:-7f0000}
+ARENA_HI=${7:-7fffff}
+
+ANEAR_LO=$ARENA_LO
+ANEAR_HI=$(printf '%06x' $((0x$ARENA_LO + 0xFF)))
+AFAR_LO=$(printf '%06x' $((0x$ARENA_LO + 0x100)))
+AFAR_HI=$ARENA_HI
+# The header's two-byte arena descriptor: start page within bank $7F, and
+# page count with 0 meaning all 256 (the whole arena in one byte).
+ARENA_PAGE=$(( (0x$ARENA_LO >> 8) & 0xFF ))
+ARENA_PAGES=$(( ((0x$ARENA_HI - 0x$ARENA_LO + 1) >> 8) & 0xFF ))
 
 OUT="$BUILD/apps/$NAME"
 SRC="../apps/$NAME"
@@ -22,8 +40,11 @@ MODEL="--code-model=large --data-model=large"
 CFLAGS="--core=65816 --target=snes $MODEL --no-ppu-mul -O0 -Ikernel -I../apps/lib"
 AFLAGS="--core=65816 --target=SNES $MODEL"
 
-sed "s/@BANK@/$BANK/g" ../apps/app.scm.in > "$OUT/app.scm"
-python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s" "$MINABI"
+sed -e "s/@BANK@/$BANK/g" -e "s/@ANEAR_LO@/$ANEAR_LO/g" \
+    -e "s/@ANEAR_HI@/$ANEAR_HI/g" -e "s/@AFAR_LO@/$AFAR_LO/g" \
+    -e "s/@AFAR_HI@/$AFAR_HI/g" ../apps/app.scm.in > "$OUT/app.scm"
+python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s" "$MINABI" \
+    "$ARENA_PAGE" "$ARENA_PAGES"
 
 "$CALDIR/bin/as65816" -o "$OUT/appinfo.o" "$OUT/appinfo.s" $AFLAGS
 "$CALDIR/bin/as65816" -o "$OUT/crt0.o"    ../apps/crt0.s    $AFLAGS

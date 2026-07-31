@@ -138,6 +138,29 @@ APP_ABI_vnc    := 7
 # talks and listens on it. Nothing it does needs ABI 8.
 APP_ABI_irc    := 7
 
+# Arena slots (M10 step 4): measured need, declared placement, build-time
+# enforcement — the app's data links inside exactly this range and the link
+# FAILS if it no longer fits. Two apps may co-run iff their regions are
+# disjoint; the kernel reads the slot from the app header and refuses
+# overlapping spawns. Measured usage that sized these regions (of 64 KB):
+# servers <1%, basic 11%, edit 20%, irc 66%, vnc 78%.
+#   A  7f0000-7f3bff  15 KB  foreground UI apps (never co-run with each other)
+#   C  7f3c00-7f3fff   1 KB  small background servers/downloads
+#   B  7f4000-7fffff  48 KB  irc — disjoint from A and C by construction:
+#                            edit+irc is the M10 demo pairing
+#   X  7f0000-7fffff  64 KB  vnc — genuinely needs the whole arena, co-runs
+#                            with nothing (and is meaningless backgrounded)
+APP_ARENA_hello   := 7f0000 7f3bff
+APP_ARENA_pad     := 7f0000 7f3bff
+APP_ARENA_basic   := 7f0000 7f3bff
+APP_ARENA_edit    := 7f0000 7f3bff
+APP_ARENA_view    := 7f0000 7f3bff
+APP_ARENA_get     := 7f3c00 7f3fff
+APP_ARENA_netecho := 7f3c00 7f3fff
+APP_ARENA_httpd   := 7f3c00 7f3fff
+APP_ARENA_irc     := 7f4000 7fffff
+APP_ARENA_vnc     := 7f0000 7fffff
+
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)
 
@@ -162,7 +185,7 @@ $(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c $(wildcard ../apps/$(1)/*.s) \
                              ../apps/lib/snoslib.c ../apps/lib/snoslib.h \
                              $(K)/syscall.s $(KERNEL_H) tools/mkappinfo.py \
                              tools/buildapp.sh | $(BUILD)
-	sh tools/buildapp.sh $(1) $(APP_BANK_$(1)) $(CALDIR) $(BUILD) $(or $(APP_ABI_$(1)),1)
+	sh tools/buildapp.sh $(1) $(APP_BANK_$(1)) $(CALDIR) $(BUILD) $(or $(APP_ABI_$(1)),1) $(or $(APP_ARENA_$(1)),7f0000 7fffff)
 endef
 $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 

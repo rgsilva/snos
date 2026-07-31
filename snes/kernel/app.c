@@ -40,6 +40,8 @@ void app_scan(void) {
       a->minabi = far_rd16(b, APPHDR_MINABI);
       a->banks = far_rd(b, APPHDR_BANKS);
       a->type = far_rd(b, APPHDR_TYPE);
+      a->arena_page = far_rd(b, APPHDR_ARENA_PAGE);
+      a->arena_pages = far_rd(b, APPHDR_ARENA_PAGES);
       if (a->banks == 0) a->banks = 1;
       napps++;
       b = (uint16_t)(b + a->banks);

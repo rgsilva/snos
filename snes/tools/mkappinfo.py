@@ -8,7 +8,7 @@ app is purely a build-time act.
 
 Layout must match APPHDR_* in snes/kernel/app.h.
 
-Usage: mkappinfo.py <name> <banks> <out.s> [min-kernel-abi]
+Usage: mkappinfo.py <name> <banks> <out.s> [min-kernel-abi] [arena-page] [arena-pages]
 """
 import os
 import sys
@@ -19,6 +19,12 @@ NAME_LEN = 16
 def main(argv):
     name, banks, out_path = argv[0], int(argv[1]), argv[2]
     minabi = int(argv[3]) if len(argv) > 3 else 1
+    # Arena slot, in 256-byte pages of bank $7F (M10 step 4): start page and
+    # page count, 0 pages meaning "all 256" so the whole arena still fits a
+    # byte. Lives in the two bytes the checksum never used, so the header
+    # stays 32 bytes and the $20 trampoline never moves.
+    arena_page = int(argv[4], 0) if len(argv) > 4 else 0
+    arena_pages = int(argv[5], 0) if len(argv) > 5 else 0
     if len(name) > NAME_LEN:
         raise SystemExit(f"app name {name!r} exceeds {NAME_LEN} characters")
     padded = name.ljust(NAME_LEN, "\0")
@@ -41,7 +47,8 @@ def main(argv):
         f"        .byte   {body}  ; name[16]",
         "        .byte   0                ; SRAM quota, 8 KB blocks",
         "        .byte   0                ; flags",
-        "        .word   0                ; header checksum (unused)",
+        f"        .byte   {arena_page}               ; arena start page ($7Fpp00)",
+        f"        .byte   {arena_pages}               ; arena pages (0 = 256)",
         "",
         ";;; Offset $20: the entry trampoline.",
         ";;; The header above is exactly 32 bytes, so this lands at a known",
