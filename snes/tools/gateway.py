@@ -42,8 +42,11 @@ import time
 import urllib.error
 import urllib.request
 
-UP = "/tmp/snos-up.bin"       # SNES -> gateway
-DOWN = "/tmp/snos-down.bin"   # gateway -> SNES
+# SNES -> gateway and back. Overridable so the host-side bridge test
+# (test/host/bridge_test.py) can run against a private pair of files while a
+# real session owns /tmp's.
+UP = os.environ.get("SNOS_UP", "/tmp/snos-up.bin")
+DOWN = os.environ.get("SNOS_DOWN", "/tmp/snos-down.bin")
 
 FRAME = 128
 HDR = 4
