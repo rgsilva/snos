@@ -281,6 +281,18 @@ end
 local frame, step, at = 0, 1, nil
 local claimed = false
 local shot, bar_shot, status_shot, back_shot = nil, nil, nil, nil
+local timeout_shot = nil
+local ping_wait_until = 0
+local PONG_GRACE_TEST = 1800   -- mirrors PONG_GRACE in irc.c
+
+-- Did the CLIENT ever send a PING? (The ircd records every client line; the
+-- server's own PING at step 2 is not in that list.)
+local function saw_client_ping()
+  for _, l in ipairs(ircd.lines) do
+    if l:upper():find("^PING") then return true end
+  end
+  return false
+end
 local scrolled_shot, relive_shot = nil, nil
 
 emu.addEventCallback(function()
@@ -395,6 +407,34 @@ emu.addEventCallback(function()
 
   if step == 6.75 then
     back_shot = L.display_text(0, 27)
+    -- Keepalive: the ircd now goes COMPLETELY silent. The client last heard
+    -- from it at step 4, so KEEPALIVE_FRAMES (10800) after that it must probe
+    -- with its own PING; the ircd deliberately never answers, and PONG_GRACE
+    -- (1800) later the client must declare the connection lost. Real windows,
+    -- no test backdoor — the testrunner is unthrottled, so this is wall-cheap.
+    ping_wait_until = frame + 14000
+    at = frame + 30
+    step = 6.8
+    return
+  end
+
+  if step == 6.8 then
+    if saw_client_ping() then
+      at = frame + PONG_GRACE_TEST + 600  -- ride out the grace, plus repaint slack
+      step = 6.9
+    elseif frame > ping_wait_until then
+      at = frame + 30                     -- give up; the assertion will say why
+      step = 6.9
+    else
+      at = frame + 30                     -- keep polling
+    end
+    return
+  end
+
+  if step == 6.9 then
+    -- The timeout notice goes to the status tab and the client switches there
+    -- itself; sample whatever is on screen now.
+    timeout_shot = L.display_text(0, 27)
     at = frame + 30
     step = 7
     return
@@ -450,6 +490,15 @@ emu.addEventCallback(function()
   -- A clean quit, with the reason surviving rather than the socket just dying.
   r.check(ircd.quit ~= nil and ircd.quit:find("see you", 1, true) ~= nil,
           "QUIT arrived as " .. tostring(ircd.quit))
+
+  -- Keepalive, both halves: the probe went out during the silence, and the
+  -- unanswered probe was surfaced as a dead connection rather than the client
+  -- sitting there looking connected forever.
+  r.check(saw_client_ping(),
+          "the client never sent its keepalive PING during server silence")
+  r.check(timeout_shot ~= nil and
+          timeout_shot:find("connection lost (ping timeout)", 1, true) ~= nil,
+          "the unanswered PING did not surface as a connection-lost notice")
 
   -- ------------------------------------------------------------- on screen
   if shot then

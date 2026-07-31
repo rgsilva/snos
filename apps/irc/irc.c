@@ -78,6 +78,16 @@
  * reply not crossing the link rather than the server being slow. */
 #define OPEN_DEADLINE 1500u
 
+/* Keepalive. Answering the server's PINGs (below) is what keeps the SERVER
+ * from dropping us; this is the other direction. A dead bridge, a killed
+ * gateway or a NAT that timed out all leave the channel looking OPEN while
+ * nothing will ever arrive again — sys_net_state only notices honest TCP
+ * death. So after ~3 minutes of total silence, ask, and give the answer ~30
+ * seconds; ANY received line proves the pipe, not just the PONG. Both fit
+ * comfortably in the (int16_t)(a - b) wrap idiom (< 32767 frames). */
+#define KEEPALIVE_FRAMES 10800u
+#define PONG_GRACE 1800u
+
 /* Repaint pacing, and it matters more than it looks.
  *
  * con_flush moves four rows per vblank and a full pane is 26, so one repaint
@@ -145,6 +155,10 @@ static uint8_t overlay, ovsel, ovtop;
  * own welcome out of sight before you could read it. */
 static uint16_t scroll;
 static uint8_t quitting, registered, disconnected, nick_tries;
+/* Keepalive state: frame of the last received byte, and — once a probe is in
+ * flight — the frame by which something must arrive back. */
+static uint16_t last_rx, pong_by;
+static uint8_t ping_sent;
 
 /* ---------------------------------------------------------------- strings */
 
@@ -1168,6 +1182,7 @@ int main(void) {
   emit(0, "* connected, registering");
   sendv("NICK ", nick, 0, 0);
   sendv("USER ", nick, " 0 * :SNOS IRC", 0);
+  last_rx = sys_frames();
 
   for (;;) {
     uint16_t k;
@@ -1180,6 +1195,11 @@ int main(void) {
       if (n == 0 || n == SYS_ERR) break;
       busy = 1;
       for (i = 0; i < n; i++) rx_byte(nbuf[i]);
+    }
+    if (busy) {
+      /* Bytes arrived: the pipe is proven, whatever they said. */
+      last_rx = sys_frames();
+      ping_sent = 0;
     }
 
     while ((k = sys_pollkey()) != SYS_ERR) {
@@ -1197,6 +1217,24 @@ int main(void) {
       scroll = 0;
       bar_dirty = 1;
       pane_force = 1;
+    }
+
+    /* The keepalive probe, and its verdict. */
+    if (!disconnected) {
+      if (!ping_sent) {
+        if ((int16_t)(sys_frames() - (uint16_t)(last_rx + KEEPALIVE_FRAMES)) >= 0) {
+          sendv("PING :snos", 0, 0, 0);
+          ping_sent = 1;
+          pong_by = (uint16_t)(sys_frames() + PONG_GRACE);
+        }
+      } else if ((int16_t)(sys_frames() - pong_by) >= 0) {
+        disconnected = 1;
+        emit(0, "* connection lost (ping timeout)");
+        cur = 0;
+        scroll = 0;
+        bar_dirty = 1;
+        pane_force = 1;
+      }
     }
 
     read_screen();
