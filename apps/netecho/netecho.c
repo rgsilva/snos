@@ -14,46 +14,19 @@
  * moves ~615 B/s; a queue of parallel clients would be a queue of timeouts.
  */
 #include "snos_abi.h"
+#include "snoslib.h"
 
 #define BUF 64
 
 static char args[SNOS_ARGV_MAX];
 static uint8_t buf[BUF];
 
-static uint16_t parse_port(const char *s) {
-  uint16_t v = 0;
-  int any = 0;
-  while (*s == ' ') s++;
-  while (*s >= '0' && *s <= '9') {
-    v = (uint16_t)(v * 10u + (uint16_t)(*s - '0'));
-    s++;
-    any = 1;
-  }
-  return any ? v : 0;
-}
-
-static void say_u32(uint32_t v) {
-  /* sys_putu takes 16 bits; an echo session can exceed 64 KB. */
-  char d[11];
-  int n = 0;
-  if (v == 0) {
-    sys_putc('0');
-    return;
-  }
-  while (v && n < 11) {
-    d[n++] = (char)('0' + (uint16_t)(v % 10u));
-    v /= 10u;
-  }
-  while (n) sys_putc((uint16_t)(unsigned char)d[--n]);
-}
-
 int main(void) {
   uint16_t port, ch, st;
   uint32_t served = 0;
 
   snos_getargs(args, sizeof args);
-  port = parse_port(args);
-  if (port == 0) port = 7777;
+  port = sl_parse_port(args, 7777);
 
   if (!sys_net_up()) {
     sys_puts("no gateway attached\n");
@@ -106,7 +79,7 @@ int main(void) {
       if (st == NET_ST_EOF) {
         if (sys_net_hangup(ch) != SYS_ERR) {
           sys_puts("client served, ");
-          say_u32(served);
+          sl_putu32(served);
           sys_puts(" bytes so far\n");
         }
         if (sys_pollkey() != SYS_ERR) break;
@@ -125,7 +98,7 @@ int main(void) {
 done:
   sys_net_close(ch);
   sys_puts("\nechoed ");
-  say_u32(served);
+  sl_putu32(served);
   sys_puts(" bytes\n");
   return 0;
 }

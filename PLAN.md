@@ -328,12 +328,14 @@ holds only actionable work; this is the durable record.
 - **`net_write` + `build_frame`'s TX copy are still per-byte** — the same 2-D-array shape that
   measured 234 cyc/byte in `ring_put`. Parked: today's workloads are receive-dominated (vnc sends
   ~10 B/poll); rises with `httpd` serving real bodies and at M7.
-- **Shared `libsnos` for the apps** — the review measured ~450 duplicated lines across the eight
-  apps that would collapse to ~150: the blocking send-drain (4 copies), connect/open-wait with
-  deadline+cancel (4, `get`'s is the richest), u32 decimal printing (5 — two of which were *bugs*,
-  fixed in `4ea0b1e`), string helpers (4), host:port defaulting (2), the file-picker UI (2), and
-  the Mode-3/cursor PPU boilerplate vnc and view share byte-for-byte. Parked as a deliberate
-  refactor for a fresh session: it touches every app and `buildapp.sh` at once, and any shared
+- **Shared `libsnos` for the apps** — **the mechanical half executed 2026-07-31**:
+  `apps/lib/snoslib.{c,h}` (compiled per app by buildapp.sh — separate links, no shared address
+  space) now owns the blocking send-drain, the simple open-wait with deadline+cancel, u32
+  decimal printing, port parsing and host:port defaulting; get/httpd/netecho/irc/vnc migrated,
+  −184/+56 lines, 14/14 green. **Kept out on purpose:** `get`'s open-wait (its timeout
+  forensics ARE the feature — the others should someday adopt it, not the reverse), netecho's
+  echo drain (it cancels mid-send, deliberately), edit/basic digit loops (different sinks), the
+  file-picker UI and the vnc/view PPU boilerplate (behavioural; still parked). Any future shared
   code must obey the no-initialised-writable-statics rule that bit `basic`'s RND.
 - **`netbridge.lua` still has zero test coverage** — `make test` speaks the mailbox directly. The
   shape of the missing test: a host-side pytest driving `gateway.py` against a scripted peer that

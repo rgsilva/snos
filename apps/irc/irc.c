@@ -53,6 +53,7 @@
  * debug from the far end of a 615 B/s link.
  */
 #include "snos_abi.h"
+#include "snoslib.h"
 
 #define LINE_W 64            /* the console is 64 columns; that is the ceiling */
 #define MAXTABS 8
@@ -513,20 +514,7 @@ static void repaint(int busy) {
 
 /* --------------------------------------------------------------- sending */
 
-static int send_all(const char *p, uint16_t n) {
-  uint16_t sent = 0;
-  while (sent < n) {
-    uint16_t took = sys_net_write(ch, p + sent, (uint16_t)(n - sent));
-    if (took == 0) {
-      uint16_t st = sys_net_state(ch);
-      if (st != NET_ST_OPEN && st != NET_ST_EOF) return 0;
-      sys_yield();
-      continue;
-    }
-    sent = (uint16_t)(sent + took);
-  }
-  return 1;
-}
+static int send_all(const char *p, uint16_t n) { return sl_send_all(ch, p, n); }
 
 /* Every outgoing line goes through here, so the CRLF is in exactly one place.
  * No caller may pass a pointer into `outbuf`. */
@@ -1041,14 +1029,6 @@ static void on_key(uint16_t k) {
 
 /* ------------------------------------------------------------------- main */
 
-static int has_colon(const char *s) {
-  while (*s) {
-    if (*s == ':') return 1;
-    s++;
-  }
-  return 0;
-}
-
 static void read_screen(void) {
   uint16_t sc = sys_screen();
   uint8_t r = (uint8_t)(sc >> 8), c = (uint8_t)(sc & 0xFFu);
@@ -1113,8 +1093,7 @@ int main(void) {
   }
   scpy(nick, (*nickarg ? nickarg : "snes"), NICK_MAX + 1);
   if (*chanarg) scpy(autojoin, chanarg, TABNAME_MAX + 1);
-  scpy(hostport, hostarg, sizeof hostport);
-  if (!has_colon(hostport)) scat(hostport, ":6667", sizeof hostport);
+  sl_hostport(hostport, sizeof hostport, hostarg, ":6667");
 
   if (!sys_net_up()) {
     sys_puts("no gateway attached\n");
@@ -1137,29 +1116,21 @@ int main(void) {
     return 1;
   }
 
-  deadline = (uint16_t)(sys_frames() + OPEN_DEADLINE);
-  for (;;) {
-    st = sys_net_state(ch);
-    if (st != NET_ST_OPENING) break;
-    if ((int16_t)(sys_frames() - deadline) >= 0) {
-      sys_net_close(ch);
-      sys_cls();
-      sys_puts("timeout connecting to ");
-      sys_puts(hostport);
-      sys_putc('\n');
-      return 1;
-    }
-    if (sys_pollkey() != SYS_ERR) {
-      sys_net_close(ch);
-      sys_cls();
-      sys_puts("[cancelled]\n");
-      return 1;
-    }
-    sys_yield();
-  }
-
-  if (st != NET_ST_OPEN && st != NET_ST_EOF) {
-    sys_net_close(ch);
+  /* sl_wait_open closes the channel on every non-OK outcome. */
+  switch (sl_wait_open(ch, OPEN_DEADLINE, 1)) {
+  case SL_OPEN_OK:
+    break;
+  case SL_OPEN_TIMEOUT:
+    sys_cls();
+    sys_puts("timeout connecting to ");
+    sys_puts(hostport);
+    sys_putc('\n');
+    return 1;
+  case SL_OPEN_CANCELLED:
+    sys_cls();
+    sys_puts("[cancelled]\n");
+    return 1;
+  default:
     sys_cls();
     sys_puts("could not connect to ");
     sys_puts(hostport);

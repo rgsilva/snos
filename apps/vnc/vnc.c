@@ -245,6 +245,7 @@
  * its position within it, are exact in both axes.
  */
 #include "snos_abi.h"
+#include "snoslib.h"
 
 #define FB_W 256
 #define FB_H 192
@@ -587,19 +588,7 @@ static int skipn(uint16_t n) {
 }
 
 static int wr(const uint8_t *src, uint16_t n) {
-  uint16_t sent = 0;
-  while (sent < n) {
-    uint16_t k = sys_net_write(ch, (const char *)(src + sent),
-                               (uint16_t)(n - sent));
-    if (k == 0) {
-      if (sys_net_state(ch) != NET_ST_OPEN && sys_net_state(ch) != NET_ST_EOF)
-        return 0;
-      sys_yield();
-      continue;
-    }
-    sent = (uint16_t)(sent + k);
-  }
-  return 1;
+  return sl_send_all(ch, (const char *)src, n);
 }
 
 static uint16_t be16(const uint8_t *p) {
@@ -1654,16 +1643,7 @@ int main(void) {
   }
 
   /* Default the port here rather than making the user type 5900 every time. */
-  {
-    int has_port = 0;
-    for (i = 0; args[i]; i++)
-      if (args[i] == ':') has_port = 1;
-    if (!has_port) {
-      const char *p = ":5900";
-      while (*p && i < SNOS_ARGV_MAX - 1) args[i++] = *p++;
-      args[i] = 0;
-    }
-  }
+  sl_hostport(args, SNOS_ARGV_MAX, args, ":5900");
 
   say("connecting to ");
   say(args);
@@ -1674,20 +1654,20 @@ int main(void) {
     say("no free channel\n");
     return 1;
   }
-  {
-    uint16_t deadline = (uint16_t)(sys_frames() + 1800u);
-    while (sys_net_state(ch) == NET_ST_OPENING) {
-      if ((int16_t)(sys_frames() - deadline) >= 0) {
-        say("connection timed out\n");
-        sys_net_close(ch);
-        return 1;
-      }
-      sys_yield();
-    }
-  }
-  if (sys_net_state(ch) != NET_ST_OPEN) {
+  /* sl_wait_open closes the channel on every non-OK outcome, and a keypress
+   * cancels the wait -- a connect can take many seconds, and a silent
+   * uninterruptible pause is indistinguishable from a hang. */
+  switch (sl_wait_open(ch, 1800u, 1)) {
+  case SL_OPEN_OK:
+    break;
+  case SL_OPEN_TIMEOUT:
+    say("connection timed out\n");
+    return 1;
+  case SL_OPEN_CANCELLED:
+    say("[cancelled]\n");
+    return 1;
+  default:
     say("could not connect\n");
-    sys_net_close(ch);
     return 1;
   }
 

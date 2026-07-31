@@ -22,6 +22,7 @@
  * broken — that is the channel count, not a bug in here.
  */
 #include "snos_abi.h"
+#include "snoslib.h"
 
 #define BUF 64
 #define NAME_MAX 16
@@ -32,56 +33,10 @@ static uint8_t buf[BUF];
 static char req[REQ_MAX + 1];
 static char name[NAME_MAX + 1];
 
-static uint16_t parse_port(const char *s) {
-  uint16_t v = 0;
-  int any = 0;
-  while (*s == ' ') s++;
-  while (*s >= '0' && *s <= '9') {
-    v = (uint16_t)(v * 10u + (uint16_t)(*s - '0'));
-    s++;
-    any = 1;
-  }
-  return any ? v : 0;
-}
-
-static void say_u32(uint32_t v) {
-  /* sys_putu takes 16 bits; a serving session can exceed 64 KB. */
-  char d[11];
-  int n = 0;
-  if (v == 0) {
-    sys_putc('0');
-    return;
-  }
-  while (v && n < 11) {
-    d[n++] = (char)('0' + (uint16_t)(v % 10u));
-    v /= 10u;
-  }
-  while (n) sys_putc((uint16_t)(unsigned char)d[--n]);
-}
-
-/* Block until every byte is queued. The send queue drains at link speed, so a
- * response larger than it must be fed in as room appears; writing once and
- * hoping would truncate the page and the browser would render the fragment. */
-static int send_all(uint16_t ch, const uint8_t *p, uint16_t n) {
-  uint16_t sent = 0;
-  while (sent < n) {
-    uint16_t took = sys_net_write(ch, (const char *)(p + sent),
-                                  (uint16_t)(n - sent));
-    if (took == 0) {
-      uint16_t w = sys_net_state(ch);
-      if (w != NET_ST_OPEN && w != NET_ST_EOF) return 0;
-      sys_yield();
-      continue;
-    }
-    sent = (uint16_t)(sent + took);
-  }
-  return 1;
-}
-
 static int send_str(uint16_t ch, const char *s) {
   uint16_t n = 0;
   while (s[n]) n++;
-  return send_all(ch, (const uint8_t *)s, n);
+  return sl_send_all(ch, s, n);
 }
 
 static void send_u32(uint16_t ch, uint32_t v) {
@@ -97,7 +52,7 @@ static void send_u32(uint16_t ch, uint32_t v) {
   }
   while (n) {
     char c = d[--n];
-    send_all(ch, (const uint8_t *)&c, 1);
+    sl_send_all(ch, &c, 1);
   }
 }
 
@@ -190,8 +145,7 @@ int main(void) {
   uint32_t served = 0;
 
   snos_getargs(args, sizeof args);
-  port = parse_port(args);
-  if (port == 0) port = 8080;
+  port = sl_parse_port(args, 8080);
 
   if (!sys_net_up()) {
     sys_puts("no gateway attached\n");
@@ -245,7 +199,7 @@ int main(void) {
             for (;;) {
               uint16_t n = sys_read_f(buf, BUF);
               if (n == 0 || n == SYS_ERR) break;
-              if (!send_all(ch, buf, n)) break;
+              if (!sl_send_all(ch, (const char *)buf, n)) break;
               served += n;
             }
             sys_close();
@@ -275,7 +229,7 @@ int main(void) {
 done:
   sys_net_close(ch);
   sys_puts("\nserved ");
-  say_u32(served);
+  sl_putu32(served);
   sys_puts(" bytes\n");
   return 0;
 }

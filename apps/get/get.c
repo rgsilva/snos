@@ -26,6 +26,7 @@
  * files by name. Printing them to the console is refused rather than sprayed.
  */
 #include "snos_abi.h"
+#include "snoslib.h"
 
 #define BUF 128
 #define NAME_MAX 16
@@ -50,20 +51,6 @@ static uint8_t buf[BUF];
 
 static void say(const char *s) { sys_puts(s); }
 
-static void say_u32(uint32_t v) {
-  /* sys_putu takes 16 bits; a download can exceed that. */
-  char d[11];
-  int n = 0;
-  if (v == 0) {
-    sys_putc('0');
-    return;
-  }
-  while (v && n < 11) {
-    d[n++] = (char)('0' + (uint16_t)(v % 10u));
-    v /= 10u;
-  }
-  while (n) sys_putc((uint16_t)(unsigned char)d[--n]);
-}
 
 /* Split off the first word in place; returns the rest. */
 static char *split(char *s) {
@@ -249,7 +236,7 @@ int main(void) {
       sys_yield();
     }
     say("\n[");
-    say_u32(got);
+    sl_putu32(got);
     say(" bytes]\n");
     sys_net_close(ch);
     return 0;
@@ -340,7 +327,7 @@ int main(void) {
     say("saved ");
     say(name);
     say(", ");
-    say_u32(got);
+    sl_putu32(got);
     say(" bytes\n");
   }
   sys_net_close(ch);
