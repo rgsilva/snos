@@ -290,12 +290,24 @@ That changes what the machine *is*. `httpd` stops being "a thing the gateway for
 becomes a host on the network. Every application stops needing the gateway to understand its
 protocol, which is the thing that currently makes each new protocol a gateway change.
 
-**TLS is the open problem, and it stays open on purpose.** A handshake on a 3.58 MHz 65816 runs
-to minutes, so the console cannot terminate it and a converter has nothing to terminate it with.
-The intended shape is a **proxy configured on the console** — an explicit tunnel the SNES sends
-its TLS through, rather than a gateway silently doing it — which keeps the honesty of the
-current design (nothing forges a certificate) while moving the decision to the console's own
-configuration. Not designed yet. Deliberately not started.
+**Shape agreed with Ricardo, 2026-07-31 (brainstorm, nothing started):**
+
+1. **slirp-mode host side** — the daemon does user-mode NAT (QEMU-style): it terminates the
+   SNES's TCP itself and opens real sockets on its behalf. No root, no utun, no system changes,
+   and the SNES's stack is still exercised end-to-end for real — only the far side of the NAT is
+   synthetic. A utun/real-interface mode can come later as a demo flourish.
+2. **Coexistence as scaffolding only** — IP gets its own link channel alongside the stream
+   channels so irc/vnc/httpd keep working while the stack grows up, **but the end state is
+   dropping the stream gateway entirely.** The bridge needs no changes at any point: it moves
+   opaque frame payloads and always has.
+3. **TLS: explicitly not a goal** (Ricardo: "back in the day this wouldn't exist anyway").
+   The old open-problem paragraph is retired; anything that needs TLS can wait for an M12-style
+   service or simply not exist, period-correctly.
+4. Console side: uIP-class single-buffer stack, with the IP/TCP ones-complement checksum in
+   netasm.s from day one — the ring_put lesson, applied in advance.
+
+The image converter does not block dropping the gateway: M12 already turns it into an ordinary
+HTTP service the SNES's own client calls.
 
 **Done when:** the SNES answers a ping from another machine on the LAN at its own address.
 
