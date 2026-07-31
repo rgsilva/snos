@@ -271,7 +271,7 @@ page: it parses HTML on the fly and stores only what's on screen, which is exact
 64×28 console with 64 KB of app arena wants.
 **Done when:** fetch and render a real page over the cable.
 
-### M10 — Preemptive multitasking *(the crazy one; shape agreed 2026-07-31, started same day)*
+### M10 — Preemptive multitasking *(the crazy one; agreed, built and SHIPPED 2026-07-31 — steps 1-5 in `027cbd8..880b96c`+fg)*
 
 The founding observation, sharpened by the review work: **the kill switch and the mid-syscall
 deferral ARE the scheduler's two hard mechanisms, already shipped and tested.** The NMI can
@@ -289,8 +289,15 @@ Five steps, each shippable, suite green after each:
    round-robin at the NMI shim tail behind the existing deferral checks. Proven by two
    kernel-resident worker processes ping-ponging counters — both making progress despite
    neither ever returning is the assertion only preemption can pass.
-2. **Blocking syscalls yield**: kbd_getchar/net waits mark the process BLOCKED and switch
-   instead of spinning (the exit-flag bailout generalised).
+2. **Blocking syscalls yield** — briefly demoted to "optimization" after step 1 (preemption
+   prevents starvation for processes that never trap), then REINSTATED by a PC trace during
+   step 5: a poll-loop process is mid-syscall at every NMI, so consume-on-defer starved
+   everyone else forever. Landed as THREE switch points that together cover every shape:
+   the NMI (outside syscalls; defers WITHOUT consuming), cop_ret (takes the pending switch
+   at syscall exit, NMI-masked — both shims push identical frames, so a process abandoned
+   mid-pop resumes correctly), and proc_switch_now (offers the CPU from inside blocking
+   waits via kbd_idle — without it, the shell blocked at its own prompt starves every
+   background process).
 3. **Bank $00 carving**: per-process stack+DP slots. No app relinking — Calypsi addresses
    stack and DP through S and D, which are per-process registers; only the assignments move.
 4. **Arena slots — the one real problem, solved the house way.** Bank $7F data is linked at
@@ -307,7 +314,12 @@ Five steps, each shippable, suite green after each:
    per-process channel reaping. The PPU stays single-owner (gfx_owned, unchanged).
 
 **Done when:** IRC stays connected in the background, flashing a notification, while `edit`
-runs in the foreground.
+runs in the foreground. **Status: the machinery is proven** — test/bg.lua has a background
+netecho answering over the link WHILE a foreground app runs, the by-name arena refusal,
+kill+reap with the gateway seeing the close, and fg + keyboard-break handback. The literal
+irc+edit pairing works by construction (disjoint regions A and B; irc is poll-driven and
+muted-safe) and awaits a live session; the "flashing notification" is the one unbuilt piece —
+it needs a kernel-owned status cell no foreground app can accidentally own.
 
 ### M11 — Real TCP/IP: the SNES gets an address
 Today the gateway *is* the network — it holds the sockets and the SNES holds a byte stream, so

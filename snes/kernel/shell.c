@@ -80,6 +80,7 @@ static void cmd_help(void) {
   kcon_puts("run N [A] [&] run an application; & = in the background\n");
   kcon_puts("jobs          list background jobs\n");
   kcon_puts("kill N        kill background job N\n");
+  kcon_puts("fg N          bring job N to the console (exits back here)\n");
   kcon_puts("ls            list files\n");
   kcon_puts("cat NAME      print a file\n");
   kcon_puts("write N T     write text T to file N\n");
@@ -365,6 +366,45 @@ static void cmd_jobs(void) {
     }
   }
   if (!any) kcon_puts("no background jobs\n");
+}
+
+/* Bring a background process to the console. The shell hands over the
+ * foreground (its own console/input syscalls stay direct, but it prints
+ * nothing while it waits), then blocks until the process dies -- exit or
+ * ^Q inside the app, or the keyboard break. The wait loop is itself a
+ * switch point (kbd_idle -> proc_switch_now), which is what makes this not
+ * a deadlock. A freshly foregrounded full-screen app repaints on its next
+ * event; irc's ^N is the conventional nudge. */
+static void cmd_fg(char *rest) {
+  uint16_t id = 0;
+  char *w = rest;
+  (void)split_word(rest);
+  while (*w >= '0' && *w <= '9') id = (uint16_t)(id * 10 + (*w++ - '0'));
+  if (proc_state((uint8_t)id) != 1) {
+    kcon_puts("no such job (see `jobs`)\n");
+    return;
+  }
+  proc_set_fg((uint8_t)id);
+  while (proc_state((uint8_t)id) == 1) {
+    /* The keyboard break must still work with the shell asleep: F12 sets
+     * snos_break (no fg app in the exec sense), and it means "kill the
+     * foregrounded job, give me my shell back". */
+    if (snos_break) {
+      snos_break = 0;
+      proc_kill((uint8_t)id);
+      net_reap((uint8_t)(id + 1));
+      break;
+    }
+    kbd_idle();
+  }
+  proc_set_fg(0);
+  kcon_puts("[");
+  kcon_putu(id);
+  kcon_puts("] ");
+  kcon_puts(proc_name((uint8_t)id));
+  kcon_puts(proc_exit_code((uint8_t)id) == SNOS_EXIT_KILLED ? " killed\n"
+                                                            : " exited\n");
+  proc_reap_slot((uint8_t)id);
 }
 
 static void cmd_kill(char *rest) {
@@ -924,6 +964,7 @@ void shell_run(void) {
     else if (streq(line, "run")) cmd_run(rest);
     else if (streq(line, "jobs")) cmd_jobs();
     else if (streq(line, "kill")) cmd_kill(rest);
+    else if (streq(line, "fg")) cmd_fg(rest);
     else if (streq(line, "ls")) cmd_ls();
     else if (streq(line, "cat")) cmd_cat(rest);
     else if (streq(line, "write")) cmd_write(rest);

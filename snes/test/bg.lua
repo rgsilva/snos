@@ -256,7 +256,18 @@ emu.addEventCallback(function()
   if step == 4 then at = frame + 200; step = 5; return end -- let the echo land
   if step == 5 then send("run get nothing -\n", 250); step = 6; return end
   if step == 6 then send("kill 1\n", 200); step = 7; return end
-  if step == 7 then send("jobs\n", 200); step = 8; return end
+  if step == 7 then send("jobs\n", 200); step = 7.2; return end
+  -- fg: respawn, bring it to the console, then the keyboard break kills the
+  -- FOREGROUNDED job and hands the shell back -- with the shell asleep in
+  -- cmd_fg's wait the whole time.
+  if step == 7.2 then send("run netecho 7777 &\n", 300); step = 7.4; return end
+  if step == 7.4 then send("fg 1\n", 150); step = 7.6; return end
+  if step == 7.6 then
+    emu.write16(L.MB + 0x00E, 1, WRAM) -- what F12 writes
+    at = frame + 250
+    step = 8
+    return
+  end
   if step == 8 then send("debug ver\n", 200); step = 9; return end
 
   local r = L.new_report("bg")
@@ -283,6 +294,8 @@ emu.addEventCallback(function()
           "the killed process's connection was never closed at the gateway")
   r.check(text:find("no background jobs", 1, true) ~= nil,
           "jobs still shows something after the kill")
+  r.check(text:find("] netecho killed", 1, true) ~= nil,
+          "the keyboard break did not kill the foregrounded job")
   r.check(text:find("kernel ABI ", 1, true) ~= nil,
           "the shell did not answer at the end")
 
