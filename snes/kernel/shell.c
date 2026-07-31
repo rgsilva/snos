@@ -723,8 +723,8 @@ static void cmd_fstest(void) {
     {
       const fs_entry_t *b = fs_find("CB.TXT");
       if (b) {
-        sram_wr32(16, b->off);            /* dest = where it already lives */
-        sram_wr32(12, (uint32_t)b->slot + 1u);
+        sram_wr32(fs_journal_off() + 4u, b->off); /* dest = where it is */
+        sram_wr32(fs_journal_off(), (uint32_t)b->slot + 1u);
         fs_compact_recover();             /* must be a harmless redo */
         fs_init();
         b = fs_find("CB.TXT");
@@ -734,6 +734,10 @@ static void cmd_fstest(void) {
             if (fs_read_byte(b, i) != (uint8_t)(i * 7u)) { ok = 0; break; }
       }
     }
+    /* The journal must be IDLE afterwards. An armed journal lives in
+     * battery SRAM and outlives the run: it made this very test pass or
+     * fail depending on what the previous one left behind. */
+    if (sram_rd32(fs_journal_off()) != 0) ok = 0;
     fs_delete("CB.TXT");
     kcon_puts(ok ? "fstest: compact reclaimed and survived recovery\n"
                  : "fstest: COMPACT FAILED\n");

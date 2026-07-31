@@ -9,6 +9,7 @@ local frame = 0
 local step = 1
 local at = nil
 local reset_done = false
+local jrnl_after = nil
 -- emu.reset() restarts the kernel, which re-initialises the mailbox and wipes
 -- everything printed so far. Keep a copy or the pre-reset half of the test is
 -- invisible in the report.
@@ -47,7 +48,35 @@ emu.addEventCallback(function()
   end
   if step == 6 then send("cat NOTES.TXT\n", 240); step = 7; return end
   if step == 7 then send("rm NOTES.TXT\n", 200); step = 8; return end
-  if step == 8 then send("ls\n", 220); step = 9; return end
+  if step == 8 then send("ls\n", 220); step = 8.2; return end
+  -- A CORRUPT COMPACT JOURNAL MUST NOT BRICK THE MACHINE. Battery SRAM can
+  -- hold anything -- a stale journal from an older build, a half-written
+  -- word -- and recovery's only tool is a copy loop bounded by a size field
+  -- read from that same volume. Trusting it hung the console at boot,
+  -- before the shell, unrecoverable without wiping the volume. Arm garbage
+  -- and demand the kernel refuse it and come up anyway.
+  if step == 8.2 then
+    local S = emu.memType.snesSaveRam
+    local J = 16 + 48 * 32                     -- fs.c's CJ_SLOT
+    emu.write(J, 3, S); emu.write(J + 1, 0, S) -- slot 2+1, armed
+    emu.write(J + 2, 0, S); emu.write(J + 3, 0, S)
+    emu.write(J + 4, 0, S); emu.write(J + 5, 8, S)  -- dest = 2048
+    emu.write(J + 6, 0, S); emu.write(J + 7, 0, S)
+    pre_text = pre_text .. L.ring_text()
+    emu.reset()
+    at = frame + 400
+    step = 8.5
+    return
+  end
+  if step == 8.5 then
+    local S = emu.memType.snesSaveRam
+    local J = 16 + 48 * 32
+    jrnl_after = emu.read(J, S) | (emu.read(J + 1, S) << 8) |
+                 (emu.read(J + 2, S) << 16) | (emu.read(J + 3, S) << 24)
+    send("debug ver\n", 260)
+    step = 9
+    return
+  end
 
   local r = L.new_report("fs")
   local text = pre_text .. L.ring_text()
@@ -80,6 +109,13 @@ emu.addEventCallback(function()
           " reads) - SRAM is not persisting, or the volume is reformatted on boot")
 
   r.check(text:find("deleted NOTES.TXT", 1, true) ~= nil, "rm failed")
+
+  r.check(jrnl_after == 0,
+          "a corrupt compact journal survived the boot (" ..
+          tostring(jrnl_after) .. ") - recovery must refuse it")
+  r.check(L.ring_text():find("kernel ABI ", 1, true) ~= nil,
+          "the console did not come up after a corrupt journal - " ..
+          "an unvalidated redo hangs before the shell exists")
 
   r.finish()
 end, emu.eventType.endFrame)

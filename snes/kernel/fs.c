@@ -1,5 +1,16 @@
 #include "fs.h"
 #include "proc.h"
+
+/* The journal lives in the superblock TAIL -- after the 48 directory entries,
+ * before the data region. It was at offsets 12/16 for one commit, and 16 IS
+ * SRAMFS_DIR_OFF: every compaction wrote its destination over slot 0's
+ * FILENAME, which killed a live file whenever slot 0 held one. That is what
+ * made the compact self-test intermittent. The assert below makes the
+ * placement provable rather than remembered. */
+#define CJ_SLOT (SRAMFS_DIR_OFF + SRAMFS_SLOTS * SRAMFS_ENT_SIZE)
+#define CJ_DEST (CJ_SLOT + 4ul)
+typedef char fs_journal_must_be_between_dir_and_data[
+    (CJ_DEST + 4ul <= SRAMFS_DATA_OFF) ? 1 : -1];
 /* proc_lock: see the calls below — shell-direct and background-syscall
  * callers share these structures, and only pinning the scheduler makes the
  * multi-store spans atomic for both. */
@@ -105,7 +116,7 @@ static void sramfs_format(void) {
   sram_wr(3, 'R');
   sram_wr16(4, 1);              /* version */
   sram_wr32(8, SRAMFS_DATA_OFF); /* bump allocator */
-  sram_wr32(12, 0);              /* compact journal idle */
+  sram_wr32(CJ_SLOT, 0);         /* compact journal idle */
   for (i = 0; i < SRAMFS_SLOTS; i++) sram_wr(slot_addr((uint16_t)i), 0);
 }
 
@@ -441,28 +452,57 @@ void fs_reap(uint8_t proc) {
  * and the journal is cleared only after the commit. Power loss at ANY point
  * either redoes an idempotent copy or has already committed. fs_init calls
  * fs_compact_recover() before mounting. */
-#define CJ_SLOT 12u  /* u32: slot number + 1; 0 = journal idle */
-#define CJ_DEST 16u  /* u32: destination offset for that slot's bytes */
-
 static void compact_move(uint16_t slot, uint32_t dst) {
   uint32_t src = sram_rd32(slot_addr(slot) + 16);
   uint32_t size = sram_rd32(slot_addr(slot) + 20);
   uint32_t i;
-  if (src == dst) return;
-  sram_wr32(CJ_DEST, dst);
-  sram_wr32(CJ_SLOT, (uint32_t)slot + 1u); /* arm LAST: dest is valid first */
-  for (i = 0; i < size; i++) sram_wr(dst + i, sram_rd(src + i));
-  sram_wr32(slot_addr(slot) + 16, dst); /* commit the new offset */
-  sram_wr32(CJ_SLOT, 0);                /* only now is the journal idle */
+  if (src != dst) {
+    sram_wr32(CJ_DEST, dst);
+    sram_wr32(CJ_SLOT, (uint32_t)slot + 1u); /* arm LAST: dest valid first */
+    for (i = 0; i < size; i++) sram_wr(dst + i, sram_rd(src + i));
+    sram_wr32(slot_addr(slot) + 16, dst);    /* commit the new offset */
+  }
+  /* Idle again UNCONDITIONALLY. Returning early on src==dst left the journal
+   * armed in battery-backed SRAM, where it outlived the run: every later
+   * boot re-ran a stale redo, and a test that inherited the .srm behaved
+   * differently from one that did not. An intermittent filesystem is worse
+   * than a broken one. */
+  sram_wr32(CJ_SLOT, 0);
 }
 
 void fs_compact_recover(void) {
   uint32_t j = sram_rd32(CJ_SLOT);
-  if (j == 0 || j > SRAMFS_SLOTS) return;
+  uint32_t dst, src, size, cap;
+  uint16_t slot;
+  if (j == 0) return;
+
+  /* VALIDATE EVERYTHING before touching a byte. This runs at boot from
+   * fs_init, on battery-backed SRAM that may hold anything -- a stale
+   * journal from an older build, a half-written word, or simply garbage --
+   * and the only tool it has is a copy loop bounded by a size field. An
+   * unvalidated redo with a nonsense size ran for billions of iterations
+   * through an 8 KB window: the console hung at boot, before the shell,
+   * unrecoverable without wiping the volume. A refused recovery costs one
+   * compaction; a trusted one costs the machine. */
+  slot = (uint16_t)(j - 1u);
+  dst = sram_rd32(CJ_DEST);
+  cap = sram_size();
+  if (j > SRAMFS_SLOTS) goto bad;
+  if (sram_rd(slot_addr(slot)) == 0) goto bad; /* slot is not even live */
+  src = sram_rd32(slot_addr(slot) + 16);
+  size = sram_rd32(slot_addr(slot) + 20);
+  if (dst < SRAMFS_DATA_OFF || src < SRAMFS_DATA_OFF) goto bad;
+  if (dst > src) goto bad;          /* compaction only ever moves DOWN */
+  if (size > cap) goto bad;
+  if (src + size > cap || dst + size > cap) goto bad;
+
   /* Redo the interrupted move: the source bytes are untouched by design
    * (moves only ever go downward into dead space), so re-copying is safe
    * whether the crash hit the copy, the commit, or the clear. */
-  compact_move((uint16_t)(j - 1u), sram_rd32(CJ_DEST));
+  compact_move(slot, dst);
+  return;
+bad:
+  sram_wr32(CJ_SLOT, 0); /* refuse it, and never look at it again */
 }
 
 uint32_t fs_reclaimable(void) {
@@ -473,24 +513,30 @@ uint32_t fs_reclaimable(void) {
 }
 
 int fs_compact(void) {
+  static uint8_t placed[SRAMFS_SLOTS];
   uint32_t dst = SRAMFS_DATA_OFF;
   int moved = 0;
+  uint16_t k;
   if (write_owner != 0xFF) return -1; /* never under a live writer */
   proc_lock(); /* seconds-long, deliberate: background waits its turn */
+  for (k = 0; k < SRAMFS_SLOTS; k++) placed[k] = 0;
   for (;;) {
-    /* Pick the live slot with the lowest offset at or above dst. */
+    /* Lowest source offset not yet placed. Tracked explicitly rather than by
+     * "offset >= dst": a zero-length file (an empty download saves one) does
+     * not advance dst, so an offset test would pick it forever. */
     int best = -1;
     uint32_t best_off = 0xFFFFFFFFul, s;
     for (s = 0; s < SRAMFS_SLOTS; s++) {
       uint32_t e = slot_addr((uint16_t)s), off;
-      if (sram_rd(e) == 0) continue;
+      if (placed[s] || sram_rd(e) == 0) continue;
       off = sram_rd32(e + 16);
-      if (off >= dst && off < best_off) {
+      if (off < best_off) {
         best_off = off;
         best = (int)s;
       }
     }
     if (best < 0) break;
+    placed[best] = 1;
     compact_move((uint16_t)best, dst);
     if (best_off != dst) moved++;
     dst += sram_rd32(slot_addr((uint16_t)best) + 20);
@@ -500,3 +546,7 @@ int fs_compact(void) {
   proc_unlock();
   return moved;
 }
+
+/* So the self-test can arm and inspect the journal without a second copy of
+ * the layout arithmetic (the copy is what put it on top of the directory). */
+uint32_t fs_journal_off(void) { return CJ_SLOT; }
