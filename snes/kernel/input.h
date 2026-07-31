@@ -25,7 +25,8 @@ uint16_t pad_held(void);
 uint16_t pad_pressed(void); /* rising edges since the last call; consumes them */
 
 void kbd_init(void);
-int kbd_getchar_nonblock(void); /* ASCII, or -1 if nothing pending */
+int kbd_getchar_nonblock(void);
+int kbd_push(int c); /* inject a keystroke; 0 ok, -1 queue full */ /* ASCII, or -1 if nothing pending */
 int kbd_getchar(void);          /* blocks, keeping the screen and OSK alive */
 void kbd_idle(void);            /* one frame of housekeeping while waiting */
 

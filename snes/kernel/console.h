@@ -48,6 +48,7 @@ void con_getpos(int *r, int *c);
 void con_putat(int r, int c, int ch);
 int con_getat(int r, int c);
 void con_row_save(int r, uint8_t *dst);
+int con_gfx_owned(void); /* 1 while an app owns the PPU */
 void con_row_restore(int r, const uint8_t *src);
 void con_clear(void);
 

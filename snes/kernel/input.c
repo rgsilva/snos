@@ -281,6 +281,18 @@ void kbd_init(void) {
   R8(0x4200) = 0x81; /* NMI + auto-joypad read */
 }
 
+/* Inject a character as if typed. The mailbox stdin ring is already the
+ * input layer's third backend (the harness and kbdbridge type through it),
+ * so a remote terminal is just a fourth producer into the same funnel --
+ * which is what makes telnetd's local mirroring fall out for free. */
+int kbd_push(int c) {
+  uint16_t wi = MB_IN_WINDEX;
+  if ((uint16_t)(wi - MB_IN_RINDEX) >= MB_IN_RING_SIZE) return -1;
+  MB_IN_RING[wi % MB_IN_RING_SIZE] = (uint8_t)c;
+  MB_IN_WINDEX = (uint16_t)(wi + 1);
+  return 0;
+}
+
 int kbd_getchar_nonblock(void) {
   int c = mb_getc_nonblock(); /* the harness types here */
   if (c >= 0) return c;

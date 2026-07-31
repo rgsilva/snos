@@ -50,7 +50,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-net test-pager test-httpd test-irc test-vnc clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-net test-pager test-httpd test-irc test-vnc clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -99,7 +99,7 @@ $(BUILD)/snos.raw: $(KERNEL_O) calypsi/linker.scm
 # Each app is a separate link into its own ROM bank, then dropped into the
 # cartridge image at the byte offset that bank maps to. HiROM makes that
 # arithmetic trivial: SNES $C0:0000+N is ROM byte N, so bank $C8 is 0x080000.
-APPS := hello pad basic edit view get netecho httpd vnc irc
+APPS := hello pad basic edit view get netecho httpd vnc irc telnetd
 APP_BANK_hello := c8
 APP_BANK_pad   := c9
 APP_BANK_basic := ca
@@ -108,7 +108,7 @@ APP_BANK_view  := cc
 APP_BANK_get   := cd
 APP_BANK_netecho := ce
 APP_BANK_httpd := d0
-# ($D1 was `web`, deleted; the slot is free for the next app.)
+APP_BANK_telnetd := d1   # the slot `web` left behind
 APP_BANK_vnc   := d2
 APP_BANK_irc   := d3
 APP_AT_hello   := 0x080000
@@ -119,6 +119,7 @@ APP_AT_view    := 0x0C0000
 APP_AT_get     := 0x0D0000
 APP_AT_netecho := 0x0E0000
 APP_AT_httpd   := 0x100000
+APP_AT_telnetd := 0x110000
 APP_AT_vnc     := 0x120000
 APP_AT_irc     := 0x130000
 # The editor needs the ABI-2 full-screen calls and says so in its header, so an
@@ -136,6 +137,9 @@ APP_ABI_httpd  := 7
 # `vnc` uses only the ABI-7 stream calls plus sys_gfx; 8 was an over-claim
 # that would make an ABI-7 kernel refuse an app it could run.
 APP_ABI_vnc    := 7
+# telnetd needs ABI 10: SYS_CONROW (read a console row) and SYS_KBDPUSH
+# (inject a keystroke) are what make the screen mirror possible at all.
+APP_ABI_telnetd := 10
 # `irc` needs the ABI-7 stream calls: it opens a plain TCP connection and both
 # talks and listens on it. Nothing it does needs ABI 8.
 APP_ABI_irc    := 7
@@ -160,6 +164,12 @@ APP_ARENA_view    := 7f0000 7f3bff
 APP_ARENA_get     := 7f3c00 7f3fff
 APP_ARENA_netecho := 7f3c00 7f3fff
 APP_ARENA_httpd   := 7f3c00 7f3fff
+# telnetd holds a 1792-byte copy of the screen; 4 KB is room to spare. It sits
+# outside region A, so it mirrors while any foreground UI app runs — which is
+# the whole point. It OVERLAPS irc's region deliberately: with one background
+# slot they can never co-run anyway, and the kernel refuses the pairing by
+# name rather than letting the arithmetic rot silently.
+APP_ARENA_telnetd := 7f4000 7f4fff
 APP_ARENA_irc     := 7f4000 7fffff
 APP_ARENA_vnc     := 7f0000 7fffff
 
@@ -194,7 +204,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-net test-pager test-httpd test-irc
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-net test-pager test-httpd test-irc
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -253,6 +263,11 @@ test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 test-mtask: $(BUILD)/snos.sfc $(BUILD)/test/mtask.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mtask.lua
+
+# telnetd v2: the screen-diff mirror, driven through the real link protocol.
+test-telnetd: $(BUILD)/snos.sfc $(BUILD)/test/telnetd.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/telnetd.lua
 
 # M10 step 5: the milestone -- a background server answers over the link
 # WHILE a foreground app runs, plus the arena-refusal and kill/reap story.

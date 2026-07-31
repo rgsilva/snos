@@ -355,6 +355,25 @@ uint16_t snos_cop_c(uint16_t sp) {
     if (!is_fg) return 0; /* VRAM is the display: foreground only */
     return fs_read_vram(a);
 
+  case SYS_KBDPUSH:
+    /* Not foreground-gated, deliberately: this is how a background telnetd
+     * feeds the shell everyone can see. */
+    return kbd_push((int)(a & 0xFFu)) == 0 ? 0 : SYS_ERR;
+
+  case SYS_CONROW: {
+    /* Deliberately NOT foreground-gated: mirroring the screen from the
+     * background is telnetd's entire job. Read-only, so the single-owner
+     * rules the other console syscalls enforce do not apply. */
+    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
+    uint8_t rowbuf[64];
+    int i;
+    if (a >= 28u) return SYS_ERR;
+    if (con_gfx_owned()) return SYS_ERR; /* a picture owns the PPU */
+    con_row_save((int)a, rowbuf);
+    for (i = 0; i < 64; i++) far_wr(bank, (uint16_t)(off + i), rowbuf[i]);
+    return 0;
+  }
+
   case SYS_GFX:
     if (!is_fg) return SYS_ERR; /* the PPU has one owner; see snos_cop_c top */
     if (a) {

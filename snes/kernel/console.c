@@ -323,6 +323,8 @@ void con_notify(int on) {
     }
 }
 
+int con_gfx_owned(void) { return gfx_owned; }
+
 int con_rows(void) { return ROWS; }
 int con_text_rows(void) { return text_rows; }
 int con_cols(void) { return COLS; }

@@ -61,7 +61,7 @@
  * what a server or an IRC client needs. Version 8 was the browser calls,
  * retired with the web app; the numbers stay reserved. Version 9 is M10:
  * SYS_NOTIFY, and per-process file handles under the same fs syscalls. */
-#define SNOS_ABI_VERSION 9
+#define SNOS_ABI_VERSION 10
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -102,6 +102,12 @@
  * which is honest: the pixels were genuinely overwritten.
  * A = 1 acquire, 0 release. */
 #define SYS_GFX 0x19
+/* ABI 10. Snapshot one console row (64 shadow chars; >= $80 = inverse twin
+ * of the low 7 bits) into an app buffer: A = row, p0/p1 = 64-byte buffer.
+ * Diffing rows makes telnetd a mirror of STATE, not a replay of events --
+ * overflow-proof, coalescing, and clears/positioned writes/scrolls all fall
+ * out uniformly. SYS_ERR while an app owns the PPU (nothing to mirror). */
+#define SYS_CONROW 0x1A
 /* $20-$2F  input */
 #define SYS_PAD 0x20 /* -> held-button bitmask (PAD_* below) */
 /* ABI 2. Non-blocking counterpart to SYS_GETC: returns SYS_ERR when nothing is
@@ -113,6 +119,10 @@
  * keys), so a menu or a file picker cannot be navigated until it is out of the
  * way. A = 0 hide, 1 show, anything else queries. -> 1 if visible. */
 #define SYS_OSK 0x22
+/* ABI 10. Push one character into the kernel's input queue, as if typed.
+ * NOT foreground-gated: feeding the console from a background process is
+ * exactly telnetd's job. -> 0, or SYS_ERR when the queue is full. */
+#define SYS_KBDPUSH 0x23
 /* $30-$3F  files. One open file PER PROCESS since M10 (ABI 9), with a single
  * system-wide WRITE handle — the bump allocator commits size-on-close through
  * one cursor, so a second simultaneous writer gets SYS_ERR. */
@@ -239,6 +249,9 @@ uint16_t sys_exit(uint16_t code);
 uint16_t sys_version(void);
 uint16_t sys_yield(void);
 uint16_t sys_notify(void);
+uint16_t sys_conrow_raw(uint16_t row);
+uint16_t sys_kbdpush(uint16_t c);
+#define sys_conrow(row, buf) (snos_set_ptr((const char *)(buf)), sys_conrow_raw(row))
 uint16_t sys_putc(uint16_t c);
 uint16_t sys_puts_raw(void); /* args in the parameter block */
 uint16_t sys_getc(void);
