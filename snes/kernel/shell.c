@@ -506,7 +506,7 @@ static void cmd_fstest(void) {
  * line that is right only when nothing is wrong is worse than none, because it
  * is consulted precisely when something is. */
 static void cmd_net_status(void) {
-  uint16_t before, deadline, waited, rx0;
+  uint16_t before, start, deadline, waited, rx0;
 
   if (!net_up()) {
     kcon_puts("no link (the bridge script is not running)\n");
@@ -529,7 +529,8 @@ static void cmd_net_status(void) {
    * One second was close enough to that to report "the gateway is NOT
    * answering" about a gateway that was working perfectly, which is a lie told
    * by the one command whose entire job is to be trusted about this. */
-  deadline = (uint16_t)(snos_frames + 180u);
+  start = snos_frames;
+  deadline = (uint16_t)(start + 180u);
   while (net_stat_hello == before) {
     if ((int16_t)(snos_frames - deadline) >= 0) {
       /* Say what the link did while we waited. Frames arriving means the far
@@ -547,7 +548,10 @@ static void cmd_net_status(void) {
     }
     kbd_idle();
   }
-  waited = (uint16_t)(snos_frames - (uint16_t)(deadline - 60u));
+  /* Against the recorded start, not deadline-minus-a-constant: the constant
+   * was still 60 after the timeout above became 180, and every normal reply
+   * printed as a ~65000-frame underflow. */
+  waited = (uint16_t)(snos_frames - start);
 
   kcon_puts("gateway alive");
   if (net_text[0]) {

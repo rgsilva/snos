@@ -618,7 +618,12 @@ static void ctrl_message(void) {
   case S2C_ERR:
     if (cmsg_got >= 1) {
       ch = cmsg[0];
-      if (ch < NET_CHANNELS) {
+      /* The FREE guard matches S2C_EOF above and is not optional: an ERR for
+       * a channel the app already closed (abort + reap, then the gateway's
+       * queued error lands) would otherwise park a FREE channel in ERROR,
+       * where nothing can ever allocate or reap it again -- each occurrence
+       * permanently eats one of the channels. */
+      if (ch < NET_CHANNELS && ch_state[ch] != NET_ST_FREE) {
         if (cmsg_got >= 2) ch_http[ch] = cmsg[1];
         ch_state[ch] = NET_ST_ERROR;
       }

@@ -167,6 +167,8 @@ uint16_t snos_cop_c(uint16_t sp) {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
     uint16_t max = a, i;
     int n;
+    if (max == 0) return 0; /* the copy below writes n+1 bytes: even an empty
+                             * line lands the terminating NUL in app space */
     if (max > sizeof rl_buf) max = sizeof rl_buf;
     n = kbd_readline(rl_buf, (int)max);
     for (i = 0; i <= (uint16_t)n; i++) far_wr(bank, (uint16_t)(off + i), (uint8_t)rl_buf[i]);
