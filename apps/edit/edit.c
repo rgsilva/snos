@@ -347,14 +347,25 @@ static int file_load(const char *name) {
 static int file_save(const char *name) {
   uint16_t i;
   int j;
+  int err = 0;
 
   snos_set_ptr(name);
   if (sys_open(1) == SYS_ERR) return -1;
-  for (i = 0; i < nlines; i++) {
-    for (j = 0; j < linelen[i]; j++) sys_putc_f((uint16_t)(unsigned char)text[i][j]);
-    sys_putc_f('\n');
+  /* Checked per byte: a volume that fills mid-save otherwise truncates the
+   * document while the status bar says 'saved', dirty is cleared, and the
+   * quit prompt never fires -- a silent data loss with an on-screen receipt. */
+  for (i = 0; i < nlines && !err; i++) {
+    for (j = 0; j < linelen[i] && !err; j++)
+      err = sys_putc_f((uint16_t)(unsigned char)text[i][j]) == SYS_ERR;
+    if (!err) err = sys_putc_f('\n') == SYS_ERR;
   }
   sys_close();
+  if (err) {
+    /* Remove the truncated copy; keep dirty set so quitting still warns. */
+    snos_set_ptr(name);
+    sys_unlink();
+    return -1;
+  }
   strcopy(filename, name, sizeof filename);
   dirty = 0;
   return 0;

@@ -64,7 +64,10 @@ struct forrec {
 static struct forrec fors[FOR_DEPTH];
 static int for_sp;
 
-static uint16_t rnd_state = 12345;
+/* Assigned in main(), NEVER here: apps link with --no-auto-libraries, so
+ * file-scope initialisers are silently discarded and read as zero -- and a
+ * zero xorshift state stays zero forever, making RND permanently 0. */
+static uint16_t rnd_state;
 
 /* ---- tiny helpers (no C library) ---------------------------------------- */
 
@@ -693,22 +696,38 @@ static void cmd_save(void) {
     outs("cannot create\n");
     return;
   }
-  for (i = 0; i < (int)nlines; i++) {
-    const char *p;
-    uint16_t n = ln_num[i];
-    char digits[6];
-    int d = 0;
-    if (n == 0) digits[d++] = '0';
-    while (n) {
-      digits[d++] = (char)('0' + (n % 10));
-      n = (uint16_t)(n / 10);
+  /* Every byte checked: the volume can fill mid-save, and reporting 'saved'
+   * over a truncated program is how the next LOAD loses half of it. */
+  {
+    int err = 0;
+    for (i = 0; i < (int)nlines && !err; i++) {
+      const char *p;
+      uint16_t n = ln_num[i];
+      char digits[6];
+      int d = 0;
+      if (n == 0) digits[d++] = '0';
+      while (n) {
+        digits[d++] = (char)('0' + (n % 10));
+        n = (uint16_t)(n / 10);
+      }
+      while (d && !err)
+        err = sys_putc_f((uint16_t)(unsigned char)digits[--d]) == SYS_ERR;
+      if (!err) err = sys_putc_f(' ') == SYS_ERR;
+      for (p = &pool[ln_off[i]]; *p && !err; p++)
+        err = sys_putc_f((uint16_t)(unsigned char)*p) == SYS_ERR;
+      if (!err) err = sys_putc_f('\n') == SYS_ERR;
     }
-    while (d) sys_putc_f((uint16_t)(unsigned char)digits[--d]);
-    sys_putc_f(' ');
-    for (p = &pool[ln_off[i]]; *p; p++) sys_putc_f((uint16_t)(unsigned char)*p);
-    sys_putc_f('\n');
+    sys_close();
+    if (err) {
+      /* Drop the truncated file: a program that LOADs half-way is worse than
+       * the honest failure. The previous SAVE is already gone (overwrite),
+       * which is exactly why the message must not pretend otherwise. */
+      snos_set_ptr(name);
+      sys_unlink();
+      outs("save failed: volume full, nothing saved\n");
+      return;
+    }
   }
-  sys_close();
   outs("saved\n");
 }
 
@@ -776,6 +795,7 @@ static void cmd_help(void) {
 /* ---- the REPL ----------------------------------------------------------- */
 
 int main(void) {
+  rnd_state = 12345;
   cmd_new();
   outs("SNOS BASIC\n");
   outs("integer BASIC - HELP for commands, QUIT to leave\n\n");
