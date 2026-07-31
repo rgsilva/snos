@@ -354,6 +354,30 @@ protocol, which is the thing that currently makes each new protocol a gateway ch
 The image converter does not block dropping the gateway: M12 already turns it into an ordinary
 HTTP service the SNES's own client calls.
 
+**Addressing, DHCP and DNS (Ricardo's questions, answered 2026-07-31):**
+
+- **No DHCP in slirp mode — by design.** Slirp networks are configured by convention (QEMU's
+  guests have been `10.0.2.15` forever): the SNES's address, gateway and resolver are declared
+  constants on its private two-node subnet. **DNS the SNES does itself** — real UDP queries to
+  the daemon's resolver address; the daemon answers from the Mac's resolver. Real packets from
+  the console, recursive grunt work on the host.
+- **The SNES has its own IP** — real headers it composes and parses — but that address exists
+  only on the SNES↔daemon link. Externally its traffic wears the host's address (NAT, exactly
+  like a QEMU guest); inbound services ride port-forwards the daemon opens.
+- **On real hardware the stack never changes; only the far end does.** Tier 1: the Pico is a
+  dumb wire to the Mac, same daemon. Tier 2: the Pico W *becomes* the slirp box — DHCP happens
+  but the PICO does it, for itself, joining WiFi like any gadget; the SNES stays static behind
+  its NAT and the Mac exits the picture entirely. Tier 3 (the dream): wired ethernet on the
+  Pico (W5500 — WiFi-station bridging is messy, wired is clean), the SNES gets a REAL LAN
+  address, and **that** is the day DHCP becomes worth implementing on-console — cheap by then,
+  it is just UDP and the stack already speaks UDP for DNS. Router table says "SNES";
+  done-when satisfied with zero Mac involvement.
+- **App idea filed here because M11 transforms it: `telnetd`.** Today it would be ~150 lines
+  bridging a socket to the mailbox stdin/stdout rings (the input layer's third backend IS a
+  byte ring; console output already tees into one) — remote shell with the real console
+  mirroring both ways, full-screen apps excepted. Post-M11 it becomes an honest TCP listener
+  on the SNES's own stack: remoting into a Super Nintendo over TCP/IP it speaks itself.
+
 **Done when:** the SNES answers a ping from another machine on the LAN at its own address.
 
 ### Backlog — parked deliberately, with the reason *(agreed with Ricardo 2026-07-30)*
