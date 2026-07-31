@@ -1,18 +1,22 @@
-// Test mailbox polled by the Mesen Lua harness, at the top of WRAM bank $7F
-// (out of bank 0, which belongs to the C stack — mp_init alone needs ~6KB
-// and an overflow once chewed straight through the old $7E0100 mailbox).
-// Layout:
-//   $7FE000 u16 magic        0xCAFE = ROM alive
-//   $7FE002 u16 status       0 running, 1 all passed, 0xDEAD panic
-//   $7FE004 u16 write_index  stdout, SNES writes; monotonic, wraps at 65536
-//   $7FE006 u16 in_windex    stdin, harness writes; monotonic
-//   $7FE008 u16 in_rindex    stdin, SNES writes; monotonic (lets the
-//                            harness compute free space)
-//   $7FE010 u8[7664] ring    stdout ring buffer ($7FE010-$7FFDFF)
-//   $7FFE00 u8[512] in_ring  stdin ring buffer ($7FFE00-$7FFFFF)
-// The GC heap occupies the rest of bank $7F below ($7F0000-$7FDFFF).
-// Index words are only ever written by one side, and the harness runs with
-// the CPU paused (end-of-frame Lua callback), so no torn reads either way.
+/* Test mailbox polled by the Mesen Lua harness, at the top of WRAM bank $7E
+ * ($7E:F000-$7E:FFFF, out of bank 0, which belongs to the stack and direct
+ * pages). Layout, all offsets from MB_BASE:
+ *   +$000 u16 magic          0xCAFE = ROM alive
+ *   +$002 u16 status         0 running, 1 all passed, 0xDEAD panic
+ *   +$004 u16 write_index    stdout, SNES writes; monotonic, wraps at 65536
+ *   +$006 u16 in_windex      stdin, harness writes; monotonic
+ *   +$008 u16 in_rindex      stdin, SNES writes; monotonic (lets the
+ *                            harness compute free space)
+ *   +$00A u16 flips          debug: raw pad word (see input.c)
+ *   +$00C u16 con state      console scroll state (see console.c)
+ *   +$00E u16 break          keyboard break, kbdbridge writes (see traps.c)
+ *   +$010 u8[3552] ring      stdout ring buffer (+$010..+$DEF)
+ *   +$E00 u8[512] in_ring    stdin ring buffer (+$E00..+$FFF)
+ * Index words are only ever written by one side, and the harness runs with
+ * the CPU paused (end-of-frame Lua callback), so no torn reads either way.
+ * (This header began life in snesmac; its first comment still described that
+ * project's bank-$7F layout and MicroPython heap, none of which ever existed
+ * here — the constants below were always the truth.) */
 #ifndef SNES_MAILBOX_H
 #define SNES_MAILBOX_H
 
@@ -23,16 +27,9 @@
 #define MB_STATUS_PASS 1u
 #define MB_STATUS_PANIC 0xDEADu
 
-/* Mailbox base. Plain builds: top of WRAM bank $7E ($7E:F000-$7E:FFFF).
-   Mac builds (-DMAC_SNES): WRAM $7E2000-$7FFFFF IS the Mac's RAM (PERF.md
-   item H), so the mailbox moves to cart-SRAM window 18 — bank $B2:6000
-   (fast mirror), SRAM byte offset $24000, above the Mac's 16 windows. The
-   Lua side reads it as snesSaveRam at 0x24000. Same internal layout. */
-#ifdef MAC_SNES
-#  define MB_BASE 0xB26000ul
-#else
-#  define MB_BASE 0x7EF000ul
-#endif
+/* Mailbox base: top of WRAM bank $7E. (A vestigial MAC_SNES branch from
+ * snesmac lived here for months; no SNOS build ever defined it.) */
+#define MB_BASE 0x7EF000ul
 #define MB_RING_SIZE 3552u
 #define MB_IN_RING_SIZE 512u
 

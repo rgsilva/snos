@@ -69,7 +69,7 @@ months. Optimize for app reuse, not kernel elegance.
 | Console | **`snespdp11/snes/console.c` verbatim** — Mode 5, 64×28, 8 px font | Already written, already debugged, standalone by design. **80 columns is impossible** (512/80 = 6.4 px — non-integer cell alignment; needs 1792 tiles vs a 1024 index limit; ~3 lo-res px/glyph). 64 is the hardware ceiling. |
 | Input | **Abstraction from day 1**: `kbd_getchar()` → ASCII, three backends | OSK (M1), Lua test-feed (M1, drives CI), Pico USB bridge (M7). Never let the shell talk to `$4218` directly. |
 | Network | **Controller port 1, synchronous serial**, byuu/near protocol | ~20 KB/s practical each way, full duplex free, ~$10–13 of parts, **no cartridge hardware**, and already emulated in bsnes. Keyboard moves to port 2. |
-| Test harness | **Mesen `--testrunner` + WRAM mailbox at `$0100`** | Reuse `snesmac/snes/calypsi/mailbox.{h,c}` (bidirectional stdio ring) + `emu8086/snes/test/suite.sh` `RESULT PASS/FAIL` protocol wholesale. |
+| Test harness | **Mesen `--testrunner` + WRAM mailbox** (built at `$7EF000`, not the `$0100` first planned — bank $00 is too contended) | Reuse `snesmac/snes/calypsi/mailbox.{h,c}` (bidirectional stdio ring) + `emu8086/snes/test/suite.sh` `RESULT PASS/FAIL` protocol wholesale. |
 
 ### Deliberately deferred
 
@@ -99,17 +99,21 @@ game. Two shipped systems converged on it independently.
 
 ### Bank $00 RAM ($0000–$1FFF, 8 KB) — allocate this first
 
+As built (`kernel/snos.h` is the authority — this table drifted once and sat wrong for weeks;
+the test mailbox also moved out of bank $00 entirely, to `$7EF000`, see `kernel/mailbox.h`):
+
 | Range | Size | Owner |
 |---|---|---|
-| `$0000–$00FF` | 256 B | Kernel direct page |
-| `$0100–$01FF` | 256 B | **Test mailbox** (Mesen Lua polls it; same convention as snespdp11) |
-| `$0200–$07FF` | 1.5 K | Kernel stack |
-| `$0800–$08FF` | 256 B | App direct page |
-| `$0900–$18FF` | 4 K | App stack |
-| `$1900–$1FFF` | 1.75 K | Kernel hot globals, RAM vector table, syscall scratch |
+| `$0000–$00FF` | 256 B | Kernel direct page (Calypsi `_Dp` pseudo-registers) |
+| `$0100–$0BFF` | 2.75 K | Kernel stack |
+| `$0C00–$18FF` | 3.25 K | App stack |
+| `$1900–$19FF` | 256 B | App direct page |
+| `$1A00–$1A3F` | 64 B | Syscall parameter block + exec state (`snos_abi.h`) |
+| `$1B00–$1BFF` | 256 B | COP/BRK handler direct page |
+| `$1C00–$1CFF` | 256 B | NMI handler direct page |
 
-At M10 the app DP+stack region (`$0800–$18FF`, 4.25 K) gets carved into 512 B per-process
-slots → **8 processes**, or 12 if the kernel stack is trimmed.
+At M10 the app DP+stack region gets carved into per-process slots; redo that arithmetic
+against the table above, not the original plan's.
 
 ### Everything else
 
@@ -153,7 +157,7 @@ trivial) and skips ahead by `bank_count`.
 
 ### Exec contract
 
-1. Kernel saves `S`, sets up app DP (`$0800`) and app `S` (`$18FF`), sets `DB` = app bank.
+1. Kernel saves `S`, sets up app DP (`$1900`) and app `S` (`$18FF`), sets `DB` = `$7F` (arena).
 2. `JML` to `(bank, entry)`.
 3. App runs. Its `DB`/`PB` are its own bank ⇒ **apps are bank-position-independent for free**,
    as long as they use `JMP`/`JSR` (bank-relative) internally and never `JSL` to themselves.

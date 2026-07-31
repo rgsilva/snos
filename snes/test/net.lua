@@ -586,8 +586,6 @@ emu.addEventCallback(function()
   -- are Mode 3 tiles rather than a JPEG.
   r.check(text:find("saved TINY.IMG", 1, true) ~= nil,
           "the fetched picture was not saved under a forced .IMG name")
-  r.check(text:find("saved TINY.IMG", 1, true) ~= nil,
-          "the converted picture never reached the volume")
 
   -- The palette must land in CGRAM verbatim: entry i was encoded as (i, 0).
   if img_cg then

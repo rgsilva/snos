@@ -141,18 +141,20 @@ APP_ABI_irc    := 7
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)
 
-# ROMFS goes in the last bank of the 1 MB image ($CF), leaving $C8-$CE for apps.
+# ROMFS lives in bank $CF; apps run $C8-$CE and continue at $D0+ (the image
+# grew past 1 MB when they did).
 ROMFS_AT := 0x0F0000
 ROMFS_SRC := $(wildcard ../romfs/*)
 
 $(BUILD)/romfs.bin: $(ROMFS_SRC) tools/mkromfs.py | $(BUILD)
 	python3 tools/mkromfs.py ../romfs $@
 
-.PHONY: apps
 apps: $(APP_RAWS)
 
-$(BUILD)/apps/%/%.raw:
-	@true
+# (No catch-all %.raw rule here: GNU make patterns take exactly one stem, so a
+# two-% target never matched anything — but as a prerequisite-satisfying no-op
+# it could have handed raw2sfc a stale file for an app missing from the
+# template below. The per-app rules from APP_template are the only builders.)
 
 define APP_template
 $(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c $(wildcard ../apps/$(1)/*.s) \

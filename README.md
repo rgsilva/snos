@@ -21,15 +21,18 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M0 — Scaffold, build system, boot banner | ✅ |
 | M1 — Console + input abstraction | ✅ |
 | M2 — Syscall ABI (COP) + shell | ✅ |
-| M3 — Apps: exec + return | ✅ |
+| M3 — Apps: exec + return + kill switch | ✅ |
 | M4 — Filesystem (ROMFS + SRAMFS) | ✅ |
 | M5 — BASIC | ✅ |
 | EDIT — menu-driven text editor | ✅ |
-| M6 — Network stack (uIP) | |
+| M6 — Networking (framed link + gateway; `get`, `view`, `httpd`, `netecho`) | ✅ |
 | M7 — Real hardware | |
-| M8 — IRC client | |
-| M9 — Browser | |
+| M8 — IRC client (`irc`, windows/tabs/user list) | ✅ |
+| VNC — `vnc`, a Super Nintendo as a live VNC thin client | ✅ |
 | M10 — Preemptive multitasking | |
+
+(M9 was a browser; it shipped, was superseded by `vnc` — a real browser on the
+far side of a VNC session beats a screenshot pipeline — and was deleted.)
 
 ## Building
 

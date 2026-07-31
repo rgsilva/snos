@@ -18,9 +18,12 @@
  *   [1] ack       highest sequence the sender has correctly received
  *   [2] flags     LINK_F_DATA when this frame carries new records
  *                 LINK_F_SYN  the sender has restarted; adopt its sequence
- *   [3] checksum  8-bit sum of all 64 bytes, computed with this byte zero
- *   [4..63]       records, packed: [channel][length][payload...]
- *                 padded out with channel LINK_CH_PAD
+ *   [3] checksum  8-bit sum of all LINK_FRAME bytes, computed with this
+ *                 byte zero
+ *   [4..]         records to the end of the frame, packed:
+ *                 [channel][length][payload...], padded with LINK_CH_PAD
+ *                 (sizes as symbols, not numbers: the 64->128 change left
+ *                 this comment lying for a week)
  *
  * Records are packed rather than one-channel-per-frame so three trickling IRC
  * channels share a frame instead of taking three, while a bulk download still
@@ -38,7 +41,7 @@
 
 #define LINK_FRAME 128
 #define LINK_HDR 4
-#define LINK_PAYLOAD (LINK_FRAME - LINK_HDR) /* 60 bytes of records */
+#define LINK_PAYLOAD (LINK_FRAME - LINK_HDR) /* record bytes per frame */
 
 #define LINK_SEQ 0
 #define LINK_ACK 1

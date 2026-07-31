@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """SNOS gateway: the far side of the link, doing everything the SNES cannot.
 
-UNVERIFIED. The protocol itself is covered hermetically by snes/test/net.lua,
-which speaks it frame for frame; this program is the path to the real internet
-and cannot be exercised headlessly. Treat the first run as bring-up.
+The protocol itself is covered hermetically by snes/test/net.lua, which speaks
+it frame for frame; this program is the path to the real internet and has been
+exercised for real by `get`, `view`, `httpd`, `netecho`, `irc` and `vnc` (the
+2026-07 sessions, measured end to end). The parts no test reaches are the
+real-internet edges: DNS failures, slow TLS peers, misbehaving servers.
 
     python3 snes/tools/gateway.py
 
@@ -20,9 +22,11 @@ WHAT LIVES HERE, AND WHY
     honest TLS connections as itself. Nothing forges a certificate, so there is
     no CA to install and no cert store on the SNES.
 
-    It listens on no socket. Traffic arrives through a file the bridge writes,
-    which means it cannot accidentally become an open proxy on the network.
-    Worth keeping that way.
+    Its own traffic arrives through a file the bridge writes, so it cannot
+    accidentally become an open proxy on the network. The sockets it DOES
+    open are the ones the SNES asks for: C2S_LISTEN binds server ports on
+    LISTEN_ADDR (every interface, deliberately — see the comment there), so
+    what a SNES app serves is exactly as exposed as that app makes it.
 """
 import gzip
 import io

@@ -17,11 +17,25 @@ function M.magic() return M.u16(M.MB + 0x000) end
 function M.status() return M.u16(M.MB + 0x002) end
 
 function M.ring_text()
-  local n = M.u16(M.MB + 0x004)
-  if n > M.RING_SIZE then n = M.RING_SIZE end
+  -- The write index is monotonic and the writer stores at (index % size), so
+  -- once total output passes RING_SIZE the transcript has to be unrotated:
+  -- the OLDEST surviving byte sits at (windex % size), not at 0. The old
+  -- clamp-and-read-from-zero returned a transcript with the wrap point
+  -- spliced into the middle, which made long-output tests fail (or pass!)
+  -- on assertions unrelated to the code under test. Caveat: the index also
+  -- wraps at 65536, which 3552 does not divide, so a single test emitting
+  -- >64 KB would scramble again -- no current test comes near that.
+  local w = M.u16(M.MB + 0x004)
   local out = {}
-  for i = 0, n - 1 do
-    out[#out + 1] = string.char(emu.read(M.RING + (i % M.RING_SIZE), emu.memType.snesWorkRam))
+  if w <= M.RING_SIZE then
+    for i = 0, w - 1 do
+      out[#out + 1] = string.char(emu.read(M.RING + i, emu.memType.snesWorkRam))
+    end
+  else
+    for i = 0, M.RING_SIZE - 1 do
+      out[#out + 1] = string.char(
+        emu.read(M.RING + ((w + i) % M.RING_SIZE), emu.memType.snesWorkRam))
+    end
   end
   return table.concat(out)
 end

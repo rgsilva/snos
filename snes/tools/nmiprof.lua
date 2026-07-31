@@ -16,8 +16,9 @@
 -- WHY THIS EXISTS. The vnc work found the handler overrunning into the next
 -- frame — which is why an application on this machine has no usable vblank (see
 -- apps/vnc/vnc.c). Before optimising it, measure it: the frame copy and the two
--- 64-byte checksums are equal in byte count, so "MVN the copy" can only address
--- about half, and guessing which half is how the display bugs got fixed twice.
+-- LINK_FRAME-sized checksums are equal in byte count, so "MVN the copy" can only
+-- address about half, and guessing which half is how the display bugs got fixed
+-- twice.
 --
 -- ZERO KERNEL CHANGES, deliberately. Both addresses come from build/snos.map
 -- plus a byte count verified against the ROM image, so nothing here perturbs
