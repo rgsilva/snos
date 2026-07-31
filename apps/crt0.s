@@ -15,9 +15,13 @@
 ;;; what ran before it. The editor's `quit_flag` came up non-zero and it exited
 ;;; the instant it started, having drawn one frame.
 ;;;
-;;; So: zero the whole arena, then call main. 64 KB at roughly 13 cycles per two
-;;; bytes is about 120 ms, paid once when an application launches, which is a
-;;; fine price for C meaning what it says.
+;;; Zero ONLY THIS APP'S ARENA SLOT (M10 step 4/5). The original zeroed all of
+;;; bank $7F, which was correct while one app ran at a time and is sabotage the
+;;; moment it is not: a background spawn would wipe the foreground app's data.
+;;; The bounds are substituted by buildapp.sh from the same APP_ARENA_*
+;;; declaration that placed the data — one source of truth.
+;;; @AZLO@ = slot start (16-bit); @AZEND@ = (slot end + 1) & $FFFF, so the
+;;; full-arena case terminates on the wrap to $0000.
 
               .rtmodel version, "1"
               .rtmodel core, "*"
@@ -26,18 +30,20 @@
               .public app_start
               .extern main
 
-ARENA_BANK    .equ    0x7f
+ARENA_ZLO     .equ    0x@AZLO@
+ARENA_ZEND    .equ    0x@AZEND@
 
 app_start:
               rep     #0x30
 
               ;; DB is already $7F (exec.s sets it before jumping here), so
               ;; absolute addressing lands in the arena.
-              ldx     ##0x0000
+              ldx     ##ARENA_ZLO
 zero_loop:    stz     abs:0x0000,x
               inx
               inx
-              bne     zero_loop         ; wraps to 0 after the last pair
+              cpx     ##ARENA_ZEND
+              bne     zero_loop
 
               jsl     main              ; exit code returned in A
               cop     #0x00             ; SYS_EXIT — does not return

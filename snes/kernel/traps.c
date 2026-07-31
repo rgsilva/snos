@@ -137,9 +137,31 @@ uint16_t snos_cop_c(uint16_t sp) {
   uint16_t pb = frm8(sp, FRM_PB);
   uint8_t sig = far_rd(pb, (uint16_t)(pc - 1));
   uint16_t a = frm16(sp, FRM_A);
+  /* M10: who is calling, and do they hold the console? A background process
+   * runs MUTED — console, input and filesystem-handle syscalls answer as
+   * no-ops or errors unless the caller is the foreground process. The screen
+   * and the keyboard have exactly one owner at a time; that was implicitly
+   * true with one process and is enforced here now that there can be two.
+   * (Direct PPU pokes cannot be gated — graphics apps are not
+   * backgroundable, and their exclusive arena already refuses the pairing.)
+   * The channel-owner tag is what net_reap uses so one app's exit cannot
+   * tear down another's connections: 1 = the foreground app, 2.. = process
+   * id + 1, 0 = the shell (never reaped). */
+  uint8_t self = proc_current();
+  int is_fg = (self == proc_fg());
+  uint8_t owner_tag =
+      (self == 0) ? (SNOS_EXEC_RUN ? 1u : 0u) : (uint8_t)(self + 1u);
 
   switch (sig) {
   case SYS_EXIT:
+    /* A background process cannot unwind — there is no caller to unwind to.
+     * Its channels are reaped here, its frame is rewritten to the grave
+     * loop, and the scheduler never runs it again (proc.c). */
+    if (self != 0) {
+      net_reap(owner_tag);
+      proc_exit_current(sp, a);
+      return a;
+    }
     /* Only arm the unwind if an app is actually running. A stray COP #0 from
      * kernel code would otherwise jump to app_return with a stale saved stack
      * pointer and take the machine down. */
@@ -157,12 +179,14 @@ uint16_t snos_cop_c(uint16_t sp) {
     return 0;
 
   case SYS_PUTC:
+    if (!is_fg) return 0;
     kcon_putc((int)(a & 0xFFu));
     return 0;
 
   case SYS_PUTS: {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
     uint8_t c;
+    if (!is_fg) return 0;
     while ((c = far_rd(bank, off)) != 0) {
       kcon_putc(c);
       off++;
@@ -171,9 +195,16 @@ uint16_t snos_cop_c(uint16_t sp) {
   }
 
   case SYS_GETC:
+    /* Input belongs to the foreground. A background caller gets a NUL after
+     * one frame of idling, so a polling loop does not spin flat out. */
+    if (!is_fg) {
+      kbd_idle();
+      return 0;
+    }
     return (uint16_t)kbd_getchar();
 
   case SYS_CLS:
+    if (!is_fg) return 0;
     con_clear();
     return 0;
 
@@ -181,6 +212,10 @@ uint16_t snos_cop_c(uint16_t sp) {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
     uint16_t max = a, i;
     int n;
+    if (!is_fg) {
+      if (max) far_wr(bank, off, 0);
+      return 0;
+    }
     if (max == 0) return 0; /* the copy below writes n+1 bytes: even an empty
                              * line lands the terminating NUL in app space */
     if (max > sizeof rl_buf) max = sizeof rl_buf;
@@ -190,10 +225,12 @@ uint16_t snos_cop_c(uint16_t sp) {
   }
 
   case SYS_PUTU:
+    if (!is_fg) return 0;
     kcon_putu(a);
     return 0;
 
   case SYS_PUTHEX:
+    if (!is_fg) return 0;
     kcon_puthex16(a);
     return 0;
 
@@ -206,6 +243,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
     int r = (int)(a >> 8), c = (int)(a & 0xFFu);
     uint8_t ch;
+    if (!is_fg) return 0;
     while (c < con_cols() && (ch = far_rd(bank, off)) != 0) {
       con_putat(r, c, ch);
       c++;
@@ -218,7 +256,9 @@ uint16_t snos_cop_c(uint16_t sp) {
     return (uint16_t)(((uint16_t)con_text_rows() << 8) | (uint8_t)con_cols());
 
   case SYS_POLLKEY: {
-    int c = kbd_getchar_nonblock();
+    int c;
+    if (!is_fg) return SYS_ERR; /* input belongs to the foreground */
+    c = kbd_getchar_nonblock();
     return c < 0 ? SYS_ERR : (uint16_t)c;
   }
 
@@ -230,12 +270,17 @@ uint16_t snos_cop_c(uint16_t sp) {
     return (uint16_t)(osk_visible() ? 1 : 0);
 
   case SYS_PAD:
-    return pad_held();
+    return is_fg ? pad_held() : 0;
 
   case SYS_OPEN: {
     char nm[FS_NAME_LEN + 1];
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
     int i;
+    /* The filesystem has ONE open-file handle; two processes sharing it
+     * would corrupt each other's I/O. Background fs access needs per-process
+     * handles first, so for now it is refused honestly rather than allowed
+     * to interleave. Background-worthy apps (irc, netecho) do not use it. */
+    if (!is_fg) return SYS_ERR;
     for (i = 0; i < FS_NAME_LEN; i++) {
       nm[i] = (char)far_rd(bank, (uint16_t)(off + i));
       if (nm[i] == 0) break;
@@ -301,6 +346,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     return fs_read_vram(a);
 
   case SYS_GFX:
+    if (!is_fg) return SYS_ERR; /* the PPU has one owner; see snos_cop_c top */
     if (a) {
       /* Hiding the keyboard is not cosmetic: it disables the HDMA split, which
        * rewrites the BG tilemap-base and scroll registers every frame and would
@@ -337,7 +383,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     }
     url[i < 255 ? i : 255] = 0;
     r = net_fetch(url);
-    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
+    if (r >= 0 && owner_tag) net_own(r, owner_tag);
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 
@@ -351,7 +397,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     }
     url[i < 255 ? i : 255] = 0;
     r = net_image(url);
-    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
+    if (r >= 0 && owner_tag) net_own(r, owner_tag);
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 
@@ -370,7 +416,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     }
     hp[i < 255 ? i : 255] = 0;
     r = net_connect(hp);
-    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
+    if (r >= 0 && owner_tag) net_own(r, owner_tag);
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 
@@ -398,7 +444,7 @@ uint16_t snos_cop_c(uint16_t sp) {
 
   case SYS_NET_LISTEN: {
     int r = net_listen(a);
-    if (r >= 0 && SNOS_EXEC_RUN) net_own(r);
+    if (r >= 0 && owner_tag) net_own(r, owner_tag);
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 

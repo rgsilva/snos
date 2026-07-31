@@ -18,6 +18,7 @@
 #include "console.h"
 #include "mailbox.h"
 #include "snos.h"
+#include "proc.h"
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -288,10 +289,22 @@ int kbd_getchar_nonblock(void) {
 
 void kbd_idle(void) {
   uint16_t f = snos_frames;
+  /* Every blocking loop in the kernel funnels through here, so this is THE
+   * in-syscall switch point: without it, a process blocked in SYS_GETC (the
+   * shell at its prompt, most of the time) is mid-syscall at every NMI, the
+   * deferral always says no, and background processes starve forever. */
+  proc_switch_now();
   while (snos_frames == f) {
   }
-  osk_redraw();
-  con_flush();
+  /* Display work belongs to the FOREGROUND process only. A background
+   * process yielding through here used to run con_flush concurrently with
+   * the shell's own printing — two writers in the console's row buffers and
+   * DMA channels, which corrupted the display state within a frame of the
+   * first background spawn. */
+  if (proc_current() == proc_fg()) {
+    osk_redraw();
+    con_flush();
+  }
 }
 
 int kbd_getchar(void) {

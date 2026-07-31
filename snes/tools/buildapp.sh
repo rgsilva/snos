@@ -43,11 +43,16 @@ AFLAGS="--core=65816 --target=SNES $MODEL"
 sed -e "s/@BANK@/$BANK/g" -e "s/@ANEAR_LO@/$ANEAR_LO/g" \
     -e "s/@ANEAR_HI@/$ANEAR_HI/g" -e "s/@AFAR_LO@/$AFAR_LO/g" \
     -e "s/@AFAR_HI@/$AFAR_HI/g" ../apps/app.scm.in > "$OUT/app.scm"
+
+# crt0 zeroes only this app's arena slot; same declaration, second consumer.
+AZLO=$(printf '%04x' $(( 0x$ARENA_LO & 0xFFFF )))
+AZEND=$(printf '%04x' $(( (0x$ARENA_HI + 1) & 0xFFFF )))
+sed -e "s/@AZLO@/$AZLO/g" -e "s/@AZEND@/$AZEND/g" ../apps/crt0.s > "$OUT/crt0.s"
 python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s" "$MINABI" \
     "$ARENA_PAGE" "$ARENA_PAGES"
 
 "$CALDIR/bin/as65816" -o "$OUT/appinfo.o" "$OUT/appinfo.s" $AFLAGS
-"$CALDIR/bin/as65816" -o "$OUT/crt0.o"    ../apps/crt0.s    $AFLAGS
+"$CALDIR/bin/as65816" -o "$OUT/crt0.o"    "$OUT/crt0.s"     $AFLAGS
 "$CALDIR/bin/as65816" -o "$OUT/syscall.o" kernel/syscall.s  $AFLAGS
 # The shared app library, compiled per app: apps are separate links into
 # their own banks, so there is no common address space to place one copy in.

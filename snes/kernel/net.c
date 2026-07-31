@@ -423,18 +423,22 @@ static int net_open(const char *url, uint8_t cmd) {
 int net_fetch(const char *url) { return net_open(url, C2S_FETCH); }
 int net_image(const char *url) { return net_open(url, C2S_IMAGE); }
 
-/* Called by the trap layer when an app — rather than the shell — opened one. */
-void net_own(int ch) {
-  if (ch > 0 && ch < NET_CHANNELS) ch_app[(uint8_t)ch] = 1;
+/* Called by the trap layer when an app — rather than the shell — opened one.
+ * The tag says WHICH app (M10): 1 = the foreground app, 2.. = background
+ * process id + 1. Reaping by tag is what stops a foreground app's exit from
+ * tearing down a background process's connections — with one shared bit,
+ * `edit` quitting would have closed `irc`'s server link. */
+void net_own(int ch, uint8_t tag) {
+  if (ch > 0 && ch < NET_CHANNELS) ch_app[(uint8_t)ch] = tag;
 }
 
 /* Close whatever the departing application did not. Returns how many, so the
  * caller can say so: silently cleaning up teaches nobody, and a count that is
  * usually zero is a useful thing to notice when it is not. */
-int net_reap(void) {
+int net_reap(uint8_t tag) {
   int i, n = 0;
   for (i = 1; i < NET_CHANNELS; i++) {
-    if (ch_app[i]) {
+    if (ch_app[i] == tag && tag != 0) {
       if (ch_state[i] != NET_ST_FREE) {
         net_close(i);
         n++;

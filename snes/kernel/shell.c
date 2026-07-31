@@ -77,7 +77,9 @@ static void cmd_help(void) {
   kcon_puts("mem           memory and cartridge SRAM usage\n");
   kcon_puts("echo ...      print arguments\n");
   kcon_puts("apps          list applications\n");
-  kcon_puts("run N [A]     run an application, with an argument\n");
+  kcon_puts("run N [A] [&] run an application; & = in the background\n");
+  kcon_puts("jobs          list background jobs\n");
+  kcon_puts("kill N        kill background job N\n");
   kcon_puts("ls            list files\n");
   kcon_puts("cat NAME      print a file\n");
   kcon_puts("write N T     write text T to file N\n");
@@ -210,6 +212,22 @@ static void set_argv(const char *s) {
 static void run_app_entry(const app_entry_t *a, const char *args) {
   uint16_t rc;
 
+  /* M10: a foreground app whose arena overlaps a live background process is
+   * refused HERE, deterministically, with a name — never a corruption at
+   * runtime. This check plus the build-time slot enforcement is the whole
+   * co-run safety story. */
+  {
+    int c = proc_arena_conflict(a->arena_page, a->arena_pages);
+    if (c >= 0) {
+      kcon_puts("arena conflict: [");
+      kcon_putu((uint16_t)c);
+      kcon_puts("] ");
+      kcon_puts(proc_name((uint8_t)c));
+      kcon_puts(" holds that memory; kill it first\n");
+      return;
+    }
+  }
+
   if (a->minabi > SNOS_ABI_VERSION) {
     /* An app built against a newer kernel must be refused rather than run and
      * allowed to fall over on a syscall that does not exist yet. */
@@ -239,7 +257,7 @@ static void run_app_entry(const app_entry_t *a, const char *args) {
    * bytes. Say so rather than cleaning up silently: a count that is normally
    * zero is worth noticing on the day it is not. */
   {
-    int leaked = net_reap();
+    int leaked = net_reap(1); /* tag 1 = the foreground app */
     if (leaked > 0) {
       kcon_puts("[");
       kcon_puts(a->name);
@@ -251,13 +269,69 @@ static void run_app_entry(const app_entry_t *a, const char *args) {
   }
 }
 
+/* `run NAME ... &`: the app becomes a BACKGROUND process (M10). It runs
+ * muted — no console, no input, no filesystem handle — which suits the apps
+ * worth backgrounding: servers and connections that poll. */
+static void run_app_bg(const app_entry_t *a, const char *args) {
+  int id;
+  if (a->minabi > SNOS_ABI_VERSION) {
+    kcon_puts("needs a newer kernel ABI\n");
+    return;
+  }
+  {
+    int c = proc_arena_conflict(a->arena_page, a->arena_pages);
+    if (c >= 0) {
+      kcon_puts("arena conflict: [");
+      kcon_putu((uint16_t)c);
+      kcon_puts("] ");
+      kcon_puts(proc_name((uint8_t)c));
+      kcon_puts(" holds that memory\n");
+      return;
+    }
+  }
+  set_argv(args);
+  id = proc_spawn_app(a);
+  if (id < 0) {
+    kcon_puts("no free process slot (one background job for now)\n");
+    return;
+  }
+  /* argv lives in ONE shared block and the new process reads it after its
+   * crt0 zeroes the arena. Waiting out that window here is what keeps a
+   * fast next command from overwriting the arguments mid-handoff. */
+  {
+    uint16_t until = (uint16_t)(snos_frames + 60u);
+    while ((int16_t)(snos_frames - until) < 0) {
+    }
+  }
+  kcon_puts("[");
+  kcon_putu((uint16_t)id);
+  kcon_puts("] ");
+  kcon_puts(a->name);
+  kcon_puts(" started in the background\n");
+}
+
+/* Trailing " &" on the command line = background. Stripped in place. */
+static int strip_amp(char *args) {
+  int i = 0;
+  while (args[i]) i++;
+  while (i > 0 && args[i - 1] == ' ') i--;
+  if (i > 0 && args[i - 1] == '&') {
+    i--;
+    while (i > 0 && args[i - 1] == ' ') i--;
+    args[i] = 0;
+    return 1;
+  }
+  return 0;
+}
+
 static void cmd_run(char *cmdline) {
   const app_entry_t *a;
   char *name = cmdline;
-  const char *args = split_word(cmdline);
+  char *args = split_word(cmdline);
+  int bg = strip_amp(args) | strip_amp(name); /* `run pad &` with no args */
 
   if (*name == 0) {
-    kcon_puts("usage: run NAME [ARGS]\n");
+    kcon_puts("usage: run NAME [ARGS] [&]\n");
     return;
   }
   a = app_find(name);
@@ -267,7 +341,46 @@ static void cmd_run(char *cmdline) {
     kcon_putc('\n');
     return;
   }
-  run_app_entry(a, args);
+  if (bg) run_app_bg(a, args);
+  else run_app_entry(a, args);
+}
+
+static void cmd_jobs(void) {
+  uint8_t i;
+  int any = 0;
+  for (i = 1; i < PROC_MAX; i++) {
+    uint8_t st = proc_state(i);
+    if (st == 0) continue;
+    any = 1;
+    kcon_puts("[");
+    kcon_putu(i);
+    kcon_puts("] ");
+    kcon_puts(proc_name(i));
+    if (st == 1) {
+      kcon_puts("  running\n");
+    } else {
+      kcon_puts(proc_exit_code(i) == SNOS_EXIT_KILLED ? "  killed\n"
+                                                      : "  exited\n");
+      proc_reap_slot(i); /* reported once, then the slot is free again */
+    }
+  }
+  if (!any) kcon_puts("no background jobs\n");
+}
+
+static void cmd_kill(char *rest) {
+  uint16_t id = 0;
+  char *w = rest;
+  (void)split_word(rest);
+  while (*w >= '0' && *w <= '9') id = (uint16_t)(id * 10 + (*w++ - '0'));
+  if (proc_kill((uint8_t)id) < 0) {
+    kcon_puts("no such job (see `jobs`)\n");
+    return;
+  }
+  net_reap((uint8_t)(id + 1)); /* its connections die with it */
+  kcon_puts("[");
+  kcon_putu(id);
+  kcon_puts("] killed\n");
+  proc_reap_slot((uint8_t)id);
 }
 
 /* Not a builtin? Try an application of that name.
@@ -809,6 +922,8 @@ void shell_run(void) {
     else if (streq(line, "echo")) cmd_echo(rest);
     else if (streq(line, "apps")) cmd_apps();
     else if (streq(line, "run")) cmd_run(rest);
+    else if (streq(line, "jobs")) cmd_jobs();
+    else if (streq(line, "kill")) cmd_kill(rest);
     else if (streq(line, "ls")) cmd_ls();
     else if (streq(line, "cat")) cmd_cat(rest);
     else if (streq(line, "write")) cmd_write(rest);

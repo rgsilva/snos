@@ -81,6 +81,12 @@ PROC_WANT     .equ    0x7e1a18
 PROC_NEXT_S   .equ    0x7e1a1a
 PROC_OLD_S    .equ    0x7e1a1c
 PROC_SWITCHED .equ    0x7e1a1e
+;; Who the CPU runs AFTER the swap below. Published BY THE SHIM at the moment
+;; it swaps, because anything later is a lie: with the update deferred to the
+;; next proc_tick, a background process's entire first slice ran identified
+;; as process 0 -- unmuted, unreapable, wrong.
+PROC_NEXT_ID  .equ    0x7e1a20
+PROC_CUR_ID   .equ    0x7e1a22
 
 ;;; Direct pages for trap handlers. NOT $0000, and this is load-bearing:
 ;;; Calypsi's C code keeps working values in direct-page pseudo-registers whose
@@ -98,6 +104,16 @@ NMI_DP        .equ    0x1c00          ; NMI (fires during the above)
 
 snos_stub:
               rti
+
+;;; Where dead background processes go (M10 step 5). A process's SYS_EXIT
+;;; cannot unwind anything — there is no caller to unwind TO — and it cannot
+;;; park inside the COP handler either, because the scheduler's mid-syscall
+;;; deferral would then never switch away again. So the COP handler rewrites
+;;; the trap frame's return address to point here, the shim rti's into this
+;;; loop with the process already marked DEAD, and the next NMI schedules
+;;; away from it forever. In bank $00 because the frame's PB is one byte.
+              .public proc_grave
+proc_grave:   bra     proc_grave
 
 ;;; NMI — vblank, 60 Hz. The kernel owns this unconditionally (PLAN.md §5):
 ;;; it is what lets background work (M6 networking) run while an app is in
@@ -153,18 +169,24 @@ nmi_ret:
               ;; frame (proc.c) makes first entry and resumption identical.
               lda     long:PROC_WANT
               beq     nmi_pop
-              lda     ##0                   ; one-shot, consumed even when
-              sta     long:PROC_WANT        ; the deferral says no
               ;; Same rule as the kill switch, same reason: a process inside
               ;; a COP handler holds the kernel mid-mutation and the single
-              ;; syscall DP. It finishes before anyone else runs.
+              ;; syscall DP. It finishes before anyone else runs. The request
+              ;; STAYS ARMED on deferral — the syscall exit path (cop_ret)
+              ;; takes it. Consuming it here was the step-5 pin: a process
+              ;; whose life is a poll loop of syscalls is mid-syscall at
+              ;; every NMI, so its deferrals starved everyone else forever.
               lda     2,s
               cmp     ##SYS_DP
               beq     nmi_pop
+              lda     ##0
+              sta     long:PROC_WANT
               tsc                           ; the entire context switch:
               sta     long:PROC_OLD_S       ;   save one register,
               lda     long:PROC_NEXT_S      ;   load one register
               tcs
+              lda     long:PROC_NEXT_ID     ; identity switches WITH the stack,
+              sta     long:PROC_CUR_ID      ; not a frame later
               lda     ##1
               sta     long:PROC_SWITCHED    ; tells proc_tick to file OLD_S
 nmi_pop:
@@ -211,12 +233,105 @@ snos_cop:
               beq     cop_ret
               jmp     long:app_return
 cop_ret:
+              ;; A switch the NMI deferred while this syscall ran is taken
+              ;; HERE, at the moment the mid-syscall reason evaporates. NMI is
+              ;; masked around the test-and-swap so a fresh NMI cannot race
+              ;; the handoff. The frame being abandoned mid-pop is a COP
+              ;; frame, but both shims push the identical layout — so when
+              ;; this process is later resumed by the standard pop path, it
+              ;; completes THESE pops and rti's back into its own code with
+              ;; the syscall's return value already in the stacked A.
+              sep     #0x20
+              lda     #0x01
+              sta     abs:0x4200            ; NMI off, auto-joypad on
+              rep     #0x20
+              lda     long:PROC_WANT
+              beq     cop_noswitch
+              lda     ##0
+              sta     long:PROC_WANT
+              tsc
+              sta     long:PROC_OLD_S
+              lda     long:PROC_NEXT_S
+              tcs
+              lda     long:PROC_NEXT_ID
+              sta     long:PROC_CUR_ID
+              lda     ##1
+              sta     long:PROC_SWITCHED
+cop_noswitch:
+              sep     #0x20
+              lda     #0x81
+              sta     abs:0x4200            ; NMI back on
+              rep     #0x20
               plb
               pld
               ply
               plx
               pla
               rti
+
+;;; void proc_switch_now(void) — offer the CPU from INSIDE a blocking
+;;; syscall (kbd_idle's frame wait, and through it every blocking loop).
+;;; Without this, a foreground process blocked in SYS_GETC at the shell
+;;; prompt would starve every background process: the NMI always finds it
+;;; mid-syscall and defers, and cop_ret only runs when a key arrives.
+;;; Builds a resume frame in the SAME 13-byte shape the shims push, so the
+;;; standard pop path resumes it at psn_resume; then adopts the pending
+;;; process exactly as the shims do. NMI is masked across the whole dance.
+              .public proc_switch_now
+proc_switch_now:
+              rep     #0x30
+              sep     #0x20
+              lda     #0x01
+              sta     abs:0x4200
+              rep     #0x20
+              lda     long:PROC_WANT
+              beq     psn_out
+              lda     ##0
+              sta     long:PROC_WANT
+              ;; Forge "interrupted at psn_resume": PB, PC, P, then the five
+              ;; register pushes, current values — we ARE the process, its
+              ;; live D (the syscall DP) and DB are exactly what to restore.
+              sep     #0x20
+              lda     #0                    ; PB: this code is in bank $00
+              pha
+              rep     #0x20
+              lda     ##psn_resume          ; PC of the resume point
+              pha
+              sep     #0x20
+              lda     #0                    ; P image: 16-bit A/X on resume
+              pha
+              rep     #0x30
+              pha
+              phx
+              phy
+              phd
+              phb
+              tsc
+              sta     long:PROC_OLD_S
+              lda     long:PROC_NEXT_S
+              tcs
+              lda     long:PROC_NEXT_ID
+              sta     long:PROC_CUR_ID
+              lda     ##1
+              sta     long:PROC_SWITCHED
+              ;; Pop the ADOPTED process's frame — identical shape, same rti.
+              sep     #0x20
+              lda     #0x81
+              sta     abs:0x4200
+              rep     #0x20
+              plb
+              pld
+              ply
+              plx
+              pla
+              rti
+psn_resume:   rep     #0x30                 ; resumed here by a later switch
+psn_out:
+              sep     #0x20
+              lda     #0x81
+              sta     abs:0x4200
+              rep     #0x20
+              rtl
 
 ;;; BRK — debugger trap only. Never used for syscalls, so the debugger can
 ;;; never collide with syscall signature space.
