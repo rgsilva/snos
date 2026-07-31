@@ -90,6 +90,9 @@ app_return:
               rep     #0x30
               lda     ##0
               sta     long:APPRUNNING
+              sta     long:EXITFLAG         ; a stale flag would make the next
+                                            ; kernel-issued COP unwind through a
+                                            ; dead KSP (the shims test it alone)
               lda     long:KSP
               tcs
               plb

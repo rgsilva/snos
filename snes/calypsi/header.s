@@ -157,6 +157,11 @@ snos_cop:
               sta     8,s                   ; -> the stacked A, pulled below
               ;; SYS_EXIT cannot simply return: the app's stack may be
               ;; arbitrarily deep by now, so unwind to the kernel instead.
+              ;; APPRUNNING must gate this exactly as in the NMI shim: the
+              ;; kernel itself issues COPs (debug syscheck), and unwinding one
+              ;; of those through app_return would restore a dead KSP.
+              lda     long:APPRUNNING
+              beq     cop_ret
               lda     long:EXITFLAG
               beq     cop_ret
               jmp     long:app_return

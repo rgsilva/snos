@@ -64,7 +64,10 @@ emu.addEventCallback(function()
     step = 4.75
     return
   end
-  if step == 4.75 then send("debug ver\n", 200); step = 5; return end
+  if step == 4.75 then send("debug ver\n", 200); step = 4.9; return end
+  -- A kernel-issued COP after apps have run and exited: the COP shim's unwind
+  -- check must not fire on a stale exit flag, or this restores a dead KSP.
+  if step == 4.9 then send("debug syscheck\n", 220); step = 5; return end
 
   local r = L.new_report("apps")
   local text = L.ring_text()
@@ -111,6 +114,11 @@ emu.addEventCallback(function()
   -- happened twice.
   r.check(text:find("kernel ABI ", 1, true) ~= nil,
           "shell is not responding after the kill - the unwind corrupted it")
+
+  -- 6. a kernel-issued COP after apps exited. With EXITFLAG stale, the COP
+  -- shim unwinds through app_return into a dead kernel stack pointer.
+  r.check(text:find("syscheck done", 1, true) ~= nil,
+          "syscheck after app exit did not complete - stale EXITFLAG unwind?")
 
   r.finish()
 end, emu.eventType.endFrame)
