@@ -787,8 +787,14 @@ synchronous, console-clocked, and has no file bridge, no 1-deep mailbox and no 6
 is faster than any of this, and items 3 and 4 are worth doing on their own merits rather than
 because the demo depends on them.
 
-### telnetd — remote shell into the console *(standalone; extracted from M11 2026-07-31)*
-Two stages, both agreed:
+### telnetd — remote shell into the console *(SHIPPED 2026-07-31, `3ac26d0`, v2 direct)*
+Built straight to v2; v1 was skipped because the clear question answered itself. ABI 10 adds
+SYS_CONROW (read a console row) and SYS_KBDPUSH (inject a keystroke), neither
+foreground-gated. 4 KB arena at `7f4000`, bank `$D1`. `test/telnetd.lua` asserts the mirror
+carries the screen as it STANDS on connect (banner printed before the connection existed —
+only a state diff can do that), that socket keystrokes reach the shell and their output
+reaches both screens, and that it all survives a foreground app. Original plan, for the
+record:
 - **v1, stream mirror (~150 lines, netecho-shaped):** a background app bridging a listening
   socket to the EXISTING mailbox rings — input's third backend is a byte ring, console output
   already tees into one. Remote and real console mirror both ways. Limitation understood:
