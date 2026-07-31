@@ -49,6 +49,7 @@
  */
 #include "proc.h"
 #include "snos.h"
+#include "fs.h"
 
 /* Handshake words with the shim, in the kernel-private block next to the
  * exec state (exec.s owns $1A10-$1A16; these continue it). Fixed addresses
@@ -179,6 +180,7 @@ void proc_exit_current(uint16_t sp, uint16_t code) {
   if (id == 0 || id >= PROC_MAX) return; /* process 0 exits via app_return */
   procs[id].exit_code = code;
   procs[id].state = ST_DEAD;
+  fs_reap(id); /* an abandoned write handle would lock out every writer */
   if (p_fg == id) p_fg = 0; /* a dead process cannot hold the console */
   /* Rewrite the trap frame so the COP shim's rti lands in the grave loop
    * rather than back in an app that believes it has exited. Offsets are the
@@ -198,6 +200,7 @@ int proc_kill(uint8_t id) {
    * own stack and arena, both of which die with it. */
   procs[id].exit_code = SNOS_EXIT_KILLED;
   procs[id].state = ST_DEAD;
+  fs_reap(id);
   if (p_fg == id) p_fg = 0;
   return 0;
 }

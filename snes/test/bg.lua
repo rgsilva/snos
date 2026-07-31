@@ -202,6 +202,7 @@ end
 local frame, step, at = 0, 1, nil
 local claimed = false
 local echo_seen_during_fg = false
+local first_listen_port = nil
 
 local function send(cmd, settle)
   L.feed(cmd)
@@ -247,6 +248,7 @@ emu.addEventCallback(function()
       emu.stop(1)
       return
     end
+    first_listen_port = gw.listen_port
     push_ctrl(S2C_OPEN, string.char(gw.listen_ch, 200 & 0xFF, 0, 0))
     push(gw.listen_ch, "hello-bg\n")
     send("run hello motd.txt\n", 300)
@@ -268,7 +270,23 @@ emu.addEventCallback(function()
     step = 8
     return
   end
-  if step == 8 then send("debug ver\n", 200); step = 9; return end
+  -- httpd in the BACKGROUND serving a file while the foreground shell reads
+  -- the SAME file: two concurrent read handles, the per-process fs proof.
+  if step == 8 then send("run httpd 8080 &\n", 300); step = 8.2; return end
+  if step == 8.2 then
+    if not gw.listen_ch then
+      print("RESULT FAIL bg - httpd never bound its port")
+      emu.stop(1)
+      return
+    end
+    push_ctrl(S2C_OPEN, string.char(gw.listen_ch, 200 & 0xFF, 0, 0))
+    push(gw.listen_ch, "GET /MOTD.TXT HTTP/1.1\r\n\r\n")
+    send("cat motd.txt\n", 500)
+    step = 8.4
+    return
+  end
+  if step == 8.4 then send("kill 1\n", 200); step = 8.6; return end
+  if step == 8.6 then send("debug ver\n", 200); step = 9; return end
 
   local r = L.new_report("bg")
   local text = L.ring_text()
@@ -279,8 +297,8 @@ emu.addEventCallback(function()
           "the background spawn did not report")
   r.check(text:find("netecho  running", 1, true) ~= nil,
           "jobs did not show the process running")
-  r.check(gw.listen_port == 7777,
-          "netecho bound " .. tostring(gw.listen_port) .. ", not 7777")
+  r.check(first_listen_port == 7777,
+          "netecho bound " .. tostring(first_listen_port) .. ", not 7777")
   r.check(text:find("[hello exited 42]", 1, true) ~= nil,
           "the foreground app did not run to completion")
   r.check(echo_seen_during_fg,
@@ -298,6 +316,25 @@ emu.addEventCallback(function()
           "the keyboard break did not kill the foregrounded job")
   r.check(text:find("kernel ABI ", 1, true) ~= nil,
           "the shell did not answer at the end")
+
+  -- The background httpd's response, received at the gateway: status line,
+  -- content type, and the file's actual bytes -- while the foreground cat of
+  -- the SAME file also succeeded (its content is in the console transcript).
+  do
+    local resp = gw.upstream[gw.listen_ch or 255] or ""
+    r.check(resp:find("HTTP/1.1 200 OK", 1, true) ~= nil,
+            "background httpd did not serve a 200")
+    r.check(resp:find("Performance does not matter", 1, true) ~= nil,
+            "background httpd's body is not the file's bytes")
+  end
+  do
+    -- Exactly one console copy expected: the foreground cat's. httpd's copy
+    -- goes upstream, never to the screen.
+    local _, cats = text:gsub("Performance does not matter", "")
+    r.check(cats >= 1,
+            "the foreground cat did not read while httpd served (saw " ..
+            tostring(cats) .. " copies)")
+  end
 
   r.finish()
 end, emu.eventType.endFrame)

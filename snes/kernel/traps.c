@@ -276,11 +276,9 @@ uint16_t snos_cop_c(uint16_t sp) {
     char nm[FS_NAME_LEN + 1];
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
     int i;
-    /* The filesystem has ONE open-file handle; two processes sharing it
-     * would corrupt each other's I/O. Background fs access needs per-process
-     * handles first, so for now it is refused honestly rather than allowed
-     * to interleave. Background-worthy apps (irc, netecho) do not use it. */
-    if (!is_fg) return SYS_ERR;
+    /* Per-process handles since M10: background fs access is real (httpd
+     * serves from the background), with one system-wide WRITE handle
+     * enforced down in fs.c — the bump allocator has one commit cursor. */
     for (i = 0; i < FS_NAME_LEN; i++) {
       nm[i] = (char)far_rd(bank, (uint16_t)(off + i));
       if (nm[i] == 0) break;
@@ -343,6 +341,7 @@ uint16_t snos_cop_c(uint16_t sp) {
   }
 
   case SYS_READ_VRAM:
+    if (!is_fg) return 0; /* VRAM is the display: foreground only */
     return fs_read_vram(a);
 
   case SYS_GFX:

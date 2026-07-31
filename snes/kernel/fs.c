@@ -1,4 +1,5 @@
 #include "fs.h"
+#include "proc.h"
 #include "sram.h"
 #include "farmem.h"
 
@@ -8,11 +9,23 @@ static fs_entry_t files[FS_MAX];
 static int nfiles;
 
 /* open-file state */
-static int open_idx = -1;
-static int open_write;
-static uint32_t open_pos;
-static uint32_t open_start;
-static uint8_t open_slot;
+/* Per-process open-file handles (M10). The five fields that used to be the
+ * single implicit "current file" — which is exactly why background fs access
+ * had to be refused: two processes through one cursor serve each other's
+ * bytes. Reads are stateless per byte, so concurrent READERS on separate
+ * handles are safe outright. Writing keeps a single system-wide owner: the
+ * bump allocator's write-size-on-close design assumes one writer, and a
+ * second one gets the same honest -1 a full volume does. */
+typedef struct {
+  int idx;      /* -1 closed, -2 writing, >= 0 an index into files[] */
+  int write;
+  uint32_t pos;
+  uint32_t start;
+  uint8_t slot;
+} fs_hand_t;
+static fs_hand_t hnd[PROC_MAX];
+static uint8_t write_owner = 0xFF; /* proc id holding THE write handle */
+#define H (&hnd[proc_current()])
 
 /* Straight 24-bit read. Deliberately NOT far_rd(addr>>16, addr): splitting the
  * address into bank and offset only for far_rd to shift them back together is
@@ -118,8 +131,16 @@ static void sramfs_mount(void) {
 }
 
 void fs_init(void) {
+  int i;
   nfiles = 0;
-  open_idx = -1;
+  /* A remount rebuilds files[], so every open handle's index is meaningless
+   * afterwards: invalidate them all rather than let one point at whatever
+   * reshuffled into its slot. Matches the old single-handle semantics. */
+  for (i = 0; i < PROC_MAX; i++) {
+    hnd[i].idx = -1;
+    hnd[i].write = 0;
+  }
+  write_owner = 0xFF;
   romfs_mount();
   sramfs_mount();
 }
@@ -183,9 +204,9 @@ uint32_t fs_free(void) {
 int fs_open_read(const char *name) {
   int i = fs_index(name);
   if (i < 0) return -1;
-  open_idx = i;
-  open_write = 0;
-  open_pos = 0;
+  H->idx = i;
+  H->write = 0;
+  H->pos = 0;
   return 0;
 }
 
@@ -206,6 +227,7 @@ int fs_open_write(const char *name) {
    * already own a slot, since deleting an existing SRAM copy frees its own. */
   alloc = sram_rd32(8);
   if (alloc >= sram_size()) return -1;
+  if (write_owner != 0xFF) return -1; /* one writer system-wide; see hnd */
 
   for (s = 0; s < SRAMFS_SLOTS; s++)
     if (sram_rd(slot_addr(s)) == 0) break;
@@ -225,48 +247,55 @@ int fs_open_write(const char *name) {
   sram_wr32(slot_addr(s) + 16, alloc);
   sram_wr32(slot_addr(s) + 20, 0);
 
-  open_slot = (uint8_t)s;
-  open_start = alloc;
-  open_pos = 0;
-  open_write = 1;
-  open_idx = -2; /* writing: not a directory index */
+  H->slot = (uint8_t)s;
+  H->start = alloc;
+  H->pos = 0;
+  H->write = 1;
+  H->idx = -2; /* writing: not a directory index */
+  write_owner = proc_current();
   return 0;
 }
 
 int fs_getc(void) {
   const fs_entry_t *e;
-  if (open_idx < 0 || open_write) return -1;
-  e = &files[open_idx];
-  if (open_pos >= e->size) return -1;
-  return fs_read_byte(e, open_pos++);
+  if (H->idx < 0 || H->write) return -1;
+  e = &files[H->idx];
+  if (H->pos >= e->size) return -1;
+  return fs_read_byte(e, H->pos++);
 }
 
 int fs_putc(uint8_t c) {
-  if (!open_write) return -1;
-  if (open_start + open_pos >= sram_size()) return -1;
-  sram_wr(open_start + open_pos, c);
-  open_pos++;
+  if (!H->write) return -1;
+  if (H->start + H->pos >= sram_size()) return -1;
+  sram_wr(H->start + H->pos, c);
+  H->pos++;
   return 0;
 }
 
 void fs_close(void) {
-  if (open_write) {
-    sram_wr32(slot_addr(open_slot) + 20, open_pos);
-    sram_wr32(8, open_start + open_pos); /* commit the bump allocator */
+  if (H->write) {
+    sram_wr32(slot_addr(H->slot) + 20, H->pos);
+    sram_wr32(8, H->start + H->pos); /* commit the bump allocator */
     fs_init();                           /* re-read the directory */
   }
-  open_idx = -1;
-  open_write = 0;
+  H->idx = -1;
+  if (H->write) write_owner = 0xFF;
+  H->write = 0;
 }
 
 uint32_t fs_open_size(void) {
-  if (open_write) return open_pos;
-  if (open_idx < 0) return 0;
-  return files[open_idx].size;
+  if (H->write) return H->pos;
+  if (H->idx < 0) return 0;
+  return files[H->idx].size;
 }
 
 int fs_delete(const char *name) {
   int i;
+  /* Not while anyone holds the write handle: the remount below reshuffles
+   * directory slots, and the writer's slot number must stay true until its
+   * close commits. (fs_open_write's own overwrite-delete runs BEFORE it
+   * claims the handle, so this does not refuse the overwrite path.) */
+  if (write_owner != 0xFF) return -1;
   /* fs_index prefers the writable copy, so deleting a shadowed name removes the
    * SRAM one and reveals the ROM original again rather than failing. */
   {
@@ -313,9 +342,9 @@ uint16_t fs_read_vram(uint16_t count) {
   uint32_t remain, pos;
   uint16_t moved = 0;
 
-  if (open_idx < 0 || open_write) return 0;
-  e = &files[open_idx];
-  pos = open_pos;
+  if (H->idx < 0 || H->write) return 0;
+  e = &files[H->idx];
+  pos = H->pos;
   if (pos >= e->size) return 0;
   remain = e->size - pos;
   if ((uint32_t)count < remain) remain = count;
@@ -344,6 +373,16 @@ uint16_t fs_read_vram(uint16_t count) {
     remain -= chunk;
     moved = (uint16_t)(moved + chunk);
   }
-  open_pos = pos;
+  H->pos = pos;
   return moved;
+}
+
+/* A process died (exit or kill): release its fs state. An uncommitted write
+ * is abandoned, which the on-close-commit design makes safe by construction:
+ * the slot never had its size written, so the file simply does not exist. */
+void fs_reap(uint8_t proc) {
+  if (proc >= PROC_MAX) return;
+  if (write_owner == proc) write_owner = 0xFF;
+  hnd[proc].idx = -1;
+  hnd[proc].write = 0;
 }
