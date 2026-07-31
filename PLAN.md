@@ -372,11 +372,8 @@ HTTP service the SNES's own client calls.
   address, and **that** is the day DHCP becomes worth implementing on-console — cheap by then,
   it is just UDP and the stack already speaks UDP for DNS. Router table says "SNES";
   done-when satisfied with zero Mac involvement.
-- **App idea filed here because M11 transforms it: `telnetd`.** Today it would be ~150 lines
-  bridging a socket to the mailbox stdin/stdout rings (the input layer's third backend IS a
-  byte ring; console output already tees into one) — remote shell with the real console
-  mirroring both ways, full-screen apps excepted. Post-M11 it becomes an honest TCP listener
-  on the SNES's own stack: remoting into a Super Nintendo over TCP/IP it speaks itself.
+- (`telnetd` was filed here 2026-07-31; extracted same day to its own item below — it does
+  not need M11 and should not wait for it.)
 
 **Done when:** the SNES answers a ping from another machine on the LAN at its own address.
 
@@ -789,6 +786,20 @@ synchronous, console-clocked, and has no file bridge, no 1-deep mailbox and no 6
 ~20 KB/s is the documented ballpark, about **33× what the test rig gets**. So M7 on real silicon
 is faster than any of this, and items 3 and 4 are worth doing on their own merits rather than
 because the demo depends on them.
+
+### telnetd — remote shell into the console *(standalone; extracted from M11 2026-07-31)*
+Two stages, both agreed:
+- **v1, stream mirror (~150 lines, netecho-shaped):** a background app bridging a listening
+  socket to the EXISTING mailbox rings — input's third backend is a byte ring, console output
+  already tees into one. Remote and real console mirror both ways. Limitation understood:
+  `clear` and positioned writes are invisible remotely (the ring carries printed characters,
+  not screen operations) — the remote sees the conversation, not the screen.
+- **v2, screen-faithful:** every telnet client is a VT100. Tee the console's three choke
+  points (con_putc / con_putat / con_clear) into a small record ring; telnetd translates
+  records to ANSI (`ESC[2J` clear, `ESC[r;cH` position, `ESC[7m` inverse). The remote
+  terminal becomes a pixel-faithful 64x28 mirror INCLUDING full-screen apps — remote edit,
+  remote irc. The SNES never emulates a terminal; it narrates what it did and the far
+  terminal draws. Post-M11 the socket becomes a listener on the console's own stack.
 
 ### M12 — Services, not proxies *(follows M11)*
 Once the console has its own address, the gateway stops being a shim everything flows through
