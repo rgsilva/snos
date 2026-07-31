@@ -35,11 +35,24 @@ BUILD := build
 K := kernel
 
 MODEL := --code-model=large --data-model=large
-CFLAGS = --core=65816 --target=snes $(MODEL) --no-ppu-mul -O0 -I$(K) \
+# NO --target=snes for C, deliberately. The SNES target inlines multiply and
+# divide on the S-CPU hardware ALU ($4202-$4217) guarded by SEI — and NMI is
+# not maskable. An NMI landing in the ~10-cycle result window destroys the
+# product: the vblank auto-joypad poll clobbers $4216/$4217 in hardware, and
+# proc_tick's own multiplies would clobber it from C anyway. The symptom was
+# `i * 7u` evaluating to 0 in fstest — deterministic at one code layout,
+# invisible at the next, because it needs the (deterministic) NMI to land on
+# exactly that instruction. Bare 65816 emits soft _Mul16/_Div16 calls whose
+# state lives in DP pseudo-registers, which the four-direct-page scheme
+# already makes interrupt-safe. See docs/calypsi-interrupt-hazard.md.
+CFLAGS = --core=65816 $(MODEL) -O0 -I$(K) \
          --list-file=$(@:.o=.lst)
 AFLAGS := --core=65816 --target=SNES $(MODEL)
+# Generic clib to match the bare-target C objects (the -snes variants carry a
+# target attribute the linker refuses to mix). Verified to contain no
+# $4202/$4204 hardware-ALU references, same as the -snes-noppu one did.
 LNFLAGS = calypsi/linker.scm --output-format=raw --rtattr exit=simplified \
-          $(CALDIR)/lib/clib-lc-ld-snes-noppu.a
+          $(CALDIR)/lib/clib-lc-ld.a
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
             $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c $(K)/net.c \

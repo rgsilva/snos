@@ -49,7 +49,11 @@ SRC="../apps/$NAME"
 mkdir -p "$OUT"
 
 MODEL="--code-model=large --data-model=large"
-CFLAGS="--core=65816 --target=snes $MODEL --no-ppu-mul -O0 -Ikernel -I../apps/lib"
+# No --target=snes: it inlines mul/div on the hardware ALU, which an NMI
+# corrupts mid-computation (see the CFLAGS comment in ../Makefile and
+# docs/calypsi-interrupt-hazard.md). Apps run with NMI live, same as the
+# kernel, so they need the same soft-multiply discipline.
+CFLAGS="--core=65816 $MODEL -O0 -Ikernel -I../apps/lib"
 AFLAGS="--core=65816 --target=SNES $MODEL"
 
 sed -e "s/@BANK@/$BANK/g" -e "s/@ANEAR_LO@/$ANEAR_LO/g" \
@@ -104,6 +108,6 @@ done
     --list-file="$OUT/$NAME.map" \
     "$OUT/appinfo.o" "$OUT/crt0.o" "$OUT/syscall.o" "$OUT/snoslib.o" \
     "$OUT/$NAME.o" $APPOBJ \
-    "$CALDIR/lib/clib-lc-ld-snes-noppu.a"
+    "$CALDIR/lib/clib-lc-ld.a"
 
 echo "  app $NAME -> bank \$$BANK ($(wc -c < "$OUT/$NAME.raw") bytes)"

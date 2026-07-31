@@ -139,3 +139,61 @@ addresses", and the only other thing running was the NMI handler.
 
 The lesson worth keeping: a *single wrong byte* is a much stronger signal than a
 crash. It points at concurrency or aliasing, not at logic.
+
+## Second hazard, same theme: the hardware ALU (found 2026-07-31)
+
+The direct-page fix above protects the compiler's *pseudo registers*. The
+S-CPU has a second piece of shared mutable state the compiler uses and no
+interrupt can save: the hardware multiplier/divider at `$4202-$4217`.
+
+With `--target=snes`, Calypsi inlines every 16-bit multiply as:
+
+```asm
+    php
+    sei                 ; guards against IRQ — but NMI is NOT MASKABLE
+    sep     #32
+    sta     long:0x4202 ; multiplicand
+    lda     dp:...
+    sta     long:0x4203 ; multiplier — starts the 8-cycle multiply
+    rep     #32
+    nop
+    nop
+    nop
+    lda     long:0x4216 ; product
+    plp
+```
+
+An NMI landing between `sta $4203` and `lda $4216` destroys the product two
+independent ways: the vblank **auto-joypad poll uses the ALU's shift register
+in hardware**, clobbering `$4216/$4217` on its own (documented 5A22
+behaviour, faithfully emulated by Mesen), and any multiply in the NMI path —
+`proc_tick` had thirteen — clobbers it from software. The registers cannot be
+saved and restored by the handler: the operands are write-only, the results
+read-only. `kcon`'s decimal printing had the same window around the hardware
+divider (`$4204-$4206`).
+
+**Symptom:** `i * 7u` evaluated to 0 — once, at one loop index, and only at
+one code layout. The fs compact self-test failed "CB corrupt after compact"
+while every byte in SRAM was provably correct; adding a diagnostic print made
+it pass. The NMI is deterministic relative to a deterministic workload, so
+whether it lands in the fatal ~10-cycle window is decided by *code layout*:
+any edit anywhere moves the landmine. A heisenbug with a uniform per-multiply
+probability in real use, and a hard red/green coin-flip per build in tests.
+
+**Fix:** compile C with no `--target=snes` (and link the generic
+`clib-lc-ld.a`, since the target attribute must match). Bare-65816 codegen
+emits `_Mul16`/`_Div16` library calls, pure shift/add, whose working state is
+the DP pseudo registers — already interrupt-safe under the four-direct-page
+scheme. Soft multiply costs ~4x the hardware sequence; nothing in SNOS
+multiplies in a path where that matters, and the console already avoids
+mul/mod in its hot loop by masking.
+
+The general rule now has two instances: **any machine state shared between
+foreground and handler must either be swappable per context (D solved the
+pseudo registers) or must not be used at all (nothing can swap the ALU).**
+
+How it was found: a write-watch proved SRAM and the directory cache were both
+correct, an exec trace caught the NMI entering between `sta $4203` and the
+`rep`, and the resumed code read `$4216` as `0x0000` where 483 had been. The
+lesson from the first hazard held: the single wrong byte was concurrency, not
+logic — it just took an instruction-level trace to catch the CPU in the act.

@@ -700,7 +700,9 @@ static void cmd_fstest(void) {
    * idempotent whether the crash hit the copy, the commit, or the clear. */
   {
     uint32_t i, free0, free1;
-    int ok = 1;
+    /* Each failure names its site. A compound "FAILED" already cost one
+     * debugging session spent re-deriving which of five checks tripped. */
+    const char *why = 0;
     fs_open_write("CA.TXT");
     for (i = 0; i < 512; i++) fs_putc((uint8_t)(i * 3u));
     fs_close();
@@ -709,18 +711,21 @@ static void cmd_fstest(void) {
     fs_close();
     free0 = fs_free();
     fs_delete("CA.TXT");
-    if (fs_compact() < 0) ok = 0;
+    if (fs_compact() < 0) why = "compact refused";
     free1 = fs_free();
-    if (free1 < free0 + 512) ok = 0; /* CA's pages must be back */
-    {
+    if (!why && free1 < free0 + 512) why = "space not reclaimed";
+    if (!why) {
       const fs_entry_t *b = fs_find("CB.TXT");
-      if (!b || b->size != 512) ok = 0;
+      if (!b || b->size != 512) why = "CB lost by compact";
       else
         for (i = 0; i < 512; i++)
-          if (fs_read_byte(b, i) != (uint8_t)(i * 7u)) { ok = 0; break; }
+          if (fs_read_byte(b, i) != (uint8_t)(i * 7u)) {
+            why = "CB corrupt after compact";
+            break;
+          }
     }
     /* Torture: re-arm the journal for CB as if the move died mid-copy. */
-    {
+    if (!why) {
       const fs_entry_t *b = fs_find("CB.TXT");
       if (b) {
         sram_wr32(fs_journal_off() + 4u, b->off); /* dest = where it is */
@@ -728,19 +733,27 @@ static void cmd_fstest(void) {
         fs_compact_recover();             /* must be a harmless redo */
         fs_init();
         b = fs_find("CB.TXT");
-        if (!b) ok = 0;
+        if (!b) why = "CB lost by recovery";
         else
           for (i = 0; i < 512; i++)
-            if (fs_read_byte(b, i) != (uint8_t)(i * 7u)) { ok = 0; break; }
+            if (fs_read_byte(b, i) != (uint8_t)(i * 7u)) {
+              why = "CB corrupt after recovery";
+              break;
+            }
       }
     }
     /* The journal must be IDLE afterwards. An armed journal lives in
      * battery SRAM and outlives the run: it made this very test pass or
      * fail depending on what the previous one left behind. */
-    if (sram_rd32(fs_journal_off()) != 0) ok = 0;
+    if (!why && sram_rd32(fs_journal_off()) != 0) why = "journal not idle";
     fs_delete("CB.TXT");
-    kcon_puts(ok ? "fstest: compact reclaimed and survived recovery\n"
-                 : "fstest: COMPACT FAILED\n");
+    if (why) {
+      kcon_puts("fstest: COMPACT FAILED: ");
+      kcon_puts(why);
+      kcon_putc('\n');
+    } else {
+      kcon_puts("fstest: compact reclaimed and survived recovery\n");
+    }
   }
 }
 
