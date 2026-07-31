@@ -191,8 +191,11 @@ void osk_redraw(void) {
   for (i = 0; i < PANEL_ROWS; i++) {
     if (panel_dirty & (1 << i)) {
       build_row(panel_buf, i);
-      con_panel_row(PANEL_TOP + i, panel_buf);
-      panel_dirty &= (uint8_t)~(1 << i);
+      /* Cleared only when the DMA landed inside vblank; an overrun (NMI ate
+       * the window — routine during a download) retries the row next call
+       * instead of leaving it half-painted with the flag gone. */
+      if (con_panel_row(PANEL_TOP + i, panel_buf))
+        panel_dirty &= (uint8_t)~(1 << i);
       return;
     }
   }
@@ -295,6 +298,12 @@ int kbd_getchar(void) {
   for (;;) {
     int c = kbd_getchar_nonblock();
     if (c >= 0) return c;
+    /* A dying app must not block its own funeral. The NMI defers the kill
+     * unwind while a syscall is on the stack (header.s), so a SYS_GETC that
+     * kept waiting here would make the app unkillable; give up instead and
+     * let the COP shim unwind on return. Foreground (shell) callers never
+     * see this: APPRUNNING is only set while an app owns the machine. */
+    if (SNOS_EXEC_RUN && SNOS_EXEC_FLAG) return -1;
     kbd_idle();
   }
 }
@@ -377,6 +386,7 @@ int kbd_readline(char *buf, int max) {
     c = kbd_getchar();
     caret(0);
 
+    if (c < 0) break; /* the app is being killed; see kbd_getchar */
     if (c == '\n' || c == '\r') {
       kcon_putc('\n');
       break;

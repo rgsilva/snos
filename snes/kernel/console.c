@@ -576,10 +576,16 @@ void con_invalidate_all(void) {
 }
 
 /* Write one row of the PANEL tilemaps. Screen coordinates; the panel map is
- * unscrolled, so panel row R is simply tilemap row R. */
-void con_panel_row(int screen_row, const uint8_t *chars) {
+ * unscrolled, so panel row R is simply tilemap row R.
+ *
+ * Returns whether the transfer finished inside vblank — the same rule
+ * con_flush enforces, and for the same reason: NMI fires at the top of the
+ * window and net_service can consume most of it, after which these DMAs land
+ * during active display where VRAM writes are silently ignored. The caller
+ * must keep the row dirty on 0 or it stays half-painted forever. */
+int con_panel_row(int screen_row, const uint8_t *chars) {
     int cell;
-    if (screen_row < 0 || screen_row >= ROWS) return;
+    if (screen_row < 0 || screen_row >= ROWS) return 1;
     for (cell = 0; cell < 32; cell++) {
         rowbuf[0][cell]  = (uint16_t)((chars[cell * 2]     << 1) | 0x2000);
         rowbuf1[0][cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
@@ -588,4 +594,5 @@ void con_panel_row(int screen_row, const uint8_t *chars) {
     while (!(R8(0x4212) & 0x80)) ;
     dma_vram(0, (uint16_t)(BG2_PANEL + screen_row * 32), rowbuf[0], 32);
     dma_vram(1, (uint16_t)(BG1_PANEL + screen_row * 32), rowbuf1[0], 32);
+    return (R8(0x4212) & 0x80) ? 1 : 0;
 }

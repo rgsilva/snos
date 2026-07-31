@@ -59,7 +59,7 @@ int con_text_rows(void); /* usable height; shrinks when the keyboard shows */
 void con_caret(int on);
 void con_split_enable(int panel_top_row);
 void con_split_disable(void);
-void con_panel_row(int screen_row, const uint8_t *chars);
+int con_panel_row(int screen_row, const uint8_t *chars); /* 1 = landed in vblank */
 void con_invalidate_all(void);
 void con_gfx(int acquire);
 

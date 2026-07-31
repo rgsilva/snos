@@ -121,6 +121,21 @@ snos_nmi:
               beq     nmi_ret
               lda     long:EXITFLAG
               beq     nmi_ret
+              ;; ...unless this NMI interrupted a system call. Unwinding from
+              ;; the middle of a COP handler abandons whatever kernel mutation
+              ;; it was inside — a half-queued control record misaligns the
+              ;; gateway's parser until a link restart, a half-closed file
+              ;; leaks its bytes. The interrupted D is at 2,s (the phd above);
+              ;; if it is the syscall DP, let the COP shim do the unwind at
+              ;; handler exit — it re-checks EXITFLAG on every return, and the
+              ;; blocking loops in input.c give up when the flag is armed, so
+              ;; deferring never parks the kill. The two one-instruction
+              ;; windows in the COP shim where D is still the app's (before
+              ;; tcd, after pld) unwind from here, harmlessly: no handler is
+              ;; in progress at either.
+              lda     2,s
+              cmp     ##SYS_DP
+              beq     nmi_ret
               jmp     long:app_return
 nmi_ret:
               plb

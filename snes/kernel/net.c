@@ -106,6 +106,26 @@ static uint8_t ch_app[NET_CHANNELS];
  * them, so a server is a loop and the port survives between requests. */
 static uint8_t ch_listen[NET_CHANNELS];
 
+/* Listen-channel reuse handoff, NMI -> foreground. When the gateway reuses an
+ * EOF channel for the next connection, the old connection's undrained receive
+ * bytes must be discarded — but ring_tail is FOREGROUND-owned (the ownership
+ * table above), so the NMI may not clear it. Instead the NMI records where the
+ * new connection's bytes begin (ring_head at the moment of the OPEN, before
+ * that same poll appends the new client's data) and raises the flag; net_read
+ * applies the discard as its own first act. Everything the foreground stores
+ * while racing this is <= mark, so a lost race only delays the discard. */
+static volatile uint8_t ch_reuse[NET_CHANNELS];
+static volatile uint16_t ch_reuse_mark[NET_CHANNELS];
+
+/* Channel-lifecycle mutations (open/close/listen/hangup) write indices whose
+ * single writer is otherwise the NMI. Masking NMI at the source for those few
+ * stores makes the whole mutation atomic against net_service() — the same
+ * idiom as pad_pressed(), and cheap because lifecycle events are per-connection
+ * while the rings' hot paths stay lock-free single-writer. */
+#define NET_R8(a) (*(volatile uint8_t *)(a))
+#define NET_NMI_OFF() (NET_R8(0x4200) = 0x01)
+#define NET_NMI_ON() (NET_R8(0x4200) = 0x81)
+
 /* Outbound stream bytes, per channel. Until now the SNES could only ever ASK
  * for things: every byte it sent was a control record. A stream that only flows
  * one way cannot carry IRC, an echo server or an HTTP response, so each channel
@@ -284,6 +304,14 @@ int net_read(int ch, uint8_t __far *dst, int max) {
   uint16_t t, avail, n, first;
   if (ch < 0 || ch >= NET_CHANNELS) return 0;
   if (max <= 0) return 0;
+  /* A listen channel was reused (see ctrl_message): discard what the dead
+   * connection left, up to the recorded boundary — never to the live head,
+   * which may already hold the new client's bytes. Foreground-owned store,
+   * so this is the one place the discard may happen. */
+  if (ch_reuse[ch]) {
+    ch_reuse[ch] = 0;
+    ring_tail[ch] = ch_reuse_mark[ch];
+  }
   t = ring_tail[ch];
   /* Read the producer's index once. It may advance while we copy — NMI is the
    * producer — but only forwards, and only into the space beyond `avail`, so a
@@ -370,10 +398,13 @@ static int net_open(const char *url, uint8_t cmd) {
   txq_put((uint8_t)ch);
   for (i = 0; i < n; i++) txq_put((uint8_t)url[i]);
 
+  NET_NMI_OFF();
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
+  ch_reuse[ch] = 0;
   ch_http[ch] = 0;
   ch_state[ch] = NET_ST_OPENING;
+  NET_NMI_ON();
   return ch;
 }
 
@@ -466,13 +497,16 @@ int net_web_open(const char *url) {
   txq_put(0); /* WEB_OPEN */
   for (i = 0; i < n; i++) txq_put((uint8_t)url[i]);
 
+  NET_NMI_OFF();
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
   txring_head[ch] = 0;
   txring_tail[ch] = 0;
+  ch_reuse[ch] = 0;
   ch_flags[ch] = 0;
   ch_http[ch] = 0;
   ch_state[ch] = NET_ST_OPENING;
+  NET_NMI_ON();
   return ch;
 }
 
@@ -493,9 +527,12 @@ int net_web_op(int ch, uint8_t op, uint8_t a, uint8_t b) {
 
   /* The far side answers with a fresh window, so the ring starts empty and the
    * channel goes back to waiting for a status. */
+  NET_NMI_OFF();
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
+  ch_reuse[ch] = 0;
   ch_state[ch] = NET_ST_OPENING;
+  NET_NMI_ON();
   return 0;
 }
 
@@ -510,9 +547,12 @@ int net_hangup(int ch) {
   txq_put(1);
   txq_put((uint8_t)ch);
 
+  NET_NMI_OFF();
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
+  ch_reuse[ch] = 0;
   ch_state[ch] = NET_ST_LISTEN;
+  NET_NMI_ON();
   return 0;
 }
 
@@ -530,14 +570,17 @@ int net_listen(uint16_t port) {
   txq_put((uint8_t)(port & 0xFF));
   txq_put((uint8_t)(port >> 8));
 
+  NET_NMI_OFF();
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
   txring_head[ch] = 0;
   txring_tail[ch] = 0;
+  ch_reuse[ch] = 0;
   ch_flags[ch] = 0;
   ch_http[ch] = 0;
   ch_listen[ch] = 1;
   ch_state[ch] = NET_ST_LISTEN;
+  NET_NMI_ON();
   return ch;
 }
 
@@ -556,15 +599,23 @@ void net_close(int ch) {
     txq_put(1);
     txq_put((uint8_t)ch);
   }
+  /* The whole teardown under one NMI mask. Unbracketed, an ack arriving
+   * between the tail and txframe_ch stores re-advanced the cleared tail by
+   * the stale in-flight count — head 0, tail k — and build_frame then sent
+   * up to 511 bytes of dead ring content, which a reopened channel would
+   * inherit into a NEW connection. */
+  NET_NMI_OFF();
   ch_state[ch] = NET_ST_FREE;
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
+  ch_reuse[ch] = 0;
   ch_flags[ch] = 0;
   ch_app[ch] = 0;
   ch_listen[ch] = 0;
   txring_head[ch] = 0;
   txring_tail[ch] = 0;
   txframe_ch[ch] = 0;
+  NET_NMI_ON();
 }
 
 /* --------------------------------------------------------- inbound control */
@@ -577,14 +628,23 @@ static void ctrl_message(void) {
       ch = cmsg[0];
       /* A listening channel accepts an OPEN from LISTEN or from the EOF of the
        * previous connection, because the gateway keeps accepting on the same
-       * port and reuses the channel. Rings are cleared here so one request
-       * cannot inherit the tail of the last one. */
+       * port and reuses the channel.
+       *
+       * This runs in NMI, so it may write ONLY NMI-owned indices — the old
+       * code zeroed ring_tail and txring_head here and could fire in the
+       * middle of a foreground net_read/net_write on the same channel, which
+       * left tail past head and the link wedged on phantom bytes. Unsent TX
+       * is dropped by the consumer skipping to head (both stores NMI-owned);
+       * undrained RX is dropped by net_read via the mark/flag handoff, whose
+       * mark is head NOW — before this same poll appends the new client's
+       * data. An app still mid-conversation with the dead connection when
+       * the next one lands is a protocol-level truth of channel reuse; what
+       * is guaranteed here is that the kernel's indices stay coherent. */
       if (ch < NET_CHANNELS && ch_listen[ch] &&
           (ch_state[ch] == NET_ST_LISTEN || ch_state[ch] == NET_ST_EOF)) {
-        ring_head[ch] = 0;
-        ring_tail[ch] = 0;
-        txring_head[ch] = 0;
-        txring_tail[ch] = 0;
+        ch_reuse_mark[ch] = ring_head[ch];
+        ch_reuse[ch] = 1;
+        txring_tail[ch] = txring_head[ch];
         txframe_ch[ch] = 0;
         ch_state[ch] = NET_ST_OPEN;
       } else if (ch < NET_CHANNELS && ch_state[ch] == NET_ST_OPENING) {
@@ -744,6 +804,10 @@ static void build_frame(void) {
       int room = LINK_FRAME - o - 2;
       int i;
       txframe_ch[ch] = 0;
+      /* Never pack a freed channel. net_close's teardown is atomic now, so
+       * head==tail there anyway; this is the guarantee that stale ring
+       * content cannot reach the wire even if that ever regresses. */
+      if (ch_state[ch] == NET_ST_FREE) continue;
       if (have <= 0 || room <= 0) continue;
       if (have > room) have = room;
       if (have > 255) have = 255;
