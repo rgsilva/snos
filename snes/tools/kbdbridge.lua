@@ -85,6 +85,11 @@ local KEYS = {
   { "\27", "\27", "Escape", "Esc" },
   { "\n", "\n", "Return", "Enter", "Keypad Enter", "KeypadEnter" },
 
+  -- Tab sends $09. Nothing needed it until `irc`, whose window switcher is
+  -- bound to it; without this entry the key resolves to nothing and the
+  -- switcher simply never opens, which looks like a bug in the application.
+  { "\9", "\9", "Tab" },
+
   -- On a Mac the key labelled "delete" is what everyone else calls Backspace,
   -- and Mesen may report it under either name. Both are accepted; a Mac has no
   -- separate forward-delete to be confused with.

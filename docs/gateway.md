@@ -212,6 +212,85 @@ politeness: `build_frame` packs the control queue *before* channel data, so a
 hangup queued next to a half-sent response would overtake it and the client
 would get a truncated page.
 
+## `irc` — the SNES on IRC
+
+```
+irc HOST[:PORT] [NICK] [#CHANNEL]      port defaults to 6667, nick to 'snes'
+```
+
+An outbound `sys_net_connect` and nothing else — no `render:`, no image
+conversion, no gateway-side protocol knowledge at all. IRC is line-oriented
+ASCII, which is the one thing this link and this console are both actually good
+at, so the gateway is a pipe here and that is the whole point.
+
+**It is a text application.** It never touches `sys_gfx` and never takes the
+PPU: no shadow framebuffer, no tiles, no write window, no OAM. It paints the
+console with `SYS_PUTS_AT`, which cannot scroll, so the layout holds still with
+no HDMA split — a tab bar on row 0, the message pane in the middle, the input
+line on the last row. The keyboard panel needs a split because it coexists with
+a *scrolling* console; this replaces the console outright.
+
+The consequence is that pane scrolling is a repaint of every pane row, since the
+console's own scroll would carry the bar and the input line with it. That is
+also why the user list is a **toggled overlay** rather than a side panel: a side
+panel would be repainted by every single message.
+
+| Key | |
+|---|---|
+| `^N` / `^P` | next / previous window (also left/right on the d-pad) |
+| `TAB` | window switcher; digit or up/down, enter picks, esc closes |
+| `^U` | user list overlay |
+| `^Q` | quit |
+
+`/join #c`, `/part`, `/msg nick text`, `/nick n`, `/names`, `/close`,
+`/raw LINE`, `/quit [reason]`, `/help`. Anything not starting with `/` is sent
+to the current window. PMs are just windows.
+
+### Protocol decisions that are not negotiable
+
+- **No `CAP LS`, ever.** Undernet and DALnet answer `421`; QuakeNet answers with
+  *silence*. A client that sends it and waits for the list hangs on three
+  networks, and there is nothing here that would use a capability.
+- **`PING` is answered from the top of `handle_line`**, before anything else can
+  return early. A missed `PONG` is not an error at the time — it is a silent
+  disconnection several minutes later.
+- **A `PRIVMSG` or `NOTICE` whose text starts with `\x01` is dropped.** OFTC
+  sends an unsolicited CTCP VERSION on connect, and `\1VERSION\1` in the message
+  pane looks exactly like the link corrupting data.
+- **A tab is opened by the server's `JOIN` echo, not by typing `/join`.** A
+  channel that is invite-only or full then never leaves an empty window behind.
+- `sys_net_hangup` is **not** used on the way out. It applies only to a
+  *listening* channel (`kernel/net.c` refuses otherwise), so a client would spin
+  on it. `irc` waits for its own send queue to drain instead, which is what stops
+  the `QUIT` being truncated into a dropped connection.
+
+### A test server on your own machine
+
+```sh
+docker run -d --rm --name snosircd -p 6667:6667 ergochat/ergo   # plaintext :6667
+docker stop snosircd
+```
+
+`ircd/unrealircd` does **not** work as published: its image entrypoint is a
+single quoted string (`"…/unrealircd -F"`) and the container fails to start.
+`ergochat/ergo` has no `:stable` tag on Docker Hub and is not published to
+`ghcr.io` publicly — plain `ergochat/ergo` is the one that pulls. It generates a
+config and a self-signed cert on first run and listens on 6667 without one.
+
+Point a bare `nc` or a five-line Python client at it before the SNES, so you are
+debugging one side at a time. `testnet.ergo.chat:6667` explicitly invites client
+testing if you would rather not run anything.
+
+### Automated coverage
+
+`make test-irc` runs a **Lua ircd** on the far side of the emulated link
+(`test/irc.lua`) — the real protocol, hermetically, with no Docker and no
+socket. It asserts registration without `CAP`, that a server `PING` is answered,
+`JOIN` and the `NAMES` reply, a message in each direction, that the CTCP between
+two ordinary messages is dropped while both neighbours are displayed, that
+server traffic and channel traffic land in *different* windows, that `^P`/`^N`
+move between them, and that `QUIT` carries its reason.
+
 ## Looking at the web: `render:`
 
 ```

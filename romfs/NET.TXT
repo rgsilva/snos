@@ -31,10 +31,12 @@ carrying the whole payload.
 COMMANDS
 
   net                    is a gateway attached?
-  get URL                fetch a URL and print it
-  download URL [NAME]    fetch a URL and save it
+  get URL DEST           fetch a URL; a DEST of - prints it
+  httpd [PORT]           serve this volume to the network
+  netecho [PORT]         a TCP echo server
+  irc HOST [NICK] [#CH]  talk on IRC
 
-A download can be interrupted with any key. Progress is shown as it arrives,
+A fetch can be interrupted with any key. Progress is shown as it arrives,
 because at this speed a large file takes long enough that a still screen and
 a wedged machine look identical.
 

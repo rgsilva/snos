@@ -49,7 +49,7 @@ KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s \
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
 
-.PHONY: all kernel apps bridge test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager test-vnc clean
+.PHONY: all kernel apps bridge test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager test-irc test-vnc clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -88,7 +88,7 @@ $(BUILD)/snos.raw: $(KERNEL_O)
 # Each app is a separate link into its own ROM bank, then dropped into the
 # cartridge image at the byte offset that bank maps to. HiROM makes that
 # arithmetic trivial: SNES $C0:0000+N is ROM byte N, so bank $C8 is 0x080000.
-APPS := hello pad basic edit view get netecho httpd web vnc
+APPS := hello pad basic edit view get netecho httpd web vnc irc
 APP_BANK_hello := c8
 APP_BANK_pad   := c9
 APP_BANK_basic := ca
@@ -99,6 +99,7 @@ APP_BANK_netecho := ce
 APP_BANK_httpd := d0
 APP_BANK_web   := d1
 APP_BANK_vnc   := d2
+APP_BANK_irc   := d3
 APP_AT_hello   := 0x080000
 APP_AT_pad     := 0x090000
 APP_AT_basic   := 0x0A0000
@@ -109,6 +110,7 @@ APP_AT_netecho := 0x0E0000
 APP_AT_httpd   := 0x100000
 APP_AT_web     := 0x110000
 APP_AT_vnc     := 0x120000
+APP_AT_irc     := 0x130000
 # The editor needs the ABI-2 full-screen calls and says so in its header, so an
 # older kernel refuses to run it rather than failing on a missing syscall.
 APP_ABI_edit   := 2
@@ -124,6 +126,9 @@ APP_ABI_httpd  := 7
 # `web` needs the ABI-8 browser calls.
 APP_ABI_web    := 8
 APP_ABI_vnc    := 8
+# `irc` needs the ABI-7 stream calls: it opens a plain TCP connection and both
+# talks and listens on it. Nothing it does needs ABI 8.
+APP_ABI_irc    := 7
 
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)
@@ -153,7 +158,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-net test-pager
+test: test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-net test-pager test-irc
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(call check_env)
@@ -199,6 +204,13 @@ test-net: $(BUILD)/snos.sfc $(BUILD)/test/net.lua
 test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
+
+# A Lua ircd on the far side of the emulated link, speaking the real protocol.
+# In the suite rather than beside it, unlike test-vnc: this moves a few hundred
+# bytes, not a 48 KB framebuffer.
+test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 
 test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 	$(call check_env)
