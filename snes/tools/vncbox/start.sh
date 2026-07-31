@@ -22,7 +22,9 @@ case "$SNOS_APP" in
   chromium)
     # --window-size matches the framebuffer so there is no scrollbar and no
     # scaling. Kiosk so there is no browser chrome eating the picture.
-    # --disable-smooth-scrolling: UNMEASURED, and deliberately labelled as such.
+    # --disable-smooth-scrolling: MEASURED 2026-07-30, and it helps -- but it is
+    # not the whole story, so read the second half of this note before trusting
+    # a scroll to be cheap.
     #
     # What IS measured: one J/K wheel click repaints 2.17 screenfuls (~1670
     # tiles, ~40 s), while a pan moves exactly the 96 tiles its exposed strip
@@ -36,12 +38,24 @@ case "$SNOS_APP" in
     # that needs eighteen seconds a screenful, and anything else that animates on
     # this desktop will cost the same way.
     #
-    # But the follow-up measurement was never obtained: three attempts at a
-    # scroll benchmark died in the harness, and the failure reproduces with an
-    # UNBOUND key, so it is the benchmark and not the app. If a J step is still
-    # ~40 s with this flag set, the animation theory is wrong and the next
-    # suspect is the server sending the whole window rather than the damaged
-    # region.
+    # With the flag set, one J step measures 900 frames / 15.00 s / 1200 polls,
+    # against ~40 s and 2.17 screenfuls without it. So the animation theory was
+    # right and this removes about 60% of the cost.
+    #
+    # WHAT IS LEFT IS THE REAL CEILING: a full 48 KB screen is 950 frames / 1189
+    # polls, so a single scroll step still costs 101% OF A COMPLETE REPAINT.
+    # CopyRect is not saving anything, because there is nothing to copy -- a
+    # GPU-less Chromium repaints the whole viewport on scroll rather than
+    # shifting it, so the server has a full window of genuine damage to send.
+    # Scrolling is therefore never going to be cheaper than loading a page here,
+    # and no amount of client-side cleverness changes that. Panning, which the
+    # console does itself, stays ~7x cheaper and is the better way to move around.
+    #
+    # (Three earlier attempts at this benchmark died and looked like a crash
+    # after the keypress. They were not: they tested for the link "going quiet"
+    # using rx_frames and hostframes, which never stop moving because a frame is
+    # exchanged every poll whether or not it carries data. Stability has to be
+    # measured on the PICTURE -- see vncscroll2.lua in the scratchpad.)
     exec chromium --no-sandbox --disable-gpu --disable-dev-shm-usage \
          --disable-smooth-scrolling \
          --window-position=0,0 --window-size="$(echo "$GEOM" | tr x ,)" \
