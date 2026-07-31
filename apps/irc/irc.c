@@ -706,10 +706,31 @@ static void handle_line(char *s) {
   }
 
   if (ieq(cmd, "QUIT")) {
-    /* No channel is named, so this cannot be routed without tracking who is
-     * where. The status tab is honest about that; guessing would not be. */
+    /* No channel is named — QUIT is the one membership message that leaves
+     * "where to show it" to the client. The per-tab user lists ARE the
+     * who-is-where tracking (NAMES fills them, JOIN/PART/KICK keep them
+     * current), so route the notice to every channel the user was actually
+     * in, plus any query tab bearing their name; the status tab only hears
+     * about users nobody shares a tab with. This handler predates the user
+     * lists and used to claim routing was impossible. */
+    char *reason = trail(rest);
+    int t, shown = 0;
+    /* Most servers send client quits as "Quit: <message>"; with our own
+     * "quit:" label in front, the double prefix is pure noise. */
+    if (reason[0] == 'Q' && reason[1] == 'u' && reason[2] == 'i' &&
+        reason[3] == 't' && reason[4] == ':' && reason[5] == ' ')
+      reason += 6;
+    for (t = 1; t < (int)ntabs; t++) {
+      int i, present = ieq(tabname[t], pfxnick);
+      for (i = 0; !present && i < (int)nusers[t]; i++)
+        if (ieq(users[t][i], pfxnick)) present = 1;
+      if (present) {
+        emitv(t, "* ", pfxnick, " quit: ", reason);
+        shown = 1;
+      }
+    }
     user_del_all(pfxnick);
-    emitv(0, "* ", pfxnick, " quit: ", trail(rest));
+    if (!shown) emitv(0, "* ", pfxnick, " quit: ", reason);
     return;
   }
 

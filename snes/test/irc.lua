@@ -335,6 +335,10 @@ emu.addEventCallback(function()
     srv(":alice!a@h PRIVMSG #snos :hello from the lua ircd")
     srv(":bob!b@h PRIVMSG #snos :\1VERSION\1")
     srv(":carol!c@h PRIVMSG #snos :and this one comes after it")
+    -- QUIT names no channel; the client must route it via its user lists to
+    -- the channels the quitter was in (carol is in #snos via the 353 above),
+    -- and trim the server's "Quit: " prefix rather than printing it twice.
+    srv(":carol!c@h QUIT :Quit: gone home")
     at = frame + 500
     step = 5
     return
@@ -457,6 +461,12 @@ emu.addEventCallback(function()
             "the unsolicited CTCP was printed into the pane as if it were text")
     r.check(shot:find("<snesbot> hello from a super nintendo", 1, true) ~= nil,
             "the client did not echo its own message locally")
+    -- carol's QUIT: routed to the channel she was in, reason shown once (the
+    -- "Quit: " the server prefixes must not appear next to our own label).
+    r.check(shot:find("* carol quit: gone home", 1, true) ~= nil,
+            "carol's QUIT was not shown in the channel she was in")
+    r.check(shot:find("Quit: gone home", 1, true) == nil,
+            "the server's 'Quit: ' prefix was printed as part of the reason")
     -- The layout: a tab bar on row 0 that did not scroll away, and an input
     -- line still on the last row after 26 rows of traffic went past.
     r.check(bar_shot ~= nil and bar_shot:find("#snos", 1, true) ~= nil,
@@ -475,6 +485,8 @@ emu.addEventCallback(function()
             "the MOTD burst is not in the status window, or did not finish")
     r.check(status_shot:find("<alice>", 1, true) == nil,
             "channel messages leaked into the status window")
+    r.check(status_shot:find("carol quit", 1, true) == nil,
+            "a routed QUIT also fell through to the status window")
     r.check(shot ~= nil and shot:find("motd line", 1, true) == nil,
             "the server's MOTD leaked into the channel window")
   else
