@@ -324,10 +324,18 @@ holds only actionable work; this is the durable record.
   **fewer, bigger transfers**, not a bigger `BATCH`: setup costs ~9× the transfer, and eight tiles
   bound for consecutive VRAM addresses could be one 512-byte DMA. Parked because that window's timing
   margin is what the flicker fix rests on.
-- **`LINK_FRAME` 128 → 256** — 128 shipped (`9a68863`). 256 **is a data bug, not the old panic**:
-  mean 54.4 scanlines, worst 108.3, re-entry 0, but `net` fails and `pager` never reports, and the
-  failing sub-tests are the ones that deliberately drop frames — so look at retransmission. Parked
-  because bigger frames measurably do **not** help end-to-end.
+- **`LINK_FRAME` 128 → 256** — 128 shipped (`9a68863`). ~~256 is a data bug~~ **RE-TESTED
+  2026-07-31: the bug no longer exists.** With every FRAME constant flipped to 256 (link.h plus
+  the seven derived copies in the test gateways, gateway.py and netbridge.lua), the ENTIRE suite
+  passes — net, pager, irc, the host bridge test, and test-vnc, drop/corrupt sub-tests included.
+  The old failure was recorded before the poll split, the MVN ring/frame copies, the ack-release
+  fixes and build_frame's pad tracking; one of those rewrites fixed it in passing, and the
+  archaeology of which was judged not worth a bisect. What M7 needed is now proven: **the frame
+  size is one constant, and flipping it is safe.** Still shipped at 128 because 256 buys nothing
+  in the emulator (round-trip-bound) — re-measure on the real cable where payload/exchange goes
+  linear again. The mailbox reservation ($7EE000, 4 KB) holds to FRAME=2043; the record length
+  byte caps a single record at 255, which the greedy packer respects by construction up to
+  FRAME=261 — past THAT, records simply split, so no cliff exists there either.
 - **Sliding window** — parked hardest. The `get` control run reaches the 2-poll floor with the
   *current* protocol, so stop-and-wait is not what costs the round trip, and `next_out()`'s
   stop-and-wait measures 20 µs. Revisit only if the 2-poll floor itself proves worth beating.
