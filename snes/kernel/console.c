@@ -19,7 +19,7 @@
  */
 #include <stdint.h>
 #include "console.h"
-#include "font8x8_basic.h"
+/* font8x8_basic.h is consumed by tools/mkfont.py at build time, not here. */
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -80,42 +80,22 @@ static void con_publish(void) {
 static int caret_ring = -1;
 static uint8_t caret_col;
 
-/* Box-drawing glyphs, dropped into the unused control-code slots $01-$06 so the
- * panel can draw a real frame with the console's own font. (Public domain, from
- * Daniel Hepper's font8x8, U+2500 block — the same source as font8x8_basic.) */
-static const uint8_t box_glyphs[6][8] = {
-    {0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00}, /* 1 horizontal   */
-    {0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08}, /* 2 vertical     */
-    {0x00, 0x00, 0x00, 0x00, 0xF8, 0x08, 0x08, 0x08}, /* 3 top-left     */
-    {0x00, 0x00, 0x00, 0x00, 0x0F, 0x08, 0x08, 0x08}, /* 4 top-right    */
-    {0x08, 0x08, 0x08, 0x08, 0xF8, 0x00, 0x00, 0x00}, /* 5 bottom-left  */
-    {0x08, 0x08, 0x08, 0x08, 0x0F, 0x00, 0x00, 0x00}, /* 6 bottom-right */
-};
+/* Both font banks are baked at build time by tools/mkfont.py, which owns what
+ * used to be glyph_row()/rev()/box_glyphs here: the box-drawing slots $01-$06,
+ * the LSB-left -> MSB-left bit reversal, and the $80-$FF inverse-video twins
+ * (with a two-colour palette, flipping plane 0 turns "green on black" into
+ * "black on green" — the OSK's selection highlight and the shell's cursor,
+ * without a second BG layer, which Mode 5 does not have spare). Change the
+ * glyph logic there, not here. */
+extern const uint8_t snos_font_bg2[8192];
+extern const uint8_t snos_font_bg1[16384];
 
 static void vaddr(uint16_t a) { R8(0x2116) = (uint8_t)a; R8(0x2117) = (uint8_t)(a >> 8); }
 static void vdata(uint16_t v) { R8(0x2118) = (uint8_t)v; R8(0x2119) = (uint8_t)(v >> 8); }
 
-static uint8_t rev(uint8_t b) {  /* font8x8 is LSB-left; SNES wants MSB-left */
-    b = (uint8_t)(((b & 0xF0) >> 4) | ((b & 0x0F) << 4));
-    b = (uint8_t)(((b & 0xCC) >> 2) | ((b & 0x33) << 2));
-    b = (uint8_t)(((b & 0xAA) >> 1) | ((b & 0x55) << 1));
-    return b;
-}
-
-/* Glyph bitmap row for character `ch`. Characters $80-$FF are the inverse-video
- * twins of $00-$7F: with a two-colour palette, flipping plane 0 turns "green on
- * black" into "black on green". That gives the OSK its selection highlight and
- * the shell its cursor without a second BG layer — which Mode 5 does not have
- * spare, since BG1 and BG2 are both carrying text columns. */
-static uint16_t glyph_row(int ch, int y) {
-    int base = ch & 0x7F;
-    uint8_t g = (base >= 1 && base <= 6) ? rev(box_glyphs[base - 1][y])
-                                         : rev((uint8_t)font8x8_basic[base][y]);
-    if (ch & 0x80) g = (uint8_t)~g;
-    return g;
-}
-
 static void hdma_refresh(void);
+#define DMA_CH 0
+static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nwords);
 
 static void set_vofs(void) {
     uint16_t v = (uint16_t)(((top * 8) - 1) & 0x3FF);
@@ -127,7 +107,7 @@ static void set_vofs(void) {
 }
 
 void con_init(void) {
-    int ch, y, i;
+    int y, i;
     R8(0x2100) = 0x8F;                    /* force blank */
     R8(0x2105) = 0x05;                    /* Mode 5 */
     R8(0x2107) = (uint8_t)((BG1_MAP >> 10) << 2);  /* BG1SC: map $0400, 32x32 */
@@ -142,19 +122,13 @@ void con_init(void) {
     R8(0x2122) = 0xE0; R8(0x2122) = 0x03;
     R8(0x2115) = 0x80;                    /* VRAM inc after high byte */
 
-    /* BG2 font at $1000, 2bpp: char c -> tile 2c = glyph, 2c+1 = blank */
-    vaddr(BG2_CHR);
-    for (ch = 0; ch < 256; ch++) {
-        for (y = 0; y < 8; y++) vdata(glyph_row(ch, y));  /* glyph */
-        for (y = 0; y < 8; y++) vdata(0);                 /* blank */
-    }
-    /* BG1 font at $3000, 4bpp: char c -> tile 2c = blank, 2c+1 = glyph */
-    vaddr(BG1_CHR);
-    for (ch = 0; ch < 256; ch++) {
-        for (y = 0; y < 16; y++) vdata(0);                /* blank tile */
-        for (y = 0; y < 8; y++) vdata(glyph_row(ch, y));  /* glyph plane0/1 */
-        for (y = 0; y < 8; y++) vdata(0);                 /* glyph plane2/3 */
-    }
+    /* Fonts from ROM by DMA — cart ROM is on the A-bus, VRAM on the B-bus,
+     * the same division that makes image loading fast. This used to be
+     * 12,288 port writes plus a glyph_row() computation each, re-run on
+     * EVERY app exit (con_gfx(0) lands here): roughly half a second of
+     * blank screen per exit, for bytes that never change. */
+    dma_vram(DMA_CH, BG2_CHR, (const uint16_t *)snos_font_bg2, 4096);
+    dma_vram(DMA_CH, BG1_CHR, (const uint16_t *)snos_font_bg1, 8192);
 
     vaddr(BG2_MAP);                       /* clear both maps to space (0x20) */
     for (i = 0; i < 32 * 32; i++) vdata((0x20 << 1) | 0x2000);
@@ -230,8 +204,6 @@ static uint16_t rowbuf1[FLUSH_MAX][32];
  * completion before the next begins, one is all this needs. The old pair of
  * tables existed to ration a resource that was not actually scarce, and rationed
  * the keyboard split down to two rows a frame for no reason. */
-#define DMA_CH 0
-
 static void dma_vram(int ch, uint16_t vword, const uint16_t *src, uint16_t nwords) {
     uint16_t base = (uint16_t)(0x4300 + ch * 0x10);
     uint32_t s = (uint32_t)src;

@@ -47,7 +47,8 @@ KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
 KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s \
             $(K)/netasm.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
-            $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S)))
+            $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
+            $(BUILD)/fontvram.o
 
 .PHONY: all kernel apps bridge test test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager test-irc test-vnc clean
 # The combined Lua bridge is built by default. It used to be produced only on
@@ -80,6 +81,14 @@ $(BUILD)/%.o: $(K)/%.s | $(BUILD)
 
 $(BUILD)/header.o: calypsi/header.s | $(BUILD)
 	$(AS) -o $@ $< $(AFLAGS)
+
+# The console fonts, baked at build time so con_init DMAs them from ROM
+# instead of computing 12K port writes on every app exit. See tools/mkfont.py.
+$(BUILD)/fontvram.c: $(K)/font8x8_basic.h tools/mkfont.py | $(BUILD)
+	python3 tools/mkfont.py $< $@
+
+$(BUILD)/fontvram.o: $(BUILD)/fontvram.c
+	$(CC) -o $@ $< $(CFLAGS)
 
 $(BUILD)/snos.raw: $(KERNEL_O)
 	$(LN) -o $@ $(LNFLAGS) --list-file=$(BUILD)/snos.map $^
