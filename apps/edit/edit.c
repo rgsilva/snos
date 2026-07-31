@@ -129,10 +129,18 @@ static int put_num(int col, uint16_t v) {
 }
 
 static void draw_status(void) {
-  int c;
+  int c, i;
+  char fname[16];
   pad_row(0);
 
-  c = put_run(1, filename[0] ? filename : "(new)");
+  /* The name field is cols 1..16 including the dirty star: a full 17-char
+   * name plus '*' otherwise runs into the menu hint at col 18. */
+  {
+    const char *src = filename[0] ? filename : "(new)";
+    for (i = 0; i < 15 && src[i]; i++) fname[i] = src[i];
+    fname[i] = 0;
+  }
+  c = put_run(1, fname);
   if (dirty) put_run(c, "*");
 
   /* Both ways in are advertised: the button for someone on a controller, the
@@ -316,10 +324,11 @@ static int file_load(const char *name) {
       linelen[li] = (uint8_t)col;
       col = 0;
       li++;
-      if (li >= MAXLINES) {
-        li = MAXLINES - 1;
-        break;
-      }
+      /* Buffer full: truncate the rest of the file, but keep li at MAXLINES —
+       * clamping it to MAXLINES-1 excluded the already-parsed last line from
+       * nlines, so loading a full file dropped it and save-after-load shrank
+       * the file by one line on top of the expected truncation. */
+      if (li >= MAXLINES) break;
       text[li][0] = 0;
       continue;
     }

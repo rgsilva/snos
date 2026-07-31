@@ -44,6 +44,21 @@ static uint16_t parse_port(const char *s) {
   return any ? v : 0;
 }
 
+static void say_u32(uint32_t v) {
+  /* sys_putu takes 16 bits; a serving session can exceed 64 KB. */
+  char d[11];
+  int n = 0;
+  if (v == 0) {
+    sys_putc('0');
+    return;
+  }
+  while (v && n < 11) {
+    d[n++] = (char)('0' + (uint16_t)(v % 10u));
+    v /= 10u;
+  }
+  while (n) sys_putc((uint16_t)(unsigned char)d[--n]);
+}
+
 /* Block until every byte is queued. The send queue drains at link speed, so a
  * response larger than it must be fed in as room appears; writing once and
  * hoping would truncate the page and the browser would render the fragment. */
@@ -260,7 +275,7 @@ int main(void) {
 done:
   sys_net_close(ch);
   sys_puts("\nserved ");
-  sys_putu((uint16_t)served);
+  say_u32(served);
   sys_puts(" bytes\n");
   return 0;
 }

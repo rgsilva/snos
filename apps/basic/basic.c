@@ -117,16 +117,33 @@ static void err(const char *m) {
 
 static num_t expr(void);
 
+/* Recursion depth across expr->sum->term->factor. Each paren or unary minus
+ * is four C frames on the shared bank-$00 stack, whose floor is the KERNEL's
+ * stack: a typeable line of '((((...' walks straight down into it. Zero-init
+ * static, so the no-initialised-statics rule is satisfied; reset per
+ * statement is unnecessary since every exit path decrements. */
+static uint8_t expr_depth;
+#define EXPR_DEPTH_MAX 20
+
 static num_t factor(void) {
   num_t v = 0;
   skipsp();
+  if (expr_depth >= EXPR_DEPTH_MAX) {
+    err("expression too deep");
+    return 0;
+  }
   if (*cur == '-') {
     cur++;
-    return (num_t)(-factor());
+    expr_depth++;
+    v = (num_t)(-factor());
+    expr_depth--;
+    return v;
   }
   if (*cur == '(') {
     cur++;
+    expr_depth++;
     v = expr();
+    expr_depth--;
     skipsp();
     if (*cur == ')') cur++;
     else err("missing )");
@@ -505,11 +522,24 @@ static int statement(void) {
   if (keyword("GOTO")) {
     num_t n = expr();
     if (errmsg) return -1;
+    /* The REPL discards statement()'s returned line index, so an immediate
+     * GOTO used to do nothing at all, silently. Say so instead. */
+    if (pc < 0) {
+      err("GOTO only runs inside a program - use RUN");
+      return -1;
+    }
     return goto_line(n);
   }
   if (keyword("GOSUB")) {
     num_t n = expr();
     if (errmsg) return -1;
+    /* Immediate mode has no return position to record: pc is -1, so the
+     * ln_off[pc] below reads out of bounds and a later RETURN follows the
+     * garbage to a wild pointer and interprets random memory. */
+    if (pc < 0) {
+      err("GOSUB only runs inside a program");
+      return -1;
+    }
     if (gosub_sp >= GOSUB_DEPTH) {
       err("GOSUB too deep");
       return -1;
@@ -575,6 +605,12 @@ static int statement(void) {
     skipsp();
     if (keyword("STEP")) step = expr();
     if (errmsg) return -1;
+    /* Same out-of-bounds as GOSUB: no pool position exists for the immediate
+     * line, and NEXT would resume through a garbage one. */
+    if (pc < 0) {
+      err("FOR only runs inside a program");
+      return -1;
+    }
     if (for_sp >= FOR_DEPTH) {
       err("FOR too deep");
       return -1;

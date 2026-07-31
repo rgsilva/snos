@@ -745,6 +745,14 @@ static void handle_line(char *s) {
     int t;
     word(who);
     t = tab_find(chan);
+    /* Being kicked is PART's self-case, not a spectator line: leaving the tab
+     * open kept a dead conversation on screen where every line went out as a
+     * PRIVMSG the server refused with a 442 nobody sees. */
+    if (ieq(who, nick)) {
+      emitv(0, "* kicked from ", chan, " by ", pfxnick);
+      if (t > 0) tab_close(t);
+      return;
+    }
     if (t < 0) t = 0;
     user_del(t, who);
     emitv(t, "* ", who, " was kicked by ", pfxnick);

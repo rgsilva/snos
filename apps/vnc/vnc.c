@@ -1384,10 +1384,14 @@ static int poll_input(void) {
       pend_dy = (int16_t)(pend_dy + PAN_STEP);
       panned = 1;
     } else if (c == 'j' || c == 'J') {
-      wheel(16);                             /* button 5 — wheel down */
+      /* Gated on ready like the pan/arrow paths: poll_input also runs from
+       * rd() during handshake(), and a PointerEvent injected into the middle
+       * of the version/security exchange is parsed as garbage handshake
+       * bytes — mashing keys while "connecting" killed the session. */
+      if (ready) wheel(16);                  /* button 5 — wheel down */
     } else if (c == 'k' || c == 'K') {
-      wheel(8);                              /* button 4 — wheel up */
-    } else if (c == ' ') {
+      if (ready) wheel(8);                   /* button 4 — wheel up */
+    } else if (c == ' ' && ready) {
       /* Press and release at the cursor, in SERVER coordinates. The server
        * moves its own pointer there as a side effect, which is why we do not
        * stream every cursor step: each one would cost a framebuffer update of

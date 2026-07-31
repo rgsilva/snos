@@ -32,6 +32,21 @@ static uint16_t parse_port(const char *s) {
   return any ? v : 0;
 }
 
+static void say_u32(uint32_t v) {
+  /* sys_putu takes 16 bits; an echo session can exceed 64 KB. */
+  char d[11];
+  int n = 0;
+  if (v == 0) {
+    sys_putc('0');
+    return;
+  }
+  while (v && n < 11) {
+    d[n++] = (char)('0' + (uint16_t)(v % 10u));
+    v /= 10u;
+  }
+  while (n) sys_putc((uint16_t)(unsigned char)d[--n]);
+}
+
 int main(void) {
   uint16_t port, ch, st;
   uint32_t served = 0;
@@ -91,7 +106,7 @@ int main(void) {
       if (st == NET_ST_EOF) {
         if (sys_net_hangup(ch) != SYS_ERR) {
           sys_puts("client served, ");
-          sys_putu((uint16_t)served);
+          say_u32(served);
           sys_puts(" bytes so far\n");
         }
         if (sys_pollkey() != SYS_ERR) break;
@@ -110,7 +125,7 @@ int main(void) {
 done:
   sys_net_close(ch);
   sys_puts("\nechoed ");
-  sys_putu((uint16_t)served);
+  say_u32(served);
   sys_puts(" bytes\n");
   return 0;
 }
