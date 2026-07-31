@@ -547,9 +547,20 @@ static void cmd_write(char *rest) {
     kcon_putc('\n');
     return;
   }
-  while (*text) fs_putc((uint8_t)*text++);
-  fs_putc('\n');
-  fs_close();
+  /* Checked per byte, like every writer since the review: the volume can
+   * fill mid-write, and 'wrote NAME' over a truncated file is the lie that
+   * cost edit and BASIC their fix in the same wave. */
+  {
+    int werr = 0;
+    while (*text && !werr) werr = fs_putc((uint8_t)*text++) != 0;
+    if (!werr) werr = fs_putc('\n') != 0;
+    fs_close();
+    if (werr) {
+      fs_delete(rest); /* drop the truncated file */
+      kcon_puts("write failed: volume full, nothing written\n");
+      return;
+    }
+  }
   kcon_puts("wrote ");
   kcon_puts(rest);
   kcon_putc('\n');
