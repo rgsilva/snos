@@ -54,7 +54,8 @@ SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 F_DATA = 0x01
 CH_CTRL, CH_PAD = 0, 0xFF
 
-C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
+C2S_FETCH, C2S_CLOSE, C2S_HELLO = 0x01, 0x02, 0x04
+# 0x03 was C2S_IMAGE, retired: conversion is decided from the Content-Type.
 C2S_CONNECT = 0x07
 C2S_LISTEN, C2S_HANGUP = 0x08, 0x09
 # 0x0A was C2S_WEB, retired with the `web` app (vnc superseded it); do not
@@ -731,13 +732,12 @@ class Gateway:
         # thread would be reading it after a close that has already happened,
         # and the whole point is to notice that close.
         cgen = self.chgen.get(self.cbuf[0], 0) if self.cbuf else 0
-        if self.ctype in (C2S_FETCH, C2S_IMAGE) and len(self.cbuf) >= 1:
+        if self.ctype == C2S_FETCH and len(self.cbuf) >= 1:
             ch = self.cbuf[0]
             url = self.cbuf[1:].decode("ascii", "replace")
-            want_img = self.ctype == C2S_IMAGE
-            print(f"{'IMAGE' if want_img else 'FETCH'} ch{ch} {url}")
+            print(f"FETCH ch{ch} {url}")
             threading.Thread(target=self.fetch,
-                             args=(ch, url, want_img, self.gen, cgen),
+                             args=(ch, url, False, self.gen, cgen),
                              daemon=True).start()
         elif self.ctype == C2S_HELLO:
             # Answered from the frame thread, so a fetch blocked on the network

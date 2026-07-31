@@ -357,15 +357,19 @@ HTTP service the SNES's own client calls.
 Not "someday" items: each was considered, costed, and put down for a stated reason. The task list
 holds only actionable work; this is the durable record.
 
-- **`build_frame`** — 4,523 cycles, 48% of the NMI handler. Parked because the handler is only 16% of
-  a frame and nothing is starved. Becomes worth doing if `LINK_FRAME` grows (the payload copy scales)
-  or at M7, where a fast cable runs it far more often. *A consequence of other decisions, not a
-  decision.*
-- **DMA coalescing in the write window** — since the transpose went 8×, painting is **141 frames of
-  window-and-DMA against 100 of building**, so most of it is waiting for the beam. The lever is
-  **fewer, bigger transfers**, not a bigger `BATCH`: setup costs ~9× the transfer, and eight tiles
-  bound for consecutive VRAM addresses could be one 512-byte DMA. Parked because that window's timing
-  margin is what the flicker fix rests on.
+*(Triage 2026-07-31, with Ricardo's "check if anything is worth doing; if not, drop it": each item
+below was re-judged DONE, DROPPED-with-reason, or left for M7's measurement campaign to resurrect
+on evidence. Dropped means dropped — M7 re-derives its own priorities from real-cable numbers, and
+a stale to-do list would only argue with those measurements.)*
+
+- ~~`build_frame`~~ — **superseded**: the pad-tracking fix (`2d206b4`) removed ~4,200 of its
+  ~4,500 cycles; NMI mean fell 56.4 → 36.6 scanlines. What remains is proportional to real
+  payload, which is the honest cost of sending it.
+- ~~DMA coalescing in the write window~~ — **DROPPED 2026-07-31.** vnc's owner verdict is "can't
+  really complain about performance", the change risks the margin the flicker fix rests on, and
+  the one measured cost it would address (the content-dependent backpressure stall) is workload
+  luck, not a regression. If M7's faster link makes paint the wall again, THAT measurement
+  reopens this on its own evidence.
 - **`LINK_FRAME` 128 → 256** — 128 shipped (`9a68863`). ~~256 is a data bug~~ **RE-TESTED
   2026-07-31: the bug no longer exists.** With every FRAME constant flipped to 256 (link.h plus
   the seven derived copies in the test gateways, gateway.py and netbridge.lua), the ENTIRE suite
@@ -378,19 +382,21 @@ holds only actionable work; this is the durable record.
   linear again. The mailbox reservation ($7EE000, 4 KB) holds to FRAME=2043; the record length
   byte caps a single record at 255, which the greedy packer respects by construction up to
   FRAME=261 — past THAT, records simply split, so no cliff exists there either.
-- **Sliding window** — parked hardest. The `get` control run reaches the 2-poll floor with the
-  *current* protocol, so stop-and-wait is not what costs the round trip, and `next_out()`'s
-  stop-and-wait measures 20 µs. Revisit only if the 2-poll floor itself proves worth beating.
+- ~~Sliding window~~ — **DROPPED 2026-07-31.** The 2-poll floor is already reached with
+  stop-and-wait, so there is nothing here for the emulator; the real cable changes the regime
+  entirely and M7's measurements decide from scratch.
 - **`apps/web/web.c` has the signed-constant bug** — ~~parked~~ **executed 2026-07-31
   (`540fe0a`): `web` deleted whole**, with `browser.py`, `C2S_WEB`, the ABI-8 syscalls and the
   `render:` scheme, in one commit because gateway.py imported browser.py unconditionally.
 
 *(Added after the 2026-07-31 review waves, same parked-with-reason discipline:)*
 
-- **`net_write` + `build_frame`'s TX copy are still per-byte** — the same 2-D-array shape that
-  measured 234 cyc/byte in `ring_put`. Parked: today's workloads are receive-dominated (vnc sends
-  ~10 B/poll); rises with `httpd` serving real bodies and at M7.
-- **Shared `libsnos` for the apps** — **the mechanical half executed 2026-07-31**:
+- ~~`net_write` + `build_frame`'s TX copy per-byte~~ — **DROPPED 2026-07-31.** Send volumes are
+  tiny on every current workload; if M7 or a real serving load makes TX measurable, the ring_put
+  playbook (measure, then MVN) is written down and takes an hour.
+- **Shared `libsnos` for the apps** — **the mechanical half executed 2026-07-31; the picker/PPU
+  half DROPPED same day** (behavioural, each copy subtly fitted to its app; the duplication is
+  real but the merge risk exceeds the ~150-line win):
   `apps/lib/snoslib.{c,h}` (compiled per app by buildapp.sh — separate links, no shared address
   space) now owns the blocking send-drain, the simple open-wait with deadline+cancel, u32
   decimal printing, port parsing and host:port defaulting; get/httpd/netecho/irc/vnc migrated,
@@ -405,10 +411,8 @@ holds only actionable work; this is the durable record.
   restart, newest-frame handover), asserting a HELLO round trip survives both a gateway restart
   and a bridge restart. Needs UP/DOWN paths to become overridable first. The Mesen callback-order
   facts stay documented-as-measured; no headless test can reach them.
-- **`con_init`'s remaining 189 ms** — the four tilemap clears and shadow reset, still PIO after
-  the font bake (`f69a6a1`). A fixed-source DMA fill cannot write a two-byte pattern (both B-bus
-  registers read the same fixed A-address), so it needs a small ROM pattern buffer; parked as not
-  worth it until someone notices the 189 ms.
+- ~~`con_init`'s remaining 189 ms~~ — **DROPPED 2026-07-31.** Already 5.8× better than it was;
+  nobody has noticed 189 ms and nobody is going to.
 
 ### Housekeeping — the gateway needs a clean-up *(agreed 2026-07-29, not urgent)*
 `gateway.py` has grown by accretion — HTTP fetch, image conversion, a `render:` scheme, a held-
@@ -416,9 +420,9 @@ open browser, listen/accept, and now a plain TCP path for VNC — and the seams 
 
 - ~~`render:` is a testing back door~~ — **gone with `web` (`540fe0a`)**, along with browser.py,
   headless Chrome, `C2S_WEB` and the ABI-8 syscalls.
-- **`SYS_NET_IMAGE` / `C2S_IMAGE` are dead** — the forced-conversion mechanism from before the
-  gateway decided from Content-Type. Still wired through the kernel, the trap layer and the test
-  gateway; the *test* is now its only caller. Removing it means touching `test/net.lua` too.
+- ~~`SYS_NET_IMAGE` / `C2S_IMAGE`~~ — **removed 2026-07-31**: kernel, trap, stub, gateway and
+  the test-gateway dispatch all gone; $65 and wire 0x03 reserved. Image coverage now rides the
+  live Content-Type path exclusively, which is the path users actually exercise.
 - ~~teardown written four times~~ — **mostly unified 2026-07-31 (`458272d`)**: one `teardown()`
   serves the F_SYN reset, the link restart and Ctrl-C, and the SNES-side `S2C_ERR`-on-freed guard
   landed with the review fixes (`963853f`). What remains of the "one channel model" idea is

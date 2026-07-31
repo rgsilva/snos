@@ -157,9 +157,9 @@
  * a loop rather than a fresh listen per request — and the port is not released
  * between connections, where a straggler could steal it. */
 #define NET_ST_LISTEN 5
-/* ABI 5. Exactly SYS_NET_FETCH, except the gateway converts the resource to
- * Mode 3 tile data first. Same stream, same states, same reads. */
-#define SYS_NET_IMAGE 0x65 /* p0/p1 = URL -> channel, or SYS_ERR */
+/* $65 was SYS_NET_IMAGE (force-convert fetch), retired: the gateway decides
+ * from the Content-Type since ABI 6, so no caller ever needed to declare in
+ * advance what it was fetching, and nothing ever called it. Reserved. */
 
 /* ABI 6. Link counters, so a stalled transfer can say which half of the system
  * stalled. A gateway that logs a successful fetch while the SNES reports a
@@ -258,7 +258,6 @@ uint16_t sys_net_fetch_raw(void); /* URL in the parameter block */
 uint16_t sys_net_read_raw(uint16_t max);
 uint16_t sys_net_state(uint16_t ch);
 uint16_t sys_net_close(uint16_t ch);
-uint16_t sys_net_image_raw(void);
 uint16_t sys_net_stats(void);
 uint16_t sys_net_connect_raw(void);
 uint16_t sys_net_write_raw(uint16_t len);
@@ -357,10 +356,6 @@ static uint16_t sys_net_fetch(const char *url) {
   return sys_net_fetch_raw();
 }
 
-static uint16_t sys_net_image(const char *url) {
-  snos_set_ptr(url);
-  return sys_net_image_raw();
-}
 
 static uint16_t sys_read_f(void *buf, uint16_t max) {
   snos_set_ptr((const char *)buf);

@@ -47,12 +47,8 @@
  * already puts the bytes back in order. */
 #define C2S_FETCH 0x01 /* [len][ch][url...]  channel chosen by the SNES */
 #define C2S_CLOSE 0x02 /* [1][ch] */
-/* Same shape as FETCH, and the reply is identical: the stream simply contains
- * converted Mode 3 tile data instead of the resource's own bytes. A separate
- * command rather than a flag on FETCH because it is ADDITIVE — FETCH's wire
- * format and its tests are untouched — and because a 200 that will not decode
- * as an image is a genuinely different failure from a 404. */
-#define C2S_IMAGE 0x03 /* [len][ch][url...] */
+/* 0x03 was C2S_IMAGE (force-convert fetch), retired with SYS_NET_IMAGE: the
+ * gateway converts from the Content-Type. Reserved, never reused. */
 
 /* Liveness. net_up() only proves the *bridge* claimed the mailbox — the daemon
  * behind it can be dead, stopped or wedged and the link still looks attached,
@@ -421,7 +417,6 @@ static int net_open(const char *url, uint8_t cmd) {
 }
 
 int net_fetch(const char *url) { return net_open(url, C2S_FETCH); }
-int net_image(const char *url) { return net_open(url, C2S_IMAGE); }
 
 /* Called by the trap layer when an app — rather than the shell — opened one.
  * The tag says WHICH app (M10): 1 = the foreground app, 2.. = background

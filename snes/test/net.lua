@@ -25,7 +25,7 @@ local F_SYN = 0x02
 local CH_CTRL, CH_PAD = 0, 0xFF
 local WRAM = emu.memType.snesWorkRam
 
-local C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
+local C2S_FETCH, C2S_CLOSE, C2S_HELLO = 0x01, 0x02, 0x04
 local C2S_CONNECT, C2S_LISTEN, C2S_HANGUP = 0x07, 0x08, 0x09
 local S2C_HELLO = 0x84
 local S2C_OPEN, S2C_EOF, S2C_ERR = 0x81, 0x82, 0x83
@@ -146,18 +146,6 @@ local function ctrl_byte(b)
       local url = ""
       for i = 2, #c.buf do url = url .. string.char(c.buf[i]) end
       on_fetch(ch, url)
-    end
-    -- An image request is the same stream, opened differently: the gateway
-    -- converts and the console receives tile data it can hand straight to the
-    -- PPU. Nothing above the link knows the difference.
-    if c.typ == C2S_IMAGE and #c.buf >= 1 then
-      local ch = c.buf[1]
-      local url = ""
-      for i = 2, #c.buf do url = url .. string.char(c.buf[i]) end
-      gw.images[#gw.images + 1] = url
-      push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, 0))
-      push(ch, BODY_IMG)
-      push_ctrl(S2C_EOF, string.char(ch))
     end
     -- Liveness probe, answered unconditionally like the real daemon so that
     -- `net status` can tell "nothing behind the bridge" from "there and

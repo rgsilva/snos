@@ -51,10 +51,6 @@ void net_service(void); /* one link poll; called from the NMI handler */
 int net_up(void);       /* is a gateway attached at all */
 
 int net_fetch(const char *url); /* -> channel, or -1 if none free */
-/* Identical stream, except the gateway decodes, scales and quantises the
- * resource into Mode 3 tile data first. The console cannot decode a JPEG in any
- * reasonable time and does not have to. */
-int net_image(const char *url);
 int net_read(int ch, uint8_t __far *dst, int max); /* bytes moved, 0 = none yet */
 int net_state(int ch);
 uint16_t net_http_status(int ch);

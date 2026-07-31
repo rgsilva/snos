@@ -393,20 +393,6 @@ uint16_t snos_cop_c(uint16_t sp) {
     return r < 0 ? SYS_ERR : (uint16_t)r;
   }
 
-  case SYS_NET_IMAGE: {
-    char url[256];
-    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
-    int i, r;
-    for (i = 0; i < 255; i++) {
-      url[i] = (char)far_rd(bank, (uint16_t)(off + i));
-      if (url[i] == 0) break;
-    }
-    url[i < 255 ? i : 255] = 0;
-    r = net_image(url);
-    if (r >= 0 && owner_tag) net_own(r, owner_tag);
-    return r < 0 ? SYS_ERR : (uint16_t)r;
-  }
-
   case SYS_NET_STATS:
     SNOS_ARGS.p0 = net_stat_resent;
     SNOS_ARGS.p1 = net_stat_bad_sum;
