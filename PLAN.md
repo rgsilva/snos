@@ -348,7 +348,10 @@ The `vnc` client made the link's speed the headline problem. **Progress so far, 
 | after `LINK_FRAME` 128 (`9a68863`) | 44.3 s — *no change, see below* | 556 frames, 295 polls |
 | after the phase fix (`19b0c55`) | 32.3 s | 561 frames, **295 polls** |
 | after the asm transpose (`08fa773`) | 18.8 s | — |
-| **after splitting the poll (`27e964b`)** | **15.8 s** | 551 frames, **255 polls** |
+| after splitting the poll (`27e964b`) | 15.8 s | 551 frames, **255 polls** |
+| **after MVN'ing the receive ring (`656a966`)** | **11.8 s** | — |
+
+**Total: ~80 s → 11.8 s.** Frame refusals are **0**, so the console is no longer the limit at all.
 
 **Total: ~80 s → 18.8 s**, reproducible to the frame. **And the bottleneck has swapped back to the
 wire.** The transpose fix cut polls 2156 → 1370 — far more than the paint tail alone, because the app
@@ -610,9 +613,23 @@ Instrumented properly with a `net_stat_refused` counter (2026-07-30), **both cla
   not depend on the transpose at all. **`vnc`'s receive path and its paint path are decoupled**, which
   is the thing the hypothesis got backwards.
 
-**Backpressure was never the old problem and is now the only one.** It appeared the moment the link
-outpaced the app, and at 213 refusals it is the sole thing between the link and 1.00 polls per data
-frame — worth ~3.5 s more.
+**Backpressure is FIXED (`656a966`), after two wrong explanations.** Both were tested cheaply before
+anything was built, which is the only reason the third one was found:
+
+- *The ring is too small* — doubling `NET_RING` 1024 → 2048 moved refusals 213 → **211** (0.9%).
+  Reverted; 8 KB of WRAM for 1% is not a trade.
+- *The paint blocks reads* — a trace of the refusal counter against paint progress shows **every
+  refusal at `painted=0`**, before a tile is drawn, stopping the moment painting starts.
+
+The real cause: both ring copies were per-byte C loops, and `ring_put` measured **234 cycles per
+byte** — worse than the mailbox loop `link_mb_move` replaced, because `ring[ch][ring_head[ch]]`
+rebuilds a 24-bit address from a 2-D array and a volatile index for every byte. `MVN` took it to
+1,519 cycles a call (19×) and `net_read` to 350 (7.9×). **Refusals 213 → 0, screen 15.83 → 11.83 s.**
+
+**The console is no longer the limit.** 947 host frames carried 49,152 bytes — about **52 bytes of a
+124-byte payload**. The far side is not filling frames, and that is what the remaining time waits on.
+Worth measuring in `gateway.py` before assuming anything: the last three explanations offered here
+were wrong, and each was refuted by a cheaper test than the fix would have been.
 
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
 you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
