@@ -156,6 +156,13 @@ static uint8_t cmsg_len;
 static uint8_t cmsg_state; /* 0 want type, 1 want len, 2 collecting */
 
 static uint16_t txframe_ch[NET_CHANNELS]; /* per-channel bytes in flight */
+/* First byte beyond the previous frame's records. Everything at and past this
+ * offset is already LINK_CH_PAD — net_init establishes it, every build_frame
+ * restores it — so padding only has to cover the span the last frame's
+ * records dirtied. The old full-width pad loop was ~35 cycles a byte through
+ * `sta long`, ~4,200 cycles for the ~120 pad bytes of a receive-mostly frame,
+ * i.e. nearly all of build_frame's measured cost, inside NMI, every poll. */
+static uint16_t txframe_fill;
 static uint8_t peer_syn_seen;
 static uint8_t syn_out;
 static uint8_t rx_resync;
@@ -230,6 +237,11 @@ void net_init(void) {
   }
   txq_head = 0;
   txq_tail = 0;
+  /* Establish the pad invariant build_frame relies on: everything at and
+   * beyond txframe_fill is LINK_CH_PAD. Statics are zeroed, and zero is a
+   * valid channel number, not PAD. */
+  for (j = 0; j < LINK_FRAME; j++) txframe[j] = LINK_CH_PAD;
+  txframe_fill = LINK_HDR;
   cmsg_got = 0;
   cmsg_state = 0;
   tx_seq = 0;
@@ -762,7 +774,15 @@ static void build_frame(void) {
     }
   }
 
-  while (o < LINK_FRAME) txframe[o++] = LINK_CH_PAD;
+  /* Re-pad only what the previous frame's records covered (see txframe_fill);
+   * the checksum still sums the whole frame, so a hole in the invariant would
+   * fail loudly on the far side rather than corrupt silently. */
+  {
+    uint16_t end = txframe_fill;
+    uint16_t rec_end = (uint16_t)o;
+    while (o < (int)end) txframe[o++] = LINK_CH_PAD;
+    txframe_fill = rec_end;
+  }
   txframe[LINK_SUM] = 0;
   txframe[LINK_SUM] = net_checksum(txframe, LINK_FRAME);
 }

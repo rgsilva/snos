@@ -61,6 +61,13 @@ static uint16_t kill_held;
 
 void snos_nmi_c(void) {
   snos_frames++;
+  /* BEFORE net_service, and load-bearing: pad_latch's first spin waits for
+   * the auto-joypad read to START (~H32.5 of the first vblank line). Enter it
+   * late — after a link poll — and the read may already be FINISHED, which
+   * that spin cannot tell from "not started": it then burns its whole 2000-
+   * iteration guard, tens of thousands of cycles, every frame. Tried the
+   * other order on 2026-07-31 to save the ~700-cycle wait; the input suite
+   * caught it within minutes. The wait is the cheap case. */
   pad_latch();
 
   /* Move one network frame. This is the reason the kernel owns NMI outright:

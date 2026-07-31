@@ -23,11 +23,12 @@
 -- plus a byte count verified against the ROM image, so nothing here perturbs
 -- what it is measuring:
 --
---   $00:8132  snos_nmi   -- map: "snos_nmi = 008132"
---   $00:815F  the rti    -- the stub is 40 bytes to nmi_ret ($815A) and six
---                           pulls past it; both `beq nmi_ret` displacements in
---                           the ROM ($814E+2+0x0A, $8154+2+0x04) land on $815A,
---                           which is what makes the count trustworthy.
+--   $00:8124  snos_nmi   -- map: "snos_nmi = 008124"
+--   $00:8158  the rti    -- verified by decoding the shim from the ROM image:
+--                           all three `beq nmi_ret` displacements ($8140+2+0x11,
+--                           $8146+2+0x0B, $814D+2+0x04) land on $8153, the five
+--                           pulls run $8153-$8157, and $8158 is $40. Re-derive
+--                           BOTH whenever calypsi/header.s changes.
 --
 -- If calypsi/header.s changes, these go stale. The pairing counters below are the
 -- guard: entries and exits must track 1:1, and a wrong address shows up as zero
@@ -41,8 +42,8 @@
 -- find. The first version reported worst=10 scanlines with n frozen at 175 of
 -- 12000 NMIs, which looks like a working instrument. masterClock is monotonic.
 
-local NMI_ENTRY = 0x8132
-local NMI_RTI = 0x815F
+local NMI_ENTRY = 0x8124
+local NMI_RTI = 0x8158
 local PER_LINE = 1364 -- master cycles per NTSC scanline
 local PER_CPU = 6     -- master cycles per 3.58 MHz CPU cycle
 

@@ -26,6 +26,10 @@
 #define COLS 64
 #define ROWS 28
 #define RING 32
+/* The scroll ring is indexed with & (RING - 1) — a _Mod16 library call per
+ * printed character otherwise; ~200-400 cycles each, 1,664 of them in one
+ * full-pane repaint. The mask requires a power of two, enforced here. */
+typedef char con_ring_must_be_power_of_two[(RING & (RING - 1)) == 0 ? 1 : -1];
 #define BG2_MAP 0x0000
 #define BG1_MAP 0x0400
 #define BG2_CHR 0x1000          /* 2bpp: 8 words/tile */
@@ -175,9 +179,9 @@ static void newline(void) {
     int i;
     col = 0;
     if (row < text_rows - 1) { row++; return; }
-    top = (uint8_t)((top + 1) % RING);
+    top = (uint8_t)((top + 1) & (RING - 1));
     {
-        uint8_t r = (uint8_t)((top + text_rows - 1) % RING);
+        uint8_t r = (uint8_t)((top + text_rows - 1) & (RING - 1));
         for (i = 0; i < COLS; i++) shadow[r][i] = ' ';
         dirty[r] = 1;
     }
@@ -200,7 +204,7 @@ void con_putc(int c) {
     }
     if (c == 7) return;
     if (c < 0x20) return;
-    r = (uint8_t)((top + row) % RING);
+    r = (uint8_t)((top + row) & (RING - 1));
     shadow[r][col] = (uint8_t)c;
     dirty[r] = 1;
     if (++col >= COLS) newline();
@@ -265,7 +269,7 @@ void con_flush(void) {
      * scroll is pending, the revealed row goes out first, in the same vblank as
      * the scroll register. */
     if (vofs_dirty) {
-        uint8_t nr = (uint8_t)((top + text_rows - 1) % RING);
+        uint8_t nr = (uint8_t)((top + text_rows - 1) & (RING - 1));
         if (dirty[nr]) rows[n++] = nr;
     }
     for (r = 0; r < RING && n < budget; r++) {
@@ -328,14 +332,14 @@ void con_getpos(int *r, int *c) { *r = row; *c = col; }
 void con_putat(int r_, int c_, int ch) {
     uint8_t r;
     if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= COLS) return;
-    r = (uint8_t)((top + r_) % RING);
+    r = (uint8_t)((top + r_) & (RING - 1));
     shadow[r][c_] = (uint8_t)ch;
     dirty[r] = 1;
 }
 
 int con_getat(int r_, int c_) {
     if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= COLS) return ' ';
-    return shadow[(top + r_) % RING][c_];
+    return shadow[(top + r_) & (RING - 1)][c_];
 }
 
 void con_row_save(int r_, uint8_t *dst) {
@@ -469,13 +473,13 @@ void con_set_text_rows(int n) {
     if (n < text_rows) {
         if (row >= n) {
             uint8_t shift = (uint8_t)(row - (n - 1));
-            top = (uint8_t)((top + shift) % RING);
+            top = (uint8_t)((top + shift) & (RING - 1));
             row = (uint8_t)(n - 1);
             vofs_dirty = 1;
         }
     } else if (n > text_rows) {
         for (i = text_rows; i < n; i++) {
-            uint8_t r = (uint8_t)((top + i) % RING);
+            uint8_t r = (uint8_t)((top + i) & (RING - 1));
             for (j = 0; j < COLS; j++) shadow[r][j] = ' ';
             dirty[r] = 1;
         }
@@ -498,7 +502,7 @@ void con_caret(int on) {
         caret_ring = -1;
     }
     if (on) {
-        caret_ring = (top + row) % RING;
+        caret_ring = (top + row) & (RING - 1);
         caret_col = col;
         shadow[caret_ring][caret_col] = 0x80 | ' ';
         dirty[caret_ring] = 1;
