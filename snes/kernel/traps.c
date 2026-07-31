@@ -178,6 +178,13 @@ uint16_t snos_cop_c(uint16_t sp) {
     kbd_idle();
     return 0;
 
+  case SYS_NOTIFY:
+    /* Only meaningful from the background: the foreground already has the
+     * screen. The kernel owns the cell, so no foreground app can be tricked
+     * into erasing a pending notification. */
+    if (!is_fg) proc_notify(self);
+    return 0;
+
   case SYS_PUTC:
     if (!is_fg) return 0;
     kcon_putc((int)(a & 0xFFu));

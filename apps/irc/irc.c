@@ -666,6 +666,9 @@ static void handle_line(char *s) {
   }
 
   if (ieq(cmd, "PRIVMSG") || ieq(cmd, "NOTICE")) {
+    /* Backgrounded and someone wants us: a private message, or our nick in a
+     * channel. The kernel's attention cell does the flashing; from the
+     * foreground sys_notify is a no-op. */
     char *target = skipsp(rest);
     char *text = word(target);
     int notice = ieq(cmd, "NOTICE");
@@ -674,9 +677,31 @@ static void handle_line(char *s) {
     /* CTCP. OFTC sends a VERSION request unbidden on connect and there is
      * nothing useful to show for it. */
     if ((uint8_t)text[0] == 0x01) return;
-    if (target[0] == '#' || target[0] == '&') t = tab_get(target);
-    else if (notice || pfxnick[0] == 0) t = 0;
-    else t = tab_get(pfxnick);
+    if (target[0] == '#' || target[0] == '&') {
+      t = tab_get(target);
+      /* Our nick in channel text = a mention. Case-insensitive scan, the
+       * same folding ieq uses. */
+      {
+        char *p2 = text;
+        while (*p2) {
+          char *a = p2, *b = nick;
+          while (*a && *b && lowerc(*a) == lowerc(*b)) {
+            a++;
+            b++;
+          }
+          if (*b == 0) {
+            sys_notify();
+            break;
+          }
+          p2++;
+        }
+      }
+    } else if (notice || pfxnick[0] == 0) {
+      t = 0;
+    } else {
+      t = tab_get(pfxnick); /* a private message is always worth eyes */
+      sys_notify();
+    }
     if (notice) emitv(t, "-", pfxnick, "- ", text);
     else emitv(t, "<", pfxnick, "> ", text);
     return;

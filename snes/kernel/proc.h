@@ -52,6 +52,12 @@ void proc_reap_slot(uint8_t id); /* free a dead PCB after reporting it */
  * or -1 if none. pages uses the header encoding (0 = 256). */
 int proc_arena_conflict(uint8_t page, uint8_t pages);
 
+/* The attention flag (SYS_NOTIFY): a background process asking for eyes.
+ * Bits by process id; the console overlays an inverse '!' while any are set.
+ * Cleared when the raiser is foregrounded, killed, or exits. */
+void proc_notify(uint8_t id);
+int proc_notify_pending(uint8_t id);
+
 /* Offer the CPU from inside a blocking kernel loop (header.s). The switch
  * points are: NMI-outside-syscall, syscall exit, and THIS — together they
  * make it impossible for any process, foreground or background, blocked or

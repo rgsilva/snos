@@ -202,6 +202,7 @@ end
 local frame, step, at = 0, 1, nil
 local claimed = false
 local echo_seen_during_fg = false
+local notify_during_fg = false
 local first_listen_port = nil
 
 local function send(cmd, settle)
@@ -227,9 +228,16 @@ emu.addEventCallback(function()
 
   -- The moment worth the whole milestone: the echo arriving WHILE the
   -- foreground app runs (steps 4..5 are hello's window).
-  if step >= 4 and step < 6 and not echo_seen_during_fg then
-    if (gw.upstream[gw.listen_ch or 255] or ""):find("hello%-bg") then
+  if step >= 4 and step < 6 then
+    if not echo_seen_during_fg and
+       (gw.upstream[gw.listen_ch or 255] or ""):find("hello%-bg") then
       echo_seen_during_fg = true
+    end
+    -- The attention cell: netecho (backgrounded) got a connection and asked
+    -- for eyes; the kernel's overlay must be visible in the top-right cell
+    -- WHILE the foreground app owns the rest of the screen.
+    if not notify_during_fg and L.display_text(0, 0):sub(64, 64) == "!" then
+      notify_during_fg = true
     end
   end
 
@@ -304,6 +312,10 @@ emu.addEventCallback(function()
   r.check(echo_seen_during_fg,
           "the echo did not arrive while the foreground app was running - " ..
           "background execution is not real")
+  r.check(notify_during_fg,
+          "the attention cell never showed while the foreground app ran")
+  r.check(L.display_text(0, 0):sub(64, 64) ~= "!",
+          "the attention cell survived its raiser being killed")
   r.check(text:find("arena conflict", 1, true) ~= nil and
           text:find("netecho holds that memory", 1, true) ~= nil,
           "the overlapping foreground launch was not refused by name")

@@ -57,6 +57,10 @@ void con_clear(void);
 void con_set_text_rows(int n);
 int con_text_rows(void); /* usable height; shrinks when the keyboard shows */
 void con_caret(int on);
+/* The attention cell: while on, con_flush overlays an inverse '!' in the
+ * top-right cell of screen row 0 — the kernel wins that one cell over any
+ * application's write, which is what makes it trustworthy. */
+void con_notify(int on);
 void con_split_enable(int panel_top_row);
 void con_split_disable(void);
 int con_panel_row(int screen_row, const uint8_t *chars); /* 1 = landed in vblank */

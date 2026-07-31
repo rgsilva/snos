@@ -60,6 +60,10 @@ static uint8_t text_rows = ROWS;
  * the keyboard up as with it down. */
 static uint8_t split_on;
 
+/* The attention cell (SYS_NOTIFY). Overlaid at FLUSH time so the kernel wins
+ * the cell against any app's writes — nothing to fight over in the shadow. */
+static uint8_t notify_on;
+
 /* Set while an application owns the PPU (SYS_GFX). con_flush becomes a no-op:
  * a full-screen image needs all of VRAM, so anything the console wrote would
  * both corrupt the picture and be corrupted by it. */
@@ -257,6 +261,11 @@ void con_flush(void) {
             rowbuf[i][cell]  = (uint16_t)((shadow[rr][cell * 2]     << 1) | 0x2000);
         for (cell = 0; cell < 32; cell++)
             rowbuf1[i][cell] = (uint16_t)((shadow[rr][cell * 2 + 1] << 1) | 0x2000);
+        /* The attention cell: screen row 0 is ring row `top`, column 63 is
+         * BG1 cell 31. Applied to the outgoing buffer, never the shadow, so
+         * the app's own content returns untouched when the flag drops. */
+        if (notify_on && rr == top)
+            rowbuf1[i][31] = (uint16_t)(((0x80 | '!') << 1) | 0x2000);
     }
 
     con_publish();
@@ -295,6 +304,12 @@ void con_flush(void) {
  * to address rows directly. These take SCREEN coordinates and resolve the
  * scroll ring themselves, so callers never see it.
  */
+
+void con_notify(int on) {
+    if (notify_on == (on ? 1 : 0)) return;
+    notify_on = (uint8_t)(on ? 1 : 0);
+    dirty[top] = 1; /* repaint screen row 0: draw the cell, or erase it */
+}
 
 int con_rows(void) { return ROWS; }
 int con_text_rows(void) { return text_rows; }

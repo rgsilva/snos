@@ -23,6 +23,7 @@ static uint8_t buf[BUF];
 
 int main(void) {
   uint16_t port, ch, st;
+  uint16_t prev_st = 0;
   uint32_t served = 0;
 
   snos_getargs(args, sizeof args);
@@ -46,6 +47,13 @@ int main(void) {
 
   for (;;) {
     st = sys_net_state(ch);
+
+    /* A client connected. If we are backgrounded, ask for eyes: the kernel
+     * shows the attention cell and clears it when we are foregrounded. From
+     * the foreground the call is a no-op. */
+    if (st == NET_ST_OPEN && prev_st != NET_ST_OPEN && prev_st != NET_ST_EOF)
+      sys_notify();
+    prev_st = st;
 
     if (st == NET_ST_OPEN || st == NET_ST_EOF) {
       uint16_t n = sys_net_read(ch, buf, BUF);

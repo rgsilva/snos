@@ -50,6 +50,7 @@
 #include "proc.h"
 #include "snos.h"
 #include "fs.h"
+#include "console.h"
 
 /* Handshake words with the shim, in the kernel-private block next to the
  * exec state (exec.s owns $1A10-$1A16; these continue it). Fixed addresses
@@ -84,12 +85,32 @@ typedef struct {
 static proc_t procs[PROC_MAX];
 static volatile uint8_t p_fg;    /* who owns the console and keyboard */
 static uint8_t p_filing_prev;    /* whose S the shim saved at that switch */
+static volatile uint8_t p_notify; /* attention bits, by process id */
 static uint8_t sched_on;         /* mtest's bounded mode */
 static uint16_t sched_ticks, sched_limit;
 
 uint8_t proc_current(void) { return (uint8_t)PROC_CUR_ID; }
+
+void proc_notify(uint8_t id) {
+  if (id >= PROC_MAX) return;
+  p_notify |= (uint8_t)(1u << id);
+  con_notify(1);
+}
+
+int proc_notify_pending(uint8_t id) {
+  return (p_notify >> id) & 1;
+}
+
+static void notify_clear(uint8_t id) {
+  p_notify &= (uint8_t)~(1u << id);
+  if (p_notify == 0) con_notify(0);
+}
 uint8_t proc_fg(void) { return p_fg; }
-void proc_set_fg(uint8_t id) { p_fg = id; }
+void proc_set_fg(uint8_t id) {
+  p_fg = id;
+  /* Foregrounding answers the notification by definition. */
+  notify_clear(id);
+}
 
 uint8_t proc_state(uint8_t id) {
   return id < PROC_MAX ? procs[id].state : ST_FREE;
@@ -180,6 +201,7 @@ void proc_exit_current(uint16_t sp, uint16_t code) {
   if (id == 0 || id >= PROC_MAX) return; /* process 0 exits via app_return */
   procs[id].exit_code = code;
   procs[id].state = ST_DEAD;
+  notify_clear(id); /* a dead process has nothing left to say */
   fs_reap(id); /* an abandoned write handle would lock out every writer */
   if (p_fg == id) p_fg = 0; /* a dead process cannot hold the console */
   /* Rewrite the trap frame so the COP shim's rti lands in the grave loop
@@ -200,6 +222,7 @@ int proc_kill(uint8_t id) {
    * own stack and arena, both of which die with it. */
   procs[id].exit_code = SNOS_EXIT_KILLED;
   procs[id].state = ST_DEAD;
+  notify_clear(id);
   fs_reap(id);
   if (p_fg == id) p_fg = 0;
   return 0;

@@ -20,7 +20,7 @@
               .rtmodel core, "*"
 
               .section code, root
-              .public sys_exit, sys_version, sys_yield
+              .public sys_exit, sys_version, sys_yield, sys_notify
               .public sys_putc, sys_puts_raw, sys_getc, sys_cls
               .public sys_readline_raw, sys_putu, sys_puthex
               .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
@@ -40,6 +40,8 @@ sys_exit:       cop     #0x00
 sys_version:    cop     #0x01
                 rtl
 sys_yield:      cop     #0x02
+                rtl
+sys_notify:     cop     #0x03
                 rtl
 
 sys_putc:       cop     #0x10

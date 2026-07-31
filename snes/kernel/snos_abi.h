@@ -55,13 +55,18 @@
  * image through SYS_GETC_F would be 43000 traps; and Mode 3 tile data for a
  * full screen is 57 KB of the 64 KB of VRAM, so the console's font and tilemaps
  * cannot coexist with it and something has to arbitrate. */
-#define SNOS_ABI_VERSION 8
+#define SNOS_ABI_VERSION 9
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
 #define SYS_EXIT 0x00     /* A = exit code. Does not return. */
 #define SYS_VERSION 0x01  /* -> kernel ABI version */
 #define SYS_YIELD 0x02    /* give the kernel a frame (housekeeping, OSK) */
+/* ABI 9. Raise the attention flag (M10): a BACKGROUND process asking for the
+ * user's eyes. The kernel overlays an inverse '!' in the top-right console
+ * cell — the one cell no application owns — until the raiser is foregrounded
+ * or dies. From the foreground it is a no-op: you already have the screen. */
+#define SYS_NOTIFY 0x03
 /* $10-$1F  console */
 #define SYS_PUTC 0x10     /* A = character */
 #define SYS_PUTS 0x11     /* p0 = offset, p1 = bank; NUL-terminated */
@@ -225,6 +230,7 @@ typedef struct {
 uint16_t sys_exit(uint16_t code);
 uint16_t sys_version(void);
 uint16_t sys_yield(void);
+uint16_t sys_notify(void);
 uint16_t sys_putc(uint16_t c);
 uint16_t sys_puts_raw(void); /* args in the parameter block */
 uint16_t sys_getc(void);
