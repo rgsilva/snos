@@ -319,27 +319,46 @@ holds only actionable work; this is the durable record.
 - **Sliding window** — parked hardest. The `get` control run reaches the 2-poll floor with the
   *current* protocol, so stop-and-wait is not what costs the round trip, and `next_out()`'s
   stop-and-wait measures 20 µs. Revisit only if the 2-poll floor itself proves worth beating.
-- **`apps/web/web.c` has the signed-constant bug** — unsuffixed `VRAM_MAP 0xE000` *and* a `$2107`
-  line missing the `>> 1`, so it likely selects the wrong base. Parked because `web` is the retired
-  browser app and is slated for deletion in the clean-up below. **Delete it rather than fix it.**
+- **`apps/web/web.c` has the signed-constant bug** — ~~parked~~ **executed 2026-07-31
+  (`540fe0a`): `web` deleted whole**, with `browser.py`, `C2S_WEB`, the ABI-8 syscalls and the
+  `render:` scheme, in one commit because gateway.py imported browser.py unconditionally.
+
+*(Added after the 2026-07-31 review waves, same parked-with-reason discipline:)*
+
+- **`net_write` + `build_frame`'s TX copy are still per-byte** — the same 2-D-array shape that
+  measured 234 cyc/byte in `ring_put`. Parked: today's workloads are receive-dominated (vnc sends
+  ~10 B/poll); rises with `httpd` serving real bodies and at M7.
+- **Shared `libsnos` for the apps** — the review measured ~450 duplicated lines across the eight
+  apps that would collapse to ~150: the blocking send-drain (4 copies), connect/open-wait with
+  deadline+cancel (4, `get`'s is the richest), u32 decimal printing (5 — two of which were *bugs*,
+  fixed in `4ea0b1e`), string helpers (4), host:port defaulting (2), the file-picker UI (2), and
+  the Mode-3/cursor PPU boilerplate vnc and view share byte-for-byte. Parked as a deliberate
+  refactor for a fresh session: it touches every app and `buildapp.sh` at once, and any shared
+  code must obey the no-initialised-writable-statics rule that bit `basic`'s RND.
+- **`netbridge.lua` still has zero test coverage** — `make test` speaks the mailbox directly. The
+  shape of the missing test: a host-side pytest driving `gateway.py` against a scripted peer that
+  mimics the bridge's *file* discipline (truncate-at-start, frame-boundary joins, shrink-detect
+  restart, newest-frame handover), asserting a HELLO round trip survives both a gateway restart
+  and a bridge restart. Needs UP/DOWN paths to become overridable first. The Mesen callback-order
+  facts stay documented-as-measured; no headless test can reach them.
+- **`con_init`'s remaining 189 ms** — the four tilemap clears and shadow reset, still PIO after
+  the font bake (`f69a6a1`). A fixed-source DMA fill cannot write a two-byte pattern (both B-bus
+  registers read the same fixed A-address), so it needs a small ROM pattern buffer; parked as not
+  worth it until someone notices the 189 ms.
 
 ### Housekeeping — the gateway needs a clean-up *(agreed 2026-07-29, not urgent)*
 `gateway.py` has grown by accretion — HTTP fetch, image conversion, a `render:` scheme, a held-
 open browser, listen/accept, and now a plain TCP path for VNC — and the seams show. Known debt:
 
-- **`render:` is a testing back door** and should not survive as a public URL scheme. `web` is
-  being retired in favour of `vnc`, so it can probably go entirely.
+- ~~`render:` is a testing back door~~ — **gone with `web` (`540fe0a`)**, along with browser.py,
+  headless Chrome, `C2S_WEB` and the ABI-8 syscalls.
 - **`SYS_NET_IMAGE` / `C2S_IMAGE` are dead** — the forced-conversion mechanism from before the
   gateway decided from Content-Type. Still wired through the kernel, the trap layer and the test
-  gateway.
-- **The browser (`tools/browser.py` + the `web` app + `C2S_WEB`) becomes dead weight** once `vnc`
-  works, along with headless Chrome as a dependency.
-- The daemon now has several kinds of channel (fetch, listen, connect, web) with different
-  teardown rules, discovered one race at a time. They deserve one model rather than four.
-
-**Not a refactor for its own sake:** every fault found on 2026-07-29 — a queue that outlived its
-channel, a page closed under a running thread, an `S2C_ERR` landing on a freed channel — was a
-teardown bug, and they were separate bugs only because teardown is written four times.
+  gateway; the *test* is now its only caller. Removing it means touching `test/net.lua` too.
+- ~~teardown written four times~~ — **mostly unified 2026-07-31 (`458272d`)**: one `teardown()`
+  serves the F_SYN reset, the link restart and Ctrl-C, and the SNES-side `S2C_ERR`-on-freed guard
+  landed with the review fixes (`963853f`). What remains of the "one channel model" idea is
+  taste, not a known bug.
 
 ### Performance — link throughput *(queued 2026-07-29; items 1 and 2 done)*
 The `vnc` client made the link's speed the headline problem. **Progress so far, all measured:**
