@@ -198,14 +198,27 @@ int fs_open_write(const char *name) {
   uint32_t alloc;
   int j;
 
+  /* Every refusal must come BEFORE the delete: overwrite semantics on a full
+   * volume otherwise destroys the old copy and then fails to create the new
+   * one, and "full" is the steady state of a bump allocator with no reclaim.
+   * Deleting frees no space (the allocator never rewinds), so the space check
+   * is delete-independent; a full directory only blocks names that do not
+   * already own a slot, since deleting an existing SRAM copy frees its own. */
+  alloc = sram_rd32(8);
+  if (alloc >= sram_size()) return -1;
+
+  for (s = 0; s < SRAMFS_SLOTS; s++)
+    if (sram_rd(slot_addr(s)) == 0) break;
+  if (s >= SRAMFS_SLOTS) {
+    const fs_entry_t *e = fs_find(name);
+    if (!e || e->ro) return -1; /* directory full */
+  }
+
   fs_delete(name); /* overwrite semantics */
 
   for (s = 0; s < SRAMFS_SLOTS; s++)
     if (sram_rd(slot_addr(s)) == 0) break;
-  if (s >= SRAMFS_SLOTS) return -1; /* directory full */
-
-  alloc = sram_rd32(8);
-  if (alloc >= sram_size()) return -1;
+  if (s >= SRAMFS_SLOTS) return -1; /* unreachable: guarded above */
 
   for (j = 0; j < FS_NAME_LEN; j++)
     sram_wr(slot_addr(s) + (uint32_t)j, (uint8_t)(name[j] ? name[j] : 0));

@@ -469,6 +469,33 @@ static void cmd_fstest(void) {
     kcon_putu((uint16_t)first_bad);
     kcon_putc('\n');
   }
+
+  /* Overwriting on a full volume must refuse BEFORE deleting: with a bump
+   * allocator "full" is the steady state, so overwrite-then-fail would make
+   * "both versions lost" the common failure. Force the allocator full and
+   * demand both the refusal and the survivor. */
+  {
+    uint32_t saved;
+    if (fs_open_write("OVR.TXT") != 0) {
+      kcon_puts("fstest: cannot create OVR.TXT\n");
+      return;
+    }
+    fs_putc('o');
+    fs_putc('k');
+    fs_close();
+    saved = sram_rd32(8);
+    sram_wr32(8, sram_size());
+    if (fs_open_write("OVR.TXT") == 0) {
+      fs_close();
+      kcon_puts("fstest: full-volume overwrite was allowed\n");
+    } else if (fs_find("OVR.TXT") == 0) {
+      kcon_puts("fstest: full-volume overwrite destroyed the old file\n");
+    } else {
+      kcon_puts("fstest: full-volume overwrite refused, file intact\n");
+    }
+    sram_wr32(8, saved);
+    fs_delete("OVR.TXT");
+  }
 }
 
 /* Ask the far end to prove it is there, rather than reporting the mailbox.

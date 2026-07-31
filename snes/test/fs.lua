@@ -67,6 +67,8 @@ emu.addEventCallback(function()
   r.check(text:find("wrote NOTES.TXT", 1, true) ~= nil, "write failed")
   r.check(text:find("fstest: 20000 bytes across 3 windows OK", 1, true) ~= nil,
           "SRAM addressing is wrong across window boundaries")
+  r.check(text:find("full-volume overwrite refused, file intact", 1, true) ~= nil,
+          "overwriting on a full volume must refuse up front, not destroy the old copy")
 
   -- Two `cat NOTES.TXT` outputs must appear: one before the reset, one after.
   local _, hits = text:gsub("persisted ok", "")
