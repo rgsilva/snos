@@ -271,13 +271,43 @@ page: it parses HTML on the fly and stores only what's on screen, which is exact
 64×28 console with 64 KB of app arena wants.
 **Done when:** fetch and render a real page over the cable.
 
-### M10 — Preemptive multitasking *(the crazy one)*
-NMI-driven round-robin scheduler. Carve `$0800–$18FF` into 8 × 512 B process slots (§2). Context
-switch = push A/X/Y/P/D/DB, `TSC` save, `TCS` load, pop — **under ~40 cycles**. Background
-daemons (network poll, clock). Status bar showing live processes.
-**Done when:** IRC stays connected in the background while BASIC runs in the foreground.
-**Why it's plausible:** the SNES already has a 60 Hz preemption source, and the 65816's whole
-context is 6 registers. The hard part isn't the switch — it's the 8 KB in §2.
+### M10 — Preemptive multitasking *(the crazy one; shape agreed 2026-07-31, started same day)*
+
+The founding observation, sharpened by the review work: **the kill switch and the mid-syscall
+deferral ARE the scheduler's two hard mechanisms, already shipped and tested.** The NMI can
+yank any process at any instruction (kill switch); it already knows the one moment it must not
+(saved D == SYS_DP — the deferral). A context switch is "kill switch, but resumable": when NMI
+fires, the process's whole existence is its stack (PC/P pushed by the CPU, A/X/Y/D/DB by the
+shim), so a PCB is essentially one saved stack pointer, and switching is store S / load S / rti
+— the same KSP trick app_exec has used since M3, made plural. One process runs one syscall to
+completion before any switch, so the kernel is never re-entered and the single $1B00 syscall DP
+stays correct with no locks.
+
+Five steps, each shippable, suite green after each:
+
+1. **Context-switch primitive**: PCB array (saved S + state), forge-an-NMI-frame spawn,
+   round-robin at the NMI shim tail behind the existing deferral checks. Proven by two
+   kernel-resident worker processes ping-ponging counters — both making progress despite
+   neither ever returning is the assertion only preemption can pass.
+2. **Blocking syscalls yield**: kbd_getchar/net waits mark the process BLOCKED and switch
+   instead of spinning (the exit-flag bailout generalised).
+3. **Bank $00 carving**: per-process stack+DP slots. No app relinking — Calypsi addresses
+   stack and DP through S and D, which are per-process registers; only the assignments move.
+4. **Arena slots — the one real problem, solved the house way.** Bank $7F data is linked at
+   absolute addresses, so co-running apps must occupy disjoint regions, and copy-swapping
+   64 KB is half a second — dead. Rule: **measured need, declared placement, build-time
+   enforcement** (agreed with Ricardo 2026-07-31). The linker map is the truth about size;
+   `APP_ARENA_*` in the Makefile declares placement exactly like `APP_BANK_*` does for ROM;
+   the build FAILS if an app outgrows its slot (the LINK_FRAME%16 discipline); the slot goes
+   in the app header so the kernel refuses an overlapping spawn — a deterministic refusal at
+   launch, never a corruption at runtime. MultiFinder's model, and it fit a Mac Plus.
+   Foreground-only apps may share a region (edit/basic); vnc (48 KB shadow) is honestly
+   exclusive; irc(~33K)+edit(~13K) co-fit, which is the demo pairing by construction.
+5. **UX**: `run app &`, `jobs`, foreground-rotate hotkey, kill switch kills the foreground,
+   per-process channel reaping. The PPU stays single-owner (gfx_owned, unchanged).
+
+**Done when:** IRC stays connected in the background, flashing a notification, while `edit`
+runs in the foreground.
 
 ### M11 — Real TCP/IP: the SNES gets an address
 Today the gateway *is* the network — it holds the sockets and the SNES holds a byte stream, so

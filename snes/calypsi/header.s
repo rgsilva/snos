@@ -75,6 +75,12 @@
 ;;; rather than returning into an app that is no longer supposed to be running.
 EXITFLAG      .equ    0x7e1a12
 APPRUNNING    .equ    0x7e1a16
+;; Scheduler handshake, owned by kernel/proc.c (M10). PROC_WANT is one-shot:
+;; consumed below whether or not the deferral allows the switch.
+PROC_WANT     .equ    0x7e1a18
+PROC_NEXT_S   .equ    0x7e1a1a
+PROC_OLD_S    .equ    0x7e1a1c
+PROC_SWITCHED .equ    0x7e1a1e
 
 ;;; Direct pages for trap handlers. NOT $0000, and this is load-bearing:
 ;;; Calypsi's C code keeps working values in direct-page pseudo-registers whose
@@ -138,6 +144,30 @@ snos_nmi:
               beq     nmi_ret
               jmp     long:app_return
 nmi_ret:
+              ;; The context switch (M10). Everything above decided whether a
+              ;; process DIES; this decides whether a different one RESUMES.
+              ;; The interrupted process's whole context is already on its
+              ;; stack — the frame this path is about to pop — so the switch
+              ;; is: publish old S, adopt new S, and let the SAME pops and
+              ;; rti below resume whoever the new stack belongs to. A forged
+              ;; frame (proc.c) makes first entry and resumption identical.
+              lda     long:PROC_WANT
+              beq     nmi_pop
+              lda     ##0                   ; one-shot, consumed even when
+              sta     long:PROC_WANT        ; the deferral says no
+              ;; Same rule as the kill switch, same reason: a process inside
+              ;; a COP handler holds the kernel mid-mutation and the single
+              ;; syscall DP. It finishes before anyone else runs.
+              lda     2,s
+              cmp     ##SYS_DP
+              beq     nmi_pop
+              tsc                           ; the entire context switch:
+              sta     long:PROC_OLD_S       ;   save one register,
+              lda     long:PROC_NEXT_S      ;   load one register
+              tcs
+              lda     ##1
+              sta     long:PROC_SWITCHED    ; tells proc_tick to file OLD_S
+nmi_pop:
               plb
               pld
               ply

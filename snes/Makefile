@@ -43,14 +43,14 @@ LNFLAGS = calypsi/linker.scm --output-format=raw --rtattr exit=simplified \
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
             $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c $(K)/net.c \
-            $(K)/link.c $(K)/link_wram.c $(K)/link_serial.c
+            $(K)/link.c $(K)/link_wram.c $(K)/link_serial.c $(K)/proc.c
 KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s \
             $(K)/netasm.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager test-httpd test-irc test-vnc clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-net test-pager test-httpd test-irc test-vnc clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -169,7 +169,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-net test-pager test-httpd test-irc
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-net test-pager test-httpd test-irc
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -222,6 +222,12 @@ test-net: $(BUILD)/snos.sfc $(BUILD)/test/net.lua
 test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
+
+# M10 step 1: the context-switch primitive, proven by two never-yielding
+# kernel workers both making progress under the NMI round-robin.
+test-mtask: $(BUILD)/snos.sfc $(BUILD)/test/mtask.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mtask.lua
 
 # A Lua ircd on the far side of the emulated link, speaking the real protocol.
 # In the suite rather than beside it, unlike test-vnc: this moves a few hundred

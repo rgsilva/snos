@@ -18,6 +18,7 @@
 #include "fs.h"
 #include "sram.h"
 #include "net.h"
+#include "proc.h"
 
 static char line[128];
 
@@ -498,6 +499,31 @@ static void cmd_fstest(void) {
   }
 }
 
+/* M10 step 1's proof: run two kernel workers under the NMI round-robin for
+ * ~4 seconds. The workers never yield, never trap and never return, so BOTH
+ * counters advancing is a fact only genuine preemption can produce — and
+ * this line printing at all proves process 0 got the machine back. */
+static void cmd_mtest(void) {
+  uint32_t a, b;
+  if (SNOS_EXEC_RUN) {
+    kcon_puts("mtest: not while an application is running\n");
+    return;
+  }
+  kcon_puts("mtest: preempting two workers for ~4s...\n");
+  proc_mtest_start(240u);
+  while (proc_busy()) kbd_idle();
+  a = proc_test_a_count();
+  b = proc_test_b_count();
+  kcon_puts("mtest: A=");
+  kcon_puthex16((uint16_t)(a >> 16));
+  kcon_puthex16((uint16_t)a);
+  kcon_puts(" B=");
+  kcon_puthex16((uint16_t)(b >> 16));
+  kcon_puthex16((uint16_t)b);
+  kcon_puts(a != 0 && b != 0 ? " both progressed OK\n"
+                             : " STALLED - preemption is broken\n");
+}
+
 /* Ask the far end to prove it is there, rather than reporting the mailbox.
  *
  * net_up() only tests whether the *bridge* claimed the link. The daemon behind
@@ -743,6 +769,7 @@ static void cmd_debug(char *rest) {
     kcon_puts("debug ver       version and ABI\n");
     kcon_puts("debug syscheck  exercise the COP syscall path\n");
     kcon_puts("debug fstest    verify SRAM addressing\n");
+    kcon_puts("debug mtest     preempt two kernel workers (M10 step 1)\n");
     kcon_puts("debug get URL   fetch a URL to the console\n");
     kcon_puts("debug send H:P  raw stream: connect, GET /, print\n");
     return;
@@ -751,6 +778,7 @@ static void cmd_debug(char *rest) {
   else if (streq(what, "ver")) cmd_ver();
   else if (streq(what, "syscheck")) cmd_syscheck();
   else if (streq(what, "fstest")) cmd_fstest();
+  else if (streq(what, "mtest")) cmd_mtest();
   else {
     kcon_puts("unknown debug command: ");
     kcon_puts(what);

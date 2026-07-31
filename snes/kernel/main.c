@@ -9,6 +9,7 @@
 #include "input.h"
 #include "app.h"
 #include "snos_abi.h"
+#include "proc.h"
 #include "sram.h"
 #include "fs.h"
 
@@ -38,6 +39,7 @@ static void hw_init(void) {
   SNOS_EXEC_FLAG = 0;
   SNOS_EXEC_CODE = 0;
   SNOS_EXEC_KSP = 0;
+  proc_init(); /* the scheduler's handshake words: same hazard, same cure */
   SNOS_ARGS.p0 = 0;
   SNOS_ARGS.p1 = 0;
   SNOS_ARGS.p2 = 0;

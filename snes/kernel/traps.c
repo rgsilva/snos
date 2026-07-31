@@ -28,6 +28,7 @@
 #include "farmem.h"
 #include "fs.h"
 #include "net.h"
+#include "proc.h"
 
 #define BANK0M 0x7E0000ul
 
@@ -119,6 +120,12 @@ void snos_nmi_c(void) {
   } else {
     kill_held = 0;
   }
+
+  /* M10: file the previous context switch, decide the next one. After the
+   * kill logic on purpose — a frame that just armed the unwind must not also
+   * schedule; the dying process's funeral comes first. The shim performs the
+   * actual swap on its way out (header.s). */
+  if (!SNOS_EXEC_FLAG) proc_tick();
 }
 
 /* ----------------------------------------------------------- COP dispatch */
