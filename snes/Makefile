@@ -50,7 +50,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager test-irc test-vnc clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-net test-pager test-httpd test-irc test-vnc clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -169,7 +169,7 @@ $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-net test-pager test-irc
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-net test-pager test-httpd test-irc
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -226,6 +226,10 @@ test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
 # A Lua ircd on the far side of the emulated link, speaking the real protocol.
 # In the suite rather than beside it, unlike test-vnc: this moves a few hundred
 # bytes, not a 48 KB framebuffer.
+test-httpd: $(BUILD)/snos.sfc $(BUILD)/test/httpd.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/httpd.lua
+
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
