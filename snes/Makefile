@@ -150,9 +150,10 @@ APP_ABI_httpd  := 7
 # `vnc` uses only the ABI-7 stream calls plus sys_gfx; 8 was an over-claim
 # that would make an ABI-7 kernel refuse an app it could run.
 APP_ABI_vnc    := 7
-# telnetd needs ABI 10: SYS_CONROW (read a console row) and SYS_KBDPUSH
-# (inject a keystroke) are what make the screen mirror possible at all.
-APP_ABI_telnetd := 10
+# telnetd needs ABI 11: SYS_CONROW (read a console row) and SYS_KBDPUSH
+# (inject a keystroke) make the mirror possible; SYS_CONDIRTY (changed-rows
+# mask) is what makes polling it every frame affordable.
+APP_ABI_telnetd := 11
 # `irc` needs the ABI-7 stream calls: it opens a plain TCP connection and both
 # talks and listens on it. Nothing it does needs ABI 8.
 APP_ABI_irc    := 7

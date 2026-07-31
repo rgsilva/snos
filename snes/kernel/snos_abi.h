@@ -61,7 +61,7 @@
  * what a server or an IRC client needs. Version 8 was the browser calls,
  * retired with the web app; the numbers stay reserved. Version 9 is M10:
  * SYS_NOTIFY, and per-process file handles under the same fs syscalls. */
-#define SNOS_ABI_VERSION 10
+#define SNOS_ABI_VERSION 11
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -108,6 +108,15 @@
  * overflow-proof, coalescing, and clears/positioned writes/scrolls all fall
  * out uniformly. SYS_ERR while an app owns the PPU (nothing to mirror). */
 #define SYS_CONROW 0x1A
+/* ABI 11. Which screen rows changed since the last call: p0 bits 0-15 = rows
+ * 0-15, p1 bits 0-11 = rows 16-27. The kernel already tracks this for its own
+ * VRAM flush; without this call a mirror re-reads all 28 rows every pass to
+ * discover that none of them changed. Read-and-CLEAR, so there can be one
+ * consumer — telnetd, whose arena slot is exclusive anyway. A scroll or clear
+ * reports every row (their content genuinely all moved). A row's SYS_CONROW
+ * answer can be fresher than the mask it was flagged in; harmless, because a
+ * mirror diffs before sending. -> 0, or SYS_ERR while an app owns the PPU. */
+#define SYS_CONDIRTY 0x1B
 /* $20-$2F  input */
 #define SYS_PAD 0x20 /* -> held-button bitmask (PAD_* below) */
 /* ABI 2. Non-blocking counterpart to SYS_GETC: returns SYS_ERR when nothing is
@@ -250,6 +259,7 @@ uint16_t sys_version(void);
 uint16_t sys_yield(void);
 uint16_t sys_notify(void);
 uint16_t sys_conrow_raw(uint16_t row);
+uint16_t sys_condirty(void); /* -> 0 or SYS_ERR; mask in SNOS_ARGS.p0/p1 */
 uint16_t sys_kbdpush(uint16_t c);
 #define sys_conrow(row, buf) (snos_set_ptr((const char *)(buf)), sys_conrow_raw(row))
 uint16_t sys_putc(uint16_t c);

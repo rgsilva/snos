@@ -49,6 +49,17 @@ static uint8_t shadow[RING][COLS];
 static uint8_t dirty[RING];
 static uint8_t top, row, col, vofs_dirty;
 
+/* A second dirty array, for the screen mirror (SYS_CONDIRTY). dirty[] cannot
+ * be shared: con_flush clears it the moment a row reaches VRAM, which says
+ * nothing about whether the mirror has seen the change — sharing it would
+ * race the flush and silently drop rows. snap[] is marked at the same
+ * shadow-writing choke points and cleared only by con_changes(), which is
+ * read-and-clear and therefore single-consumer. snap_top remembers the
+ * scroll position at the previous query; con_init seeds it with an
+ * impossible value so the first query reports everything. */
+static uint8_t snap[RING];
+static uint8_t snap_top;
+
 /* How many screen rows the scrolling text area gets. Drops to make room for the
  * keyboard panel, so text never scrolls underneath it. */
 static uint8_t text_rows = ROWS;
@@ -146,7 +157,12 @@ void con_init(void) {
     for (y = 0; y < RING; y++) {
         for (i = 0; i < COLS; i++) shadow[y][i] = ' ';
         dirty[y] = 0;
+        snap[y] = 0;
     }
+    /* An impossible top (the ring mask caps real ones at 31): the next
+     * con_changes() reports every row. This is also what repaints the mirror
+     * after SYS_GFX release, which lands here through con_gfx(0). */
+    snap_top = 0xFF;
     top = 0; row = 0; col = 0;
     set_vofs();
     vofs_dirty = 0;
@@ -162,6 +178,7 @@ static void newline(void) {
         uint8_t r = (uint8_t)((top + text_rows - 1) & (RING - 1));
         for (i = 0; i < COLS; i++) shadow[r][i] = ' ';
         dirty[r] = 1;
+        snap[r] = 1;
     }
     vofs_dirty = 1;
 }
@@ -185,6 +202,7 @@ void con_putc(int c) {
     r = (uint8_t)((top + row) & (RING - 1));
     shadow[r][col] = (uint8_t)c;
     dirty[r] = 1;
+    snap[r] = 1;
     if (++col >= COLS) newline();
 }
 
@@ -336,6 +354,7 @@ void con_putat(int r_, int c_, int ch) {
     r = (uint8_t)((top + r_) & (RING - 1));
     shadow[r][c_] = (uint8_t)ch;
     dirty[r] = 1;
+    snap[r] = 1;
 }
 
 int con_getat(int r_, int c_) {
@@ -358,6 +377,7 @@ void con_clear(void) {
     for (y = 0; y < RING; y++) {
         for (i = 0; i < COLS; i++) shadow[y][i] = ' ';
         dirty[y] = 1;
+        snap[y] = 1;
     }
     top = 0; row = 0; col = 0;
     caret_ring = -1;
@@ -483,6 +503,7 @@ void con_set_text_rows(int n) {
             uint8_t r = (uint8_t)((top + i) & (RING - 1));
             for (j = 0; j < COLS; j++) shadow[r][j] = ' ';
             dirty[r] = 1;
+            snap[r] = 1;
         }
     }
     text_rows = (uint8_t)n;
@@ -500,6 +521,7 @@ void con_caret(int on) {
     if (caret_ring >= 0) {
         shadow[caret_ring][caret_col] = ' ';
         dirty[caret_ring] = 1;
+        snap[caret_ring] = 1;
         caret_ring = -1;
     }
     if (on) {
@@ -507,6 +529,7 @@ void con_caret(int on) {
         caret_col = col;
         shadow[caret_ring][caret_col] = 0x80 | ' ';
         dirty[caret_ring] = 1;
+        snap[caret_ring] = 1;
     }
 }
 
@@ -576,8 +599,48 @@ int con_dirty_pending(void) {
 }
 
 void con_invalidate_all(void) {
+    /* VRAM repair only — the shadow did not change, so snap[] stays alone:
+     * a mirror reads the shadow, not VRAM, and has nothing to redraw. */
     int i;
     for (i = 0; i < RING; i++) dirty[i] = 1;
+}
+
+/* Which SCREEN rows changed since the previous call (SYS_CONDIRTY).
+ *
+ * The ring is deliberately not exposed: a mirror addresses rows the same way
+ * SYS_CONROW does, so the mask is rotated into screen order here. A scroll is
+ * the case that makes this non-obvious — it writes ONE ring row but moves the
+ * content of every screen row, so any change of `top` since the last query
+ * reports all rows. That is also the truth after 32 scrolls wrap `top` back
+ * to the same value: every revealed row was marked in snap[] on the way
+ * around, so nothing is missed either way.
+ *
+ * Runs in COP context, which M10 never preempts mid-handler, so the
+ * read-and-clear cannot lose a concurrent write. */
+void con_changes(uint16_t *lo, uint16_t *hi) {
+    int s;
+    uint16_t l = 0, h = 0, bit;
+    if (top != snap_top) {
+        for (s = 0; s < RING; s++) snap[s] = 0;
+        snap_top = top;
+        *lo = 0xFFFFu;
+        *hi = 0x0FFFu;
+        return;
+    }
+    bit = 1;
+    for (s = 0; s < 16; s++) {
+        uint8_t r = (uint8_t)((top + s) & (RING - 1));
+        if (snap[r]) { snap[r] = 0; l |= bit; }
+        bit <<= 1;
+    }
+    bit = 1;
+    for (s = 16; s < ROWS; s++) {
+        uint8_t r = (uint8_t)((top + s) & (RING - 1));
+        if (snap[r]) { snap[r] = 0; h |= bit; }
+        bit <<= 1;
+    }
+    *lo = l;
+    *hi = h;
 }
 
 /* Write one row of the PANEL tilemaps. Screen coordinates; the panel map is

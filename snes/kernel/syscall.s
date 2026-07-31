@@ -21,7 +21,7 @@
 
               .section code, root
               .public sys_exit, sys_version, sys_yield, sys_notify
-              .public sys_conrow_raw, sys_kbdpush
+              .public sys_conrow_raw, sys_condirty, sys_kbdpush
               .public sys_putc, sys_puts_raw, sys_getc, sys_cls
               .public sys_readline_raw, sys_putu, sys_puthex
               .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
@@ -45,6 +45,8 @@ sys_yield:      cop     #0x02
 sys_notify:     cop     #0x03
                 rtl
 sys_conrow_raw: cop     #0x1a
+                rtl
+sys_condirty:   cop     #0x1b
                 rtl
 sys_kbdpush:    cop     #0x23
                 rtl

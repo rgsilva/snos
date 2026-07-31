@@ -72,6 +72,12 @@ void con_gfx(int acquire);
  * spend the vblank on background work while this is set — see console.c. */
 int con_dirty_pending(void);
 
+/* Screen rows whose shadow changed since the previous call: *lo bits 0-15 =
+ * rows 0-15, *hi bits 0-11 = rows 16-27. Read-and-clear — ONE consumer
+ * (SYS_CONDIRTY, i.e. the screen mirror). A scroll or clear reports every
+ * row, because the content of every row genuinely moved. */
+void con_changes(uint16_t *lo, uint16_t *hi);
+
 #define CON_BOX_H 1
 #define CON_BOX_V 2
 #define CON_BOX_TL 3

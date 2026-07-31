@@ -374,6 +374,18 @@ uint16_t snos_cop_c(uint16_t sp) {
     return 0;
   }
 
+  case SYS_CONDIRTY: {
+    /* Same standing as SYS_CONROW: background-allowed, because the mirror is
+     * a background process by design. Read-and-clear is safe here — COP
+     * handlers are never preempted (M10 switches only outside syscalls). */
+    uint16_t lo, hi;
+    if (con_gfx_owned()) return SYS_ERR;
+    con_changes(&lo, &hi);
+    SNOS_ARGS.p0 = lo;
+    SNOS_ARGS.p1 = hi;
+    return 0;
+  }
+
   case SYS_GFX:
     if (!is_fg) return SYS_ERR; /* the PPU has one owner; see snos_cop_c top */
     if (a) {

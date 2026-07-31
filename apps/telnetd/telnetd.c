@@ -24,6 +24,14 @@
  * because they are just... different bytes in the shadow. The console never
  * learns that a terminal exists; it narrates its state and the far end draws.
  *
+ * SYS_CONDIRTY narrows the scan. The kernel tracks which rows changed for
+ * its own VRAM flush, so asking it beats re-reading 28 rows to discover 27
+ * did not change: a keystroke's echo is one row read instead of 28, an idle
+ * screen is none — cheap enough to poll every frame, which is what turns
+ * "up to 100 ms before the diff even starts" into "next frame". A scroll
+ * reports every row, because every row's content genuinely moved; the
+ * mirror diff still keeps the wire cost to the rows that differ.
+ *
  * -------------------------------------------------------------------- ANSI
  *
  * Every telnet client is a VT100 underneath. A changed row is
@@ -40,7 +48,10 @@
 
 #define ROWS 28
 #define COLS 64
-#define PAINT_EVERY 6u /* frames between diffs: ~10 Hz, far below link rate */
+/* Every frame. This was 6 (~10 Hz) when a pass meant reading all 28 rows;
+ * with SYS_CONDIRTY a pass on a quiet screen is one trap returning an empty
+ * mask, so there is nothing left to ration. */
+#define PAINT_EVERY 1u
 
 /* Telnet: IAC WILL ECHO + IAC WILL SUPPRESS-GO-AHEAD puts the client in
  * character-at-a-time mode. Without it, telnet line-buffers and the mirror
@@ -124,7 +135,7 @@ static void paint_row(uint16_t ch, uint16_t r, const uint8_t *src) {
 
 int main(void) {
   uint16_t port, ch, st;
-  uint16_t connected = 0, next_paint = 0, gfx_told = 0;
+  uint16_t connected = 0, next_paint = 0, gfx_told = 0, force_all = 0;
   int i, j;
 
   snos_getargs(args, sizeof args);
@@ -158,36 +169,59 @@ int main(void) {
          * already in the shadow as an inverse character, so a second blinking
          * block would just be a liar in a different place. */
         emit_str(ch, "\033[2J\033[?25l");
-        /* Force a full repaint by making the known state impossible. */
+        /* Force a full repaint by making the known state impossible. The
+         * kernel's change mask cannot help here — it says what changed since
+         * the LAST query, and this client has seen nothing at all. */
         for (i = 0; i < ROWS; i++)
           for (j = 0; j < COLS; j++) mirror[i][j] = 0xFF;
+        force_all = 1;
         next_paint = sys_frames();
       }
 
       /* ---- screen out ---- */
       if ((int16_t)(sys_frames() - next_paint) >= 0) {
-        uint16_t nrows = (uint16_t)(sys_screen() >> 8);
         next_paint = (uint16_t)(sys_frames() + PAINT_EVERY);
-        if (nrows > ROWS) nrows = ROWS;
-        for (i = 0; i < (int)nrows; i++) {
-          if (sys_conrow((uint16_t)i, row) == SYS_ERR) {
-            /* An application owns the PPU: there is no text to mirror, and a
-             * Mode 3 picture is not going down a telnet pipe. Say so once. */
-            if (!gfx_told) {
-              gfx_told = 1;
-              emit_str(ch, "\033[2J\033[1;1H[graphics on the real screen]");
-              for (j = 0; j < COLS; j++) mirror[0][j] = 0xFF;
-            }
-            break;
+        if (sys_condirty() == SYS_ERR) {
+          /* An application owns the PPU: there is no text to mirror, and a
+           * Mode 3 picture is not going down a telnet pipe. Say so once, and
+           * forget the whole mirror — the far screen no longer shows it. */
+          if (!gfx_told) {
+            gfx_told = 1;
+            emit_str(ch, "\033[2J\033[1;1H[graphics on the real screen]");
+            for (i = 0; i < ROWS; i++)
+              for (j = 0; j < COLS; j++) mirror[i][j] = 0xFF;
+            flush_out(ch);
           }
-          gfx_told = 0;
-          for (j = 0; j < COLS; j++)
-            if (mirror[i][j] != row[j]) break;
-          if (j == COLS) continue; /* unchanged */
-          paint_row(ch, (uint16_t)i, row);
-          for (j = 0; j < COLS; j++) mirror[i][j] = row[j];
+        } else {
+          uint16_t mlo = SNOS_ARGS.p0, mhi = SNOS_ARGS.p1, bit;
+          if (gfx_told || force_all) {
+            /* The far screen holds who-knows-what (the graphics banner, or a
+             * fresh client's nothing): check every row against the mirror.
+             * The query above still ran, so the kernel's mask is drained. */
+            mlo = 0xFFFFu;
+            mhi = 0x0FFFu;
+            gfx_told = 0;
+            force_all = 0;
+          }
+          if (mlo | mhi) {
+            uint16_t nrows = (uint16_t)(sys_screen() >> 8);
+            if (nrows > ROWS) nrows = ROWS;
+            bit = 1;
+            for (i = 0; i < (int)nrows; i++) {
+              uint16_t hit = (i < 16) ? (uint16_t)(mlo & bit)
+                                      : (uint16_t)(mhi & bit);
+              bit = (uint16_t)(i == 15 ? 1u : bit << 1);
+              if (!hit) continue;
+              if (sys_conrow((uint16_t)i, row) == SYS_ERR) break;
+              for (j = 0; j < COLS; j++)
+                if (mirror[i][j] != row[j]) break;
+              if (j == COLS) continue; /* changed back, or repainted alike */
+              paint_row(ch, (uint16_t)i, row);
+              for (j = 0; j < COLS; j++) mirror[i][j] = row[j];
+            }
+            flush_out(ch);
+          }
         }
-        flush_out(ch);
       }
 
       /* ---- keys in ---- */

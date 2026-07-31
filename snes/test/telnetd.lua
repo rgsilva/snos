@@ -197,6 +197,7 @@ end
 local frame, step, at = 0, 1, nil
 local claimed = false
 local mirror_during_fg = false
+local idle_mark, idle_grew = nil, nil
 
 local function send(cmd, settle)
   L.feed(cmd)
@@ -235,6 +236,23 @@ emu.addEventCallback(function()
     end
     push_ctrl(S2C_OPEN, string.char(gw.listen_ch, 200 & 0xFF, 0, 0))
     at = frame + 500          -- let the first full paint cross the link
+    step = 2.4
+    return
+  end
+  -- An IDLE screen must be SILENT. SYS_CONDIRTY is read-and-clear; if the
+  -- clear half breaks, telnetd re-sends unchanged rows forever and the only
+  -- symptom is wasted link -- invisible to every content assertion below.
+  -- Nothing types and nothing prints during this window, so the byte count
+  -- must not move at all.
+  if step == 2.4 then
+    idle_mark = #upstream()
+    at = frame + 240
+    step = 2.6
+    return
+  end
+  if step == 2.6 then
+    idle_grew = #upstream() - idle_mark
+    at = frame + 1
     step = 3
     return
   end
@@ -273,6 +291,11 @@ emu.addEventCallback(function()
   -- 3. and it all kept working under a foreground application
   r.check(mirror_during_fg,
           "the mirror stopped while a foreground app ran")
+  -- 4. a static screen costs nothing on the wire
+  r.check(idle_grew == 0,
+          "an idle screen sent " .. tostring(idle_grew) ..
+          " bytes - the change mask is not clearing, so unchanged rows " ..
+          "are being re-diffed and re-sent")
 
   r.finish()
 end, emu.eventType.endFrame)
