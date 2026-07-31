@@ -179,6 +179,22 @@ extern uint8_t net_checksum(const uint8_t *f, uint16_t n);
  * build if the new value does not fit the routine. */
 typedef char net_checksum_needs_16_byte_frames[(LINK_FRAME % 16) == 0 ? 1 : -1];
 
+/* kernel/netasm.s. One MVN: n bytes (n >= 1) out of bank $7E and into bank $7E
+ * or bank $7F, at ~7 cycles a byte.
+ *
+ * It exists because the two ring copies below were the receive path's whole
+ * cost. Measured on the vnc workload, ring_put ran for ~29,000 CPU cycles per
+ * 124-byte frame — half a frame's worth of CPU, inside NMI, for one frame's
+ * payload — and net_read cost the same again in the foreground. Not because a
+ * byte loop is slow but because `ring[ch][ring_head[ch]]` rebuilds a 24-bit
+ * address from a 2-D array and a volatile index for EVERY byte: ~230 cycles
+ * each, worse than the mailbox loop the same file already replaced.
+ *
+ * A ring span can wrap, so each caller does at most two of these, split at the
+ * end of the buffer. The destination bank restriction is checked in net_read;
+ * see netasm.s for why it cannot simply be taken from the pointer. */
+extern void ring_move(uint8_t __far *dst, const uint8_t *src, uint16_t n);
+
 void net_init(void) {
   int i, j;
   for (i = 0; i < NET_CHANNELS; i++) {
@@ -242,25 +258,63 @@ static uint16_t ring_free(int ch) {
 }
 
 /* NMI side. Returns 0 if it would not fit — the caller must then NOT ack the
- * frame, which is what turns a full ring into backpressure. */
+ * frame, which is what turns a full ring into backpressure.
+ *
+ * Both this and net_read() advance their index ONCE, after the block move,
+ * rather than per byte. That is not merely tidier: it is what makes the copy a
+ * block move at all, and it strengthens the single-writer contract at the top of
+ * this file, because the other side now never sees a half-filled span. */
 static int ring_put(int ch, const uint8_t *src, int n) {
-  int i;
+  uint16_t h, first;
   if ((int)ring_free(ch) < n) return 0;
-  for (i = 0; i < n; i++) {
-    ring[ch][ring_head[ch]] = src[i];
-    ring_head[ch] = (uint16_t)((ring_head[ch] + 1) & (NET_RING - 1));
-  }
+  if (n <= 0) return 1;               /* MVN would move 65536 for a count of 0 */
+  h = ring_head[ch];
+  /* The span may wrap, so it is up to two moves split at the end of the buffer.
+   * ring_free() has already guaranteed both halves fit. */
+  first = (uint16_t)(NET_RING - h);
+  if (first > (uint16_t)n) first = (uint16_t)n;
+  ring_move(&ring[ch][h], src, first);
+  if (first < (uint16_t)n)
+    ring_move(&ring[ch][0], src + first, (uint16_t)((uint16_t)n - first));
+  ring_head[ch] = (uint16_t)((h + (uint16_t)n) & (NET_RING - 1));
   return 1;
 }
 
 int net_read(int ch, uint8_t __far *dst, int max) {
-  int n = 0;
+  uint16_t t, avail, n, first;
   if (ch < 0 || ch >= NET_CHANNELS) return 0;
-  while (n < max && ring_tail[ch] != ring_head[ch]) {
-    dst[n++] = ring[ch][ring_tail[ch]];
-    ring_tail[ch] = (uint16_t)((ring_tail[ch] + 1) & (NET_RING - 1));
+  if (max <= 0) return 0;
+  t = ring_tail[ch];
+  /* Read the producer's index once. It may advance while we copy — NMI is the
+   * producer — but only forwards, and only into the space beyond `avail`, so a
+   * stale value is safe and a re-read would buy nothing. */
+  avail = (uint16_t)((ring_head[ch] - t) & (NET_RING - 1));
+  if (avail == 0) return 0;
+  n = ((uint16_t)max < avail) ? (uint16_t)max : avail;
+
+  /* MVN's destination bank is an instruction byte, so ring_move() can only
+   * reach the two banks netasm.s spells out: $7F for an application's arena and
+   * $7E for a kernel caller. An application is free to hand us a buffer on its
+   * stack, which is in bank $00 — that is not an error, it is just not a block
+   * move, so it keeps the byte loop below rather than being refused.
+   *
+   * Every application shipped today reads into a static, so that branch is not
+   * reachable from the tests. It was checked by forcing it — `if (0 && ...)` —
+   * and running test-net and test-vnc, which is 49152 pixels through the byte
+   * loop; do that again if you touch either half. */
+  if ((uint8_t)((uint32_t)dst >> 16) == 0x7Eu ||
+      (uint8_t)((uint32_t)dst >> 16) == 0x7Fu) {
+    first = (uint16_t)(NET_RING - t);
+    if (first > n) first = n;
+    ring_move(dst, &ring[ch][t], first);
+    if (first < n)
+      ring_move(dst + first, &ring[ch][0], (uint16_t)(n - first));
+  } else {
+    uint16_t i;
+    for (i = 0; i < n; i++) dst[i] = ring[ch][(uint16_t)((t + i) & (NET_RING - 1))];
   }
-  return n;
+  ring_tail[ch] = (uint16_t)((t + n) & (NET_RING - 1));
+  return (int)n;
 }
 
 int net_state(int ch) {
