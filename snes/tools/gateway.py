@@ -373,11 +373,15 @@ class Gateway:
             self.push(ch, body[i:i + 512], gen)
         self.push_ctrl(S2C_EOF, bytes([ch]), gen)
 
-    def drop(self, ch):
+    def drop(self, ch, gen=None):
         """Close a stream and tell the SNES, once. Both directions can discover
         the end independently — the socket erroring on send, the reader thread
         seeing EOF — and a channel closed twice would send a stray EOF that the
-        next connection on that channel would receive as its own."""
+        next connection on that channel would receive as its own.
+
+        The EOF carries the caller's generation like every other push: a pump
+        thread from a pre-reset session that dies AFTER the reset must not
+        inject an EOF into whatever the new session is doing with the channel."""
         sock = self.socks.pop(ch, None)
         if sock is None:
             return
@@ -385,8 +389,40 @@ class Gateway:
             sock.close()
         except OSError:
             pass
-        self.push_ctrl(S2C_EOF, bytes([ch]))
+        self.push_ctrl(S2C_EOF, bytes([ch]), gen)
         print(f"  ch{ch} closed")
+
+    def teardown(self):
+        """Everything a dead session owned, released: queued output, every
+        worker's claim on its channel, every live socket, every bound port.
+
+        Three callers, and every one of them used to leak: the F_SYN handler
+        reset the queue but left sockets and listeners alive, so a reused
+        channel number after a console reboot wrote the NEW session's bytes
+        into the OLD session's TCP connection; the link-restart path built a
+        fresh Gateway and orphaned the old accept threads, which kept the port
+        bound until the daemon was killed ('listen failed: address in use' on
+        the next run of the same app); and Ctrl-C closed nothing at all.
+        Closing the listener is also what breaks its accept loop — the thread
+        checks gen against the OBJECT it was born on, which is exactly why
+        orphaning the object could never stop it."""
+        with self.lock:
+            self.out.clear()
+            self.out_started = False
+        for ch in set(self.chgen) | set(self.socks) | set(self.listeners) | set(range(8)):
+            self.released(ch)
+        for sock in list(self.socks.values()):
+            try:
+                sock.close()
+            except OSError:
+                pass
+        self.socks.clear()
+        for srv in list(self.listeners.values()):
+            try:
+                srv.close()
+            except OSError:
+                pass
+        self.listeners.clear()
 
     def do_connect(self, ch, hostport, gen, cgen=None):
         """A plain TCP stream. The gateway still owns DNS and the socket, but
@@ -446,7 +482,7 @@ class Gateway:
                         return
         except OSError:
             pass
-        self.drop(ch)
+        self.drop(ch, gen)
 
     def do_listen(self, ch, port, gen, cgen=None):
         """Bind, then hand ONE connection at a time to the SNES on this channel.
@@ -509,7 +545,7 @@ class Gateway:
                 waited += 0.02
             if ch in self.socks:
                 print(f"  ch{ch} timed out waiting for the app to hang up")
-                self.drop(ch)
+                self.drop(ch, gen)
         try:
             srv.close()
         except OSError:
@@ -578,15 +614,34 @@ class Gateway:
                 else:
                     truncated = False
                 if resp.headers.get("Content-Encoding", "") == "gzip":
+                    # A truncated gzip stream cannot be decoded, and a decode
+                    # failure must not fall through to forwarding compressed
+                    # bytes as if they were the page — that was a bare
+                    # `except: pass`, and it delivered binary garbage as a 200
+                    # with no log line saying why.
+                    if truncated:
+                        print(f"  gzip body exceeded the cap; cannot decode a "
+                              f"truncated stream")
+                        self.push_ctrl(S2C_ERR, bytes([ch, 3]), gen)
+                        return
                     try:
                         body = gzip.decompress(body)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"  gzip decode failed: {e}")
+                        self.push_ctrl(S2C_ERR, bytes([ch, 3]), gen)
+                        return
         except urllib.error.HTTPError as e:
             status = e.code
             ctype = e.headers.get("Content-Type", "") if e.headers else ""
             body = e.read(MAX_BODY) or b""
             truncated = False
+            # Error pages are gzip-encoded like any other response; the old
+            # path never decoded them, so a 404's body printed as garbage.
+            if e.headers and e.headers.get("Content-Encoding", "") == "gzip":
+                try:
+                    body = gzip.decompress(body)
+                except Exception:
+                    body = b""
         except Exception as e:
             print(f"  fetch failed: {e}")
             self.push_ctrl(S2C_ERR, bytes([ch, 1]), gen)
@@ -814,8 +869,10 @@ class Gateway:
                 self.rx_next = f[SEQ]
                 with self.lock:
                     self.gen += 1
-                    self.out.clear()
-                    self.out_started = False
+                # Not just the queue: the sockets those channels named died
+                # with the console's session, and a reused channel number must
+                # never reach an old connection. See teardown().
+                self.teardown()
                 self.cstate, self.ctype, self.cbuf = 0, 0, bytearray()
                 print("gateway: SNES restarted, session reset")
         else:
@@ -878,6 +935,11 @@ def main():
                 if os.path.getsize(UP) < up_off:
                     print("gateway: link restarted, resetting")
                     up_off = 0
+                    # Tear the old session down BEFORE abandoning the object:
+                    # its accept threads test gen against the object they were
+                    # born on, so replacing gw alone left them running with
+                    # the port still bound.
+                    gw.teardown()
                     gw = Gateway()
                     down.close()
                     down = open(DOWN, "ab", buffering=0)
@@ -907,6 +969,9 @@ def main():
             else:
                 time.sleep(0.004)       # ~1/4 of a video frame
     except KeyboardInterrupt:
+        # Daemon threads die with the process, but sockets and bound ports do
+        # not deserve to be left to the OS's timing.
+        gw.teardown()
         print("\ngateway: stopped")
 
 
