@@ -55,6 +55,12 @@
  * image through SYS_GETC_F would be 43000 traps; and Mode 3 tile data for a
  * full screen is 57 KB of the 64 KB of VRAM, so the console's font and tilemaps
  * cannot coexist with it and something has to arbitrate. */
+/* Version 6 added SYS_FS_FREE and the image flag on SYS_NET_STATE (the gateway
+ * converts from Content-Type; the separate force-convert call is retired).
+ * Version 7 added the stream calls: CONNECT, WRITE, WSPACE, LISTEN, HANGUP —
+ * what a server or an IRC client needs. Version 8 was the browser calls,
+ * retired with the web app; the numbers stay reserved. Version 9 is M10:
+ * SYS_NOTIFY, and per-process file handles under the same fs syscalls. */
 #define SNOS_ABI_VERSION 9
 
 /* ----------------------------------------------------------- call numbers */
@@ -107,7 +113,9 @@
  * keys), so a menu or a file picker cannot be navigated until it is out of the
  * way. A = 0 hide, 1 show, anything else queries. -> 1 if visible. */
 #define SYS_OSK 0x22
-/* $30-$3F  files. One file open at a time — enough for SAVE and LOAD. */
+/* $30-$3F  files. One open file PER PROCESS since M10 (ABI 9), with a single
+ * system-wide WRITE handle — the bump allocator commits size-on-close through
+ * one cursor, so a second simultaneous writer gets SYS_ERR. */
 #define SYS_OPEN 0x30   /* p0/p1 = name, A = 0 read / 1 write -> 0 or SYS_ERR */
 #define SYS_GETC_F 0x31 /* -> byte, or SYS_ERR at end of file */
 #define SYS_PUTC_F 0x32 /* A = byte -> 0 or SYS_ERR */

@@ -7,7 +7,7 @@
 ;;
 ;;   $0000-$00FF   256 B   kernel direct page
 ;;   $0100-$0BFF  2816 B   kernel stack
-;;   $0C00-$18FF  3328 B   APP stack        <- deliberately NOT described below,
+;;   $0C00-$19FF  3584 B   two process slots (M10)        <- deliberately NOT described below,
 ;;   $1900-$19FF   256 B   APP direct page  <- so the linker cannot squat on it
 ;;   $1A00-$1A3F    64 B   SYSCALL PARAMETER BLOCK (fixed, part of the ABI)
 ;;   $1A40-$1ABF   128 B   LAUNCH ARGUMENT (fixed, part of the ABI)
@@ -18,7 +18,7 @@
 ;;
 ;; The app region is reserved by omission: no (memory ...) form covers
 ;; $0C00-$19FF, so ln65816 physically cannot place kernel data there.  M3 hands
-;; those addresses to apps; M10 carves them into 512 B per-process slots.
+;; those addresses to apps; M10 carved this into two slots of 1536 B stack + 256 B DP each.
 ;;
 ;; WHY INTERRUPTS HAVE THEIR OWN DIRECT PAGE
 ;; Calypsi's generated C code keeps working values in direct-page "pseudo
@@ -55,7 +55,10 @@
             (type RAM)
             (section stack))
 
-    ;; $0C00-$19FF is the app's (stack + direct page). Reserved by omission.
+    ;; $0C00-$19FF is the process slots' (stacks + direct pages): 2 x (1536 B
+    ;; stack + 256 B DP), carved by M10 step 3 from measured high-water marks
+    ;; (worst app: 1,123 B). See SNOS_PSTACK_*/SNOS_PDP in kernel/snos.h.
+    ;; Reserved by omission.
 
     ;; $1A00-$1A3F is the syscall parameter block. It is at a FIXED address
     ;; because apps are linked separately from the kernel and cannot be told
@@ -89,7 +92,7 @@
             (section heap zfar far huge))
 
     ;; WRAM bank $7F: the app arena. Every app links its bss/heap here, at the
-    ;; same addresses, because only one app runs at a time (PLAN.md §1).
+    ;; same addresses, at its DECLARED SLOT since M10 step 4 (APP_ARENA_*; two apps co-run iff their slots are disjoint) (PLAN.md §1).
     ;; The kernel does not allocate from it.
     (memory AppArena
             (address (#x7f0000 . #x7fffff))

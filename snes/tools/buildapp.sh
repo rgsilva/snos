@@ -23,6 +23,18 @@ MINABI=${5:-1}
 ARENA_LO=${6:-7f0000}
 ARENA_HI=${7:-7fffff}
 
+# Fail loudly on a malformed declaration. Silence here was dangerous three
+# ways: a one-word APP_ARENA_x fell back to 7fffff for HI; an inverted range
+# made the header's page count 0, which the kernel reads as "claims all
+# 64 KB"; a non-page-aligned bound truncated in the header while the linker
+# enforced exact bytes, so the disjointness check and the link disagreed.
+case "$ARENA_LO" in 7f??00) ;; *) echo "buildapp: $NAME ARENA_LO '$ARENA_LO' must be 7fXX00" >&2; exit 1;; esac
+case "$ARENA_HI" in 7f??ff) ;; *) echo "buildapp: $NAME ARENA_HI '$ARENA_HI' must be 7fXXff" >&2; exit 1;; esac
+if [ $((0x$ARENA_HI)) -le $((0x$ARENA_LO)) ]; then
+    echo "buildapp: $NAME arena range inverted ($ARENA_LO..$ARENA_HI)" >&2
+    exit 1
+fi
+
 ANEAR_LO=$ARENA_LO
 ANEAR_HI=$(printf '%06x' $((0x$ARENA_LO + 0xFF)))
 AFAR_LO=$(printf '%06x' $((0x$ARENA_LO + 0x100)))

@@ -62,7 +62,7 @@ months. Optimize for app reuse, not kernel elegance.
 | Syscall trap | **`COP #n`**, n = `$00–$7F` | Nintendo's own SFX-DOS (1991) used exactly this (`cop 15h` init, `cop 21h` load). Vector `$00:FFE4` is unclaimed on SNES; 2 bytes at the call site vs 4 for `JSL`; ~15 cycles round trip; correctly emulated in bsnes/snes9x/Mesen. `$80–$FF` reserved by WDC — don't use. |
 | Debugger trap | **`BRK`** (`$00:FFE6`), never `COP` | Keeps the debugger out of syscall signature space. Mesen's break-on-`WDM` (`$42`) is a third, emulator-only channel. |
 | App binding | **Static, build-time. One app = N contiguous HiROM banks.** | No mapper on a stock cart ⇒ no remap, no reset trick. Relocation is unnecessary because ROM is already executable in place. |
-| App RAM | **Every app links to the same arena** (`$7F0000–$7FFFFF`) | Only one app runs at a time. Like DOS `.COM` at a fixed org. Per-app `linker.scm` differs *only* in ROM base ⇒ a Makefile template parameterised by bank number. |
+| App RAM | ~~Every app links to the same arena~~ **M10 step 4: every app links to its DECLARED arena slot** (`APP_ARENA_*`) | Two apps co-run iff their slots are disjoint; refusal is at spawn, by name. Like DOS `.COM` at a fixed org. Per-app `linker.scm` differs *only* in ROM base ⇒ a Makefile template parameterised by bank number. |
 | Exit | **`COP #0`** (exit code in A); kernel restores its saved `S` | Works from arbitrary call depth, which `RTL` cannot. `RTL` from the entry point also lands in a kernel trampoline, so trivial apps can use either. |
 | Kill switch | **Kernel NMI handler force-exits on START+SELECT held ~1 s** | Answers "how do I get out of BASIC" *generally*, for every app including buggy ones. Non-negotiable — it's the only thing standing between a hung app and a power cycle. |
 | Interrupts | **Kernel owns NMI unconditionally.** Apps hook via a RAM vector table, never by writing `$00:FFEA` | Vectors are fetched from bank `$00` = ROM, so they're baked at build time; indirection through RAM is how BS-X and sd2snes both do it. Kernel-owned NMI is *also* what makes background networking possible without cooperative yielding (§5). |
@@ -106,14 +106,15 @@ the test mailbox also moved out of bank $00 entirely, to `$7EF000`, see `kernel/
 |---|---|---|
 | `$0000–$00FF` | 256 B | Kernel direct page (Calypsi `_Dp` pseudo-registers) |
 | `$0100–$0BFF` | 2.75 K | Kernel stack |
-| `$0C00–$18FF` | 3.25 K | App stack |
-| `$1900–$19FF` | 256 B | App direct page |
+| `$0C00–$11FF` | 1.5 K | Process slot 0 stack (M10; measured worst case 1,123 B) |
+| `$1200–$17FF` | 1.5 K | Process slot 1 stack (the single-app path) |
+| `$1800–$18FF` | 256 B | Slot 0 direct page |
+| `$1900–$19FF` | 256 B | Slot 1 direct page |
 | `$1A00–$1A3F` | 64 B | Syscall parameter block + exec state (`snos_abi.h`) |
 | `$1B00–$1BFF` | 256 B | COP/BRK handler direct page |
 | `$1C00–$1CFF` | 256 B | NMI handler direct page |
 
-At M10 the app DP+stack region gets carved into per-process slots; redo that arithmetic
-against the table above, not the original plan's.
+M10 carved exactly this (step 3, measured slot sizes); the table above IS the carving.
 
 ### Everything else
 
@@ -153,11 +154,12 @@ trivial) and skips ahead by `bank_count`.
 | `$0C` | 16 | Name, ASCII, NUL-padded |
 | `$1C` | 1 | SRAM quota, in 8 K blocks (0 = none) |
 | `$1D` | 1 | Flags: wants-NMI-hook, wants-network, wants-raw-input |
-| `$1E` | 2 | Header checksum |
+| `$1E` | 1 | Arena start page (M10: data at `$7F:page*256`) |
+| `$1F` | 1 | Arena page count (0 = 256; was the never-used checksum) |
 
 ### Exec contract
 
-1. Kernel saves `S`, sets up app DP (`$1900`) and app `S` (`$18FF`), sets `DB` = `$7F` (arena).
+1. Kernel saves `S`, sets up app DP (`$1900`) and app `S` (`$17FF`, slot 1), sets `DB` = `$7F` (arena).
 2. `JML` to `(bank, entry)`.
 3. App runs. Its `DB`/`PB` are its own bank ⇒ **apps are bank-position-independent for free**,
    as long as they use `JMP`/`JSR` (bank-relative) internally and never `JSL` to themselves.
@@ -318,8 +320,9 @@ runs in the foreground. **Status: the machinery is proven** — test/bg.lua has 
 netecho answering over the link WHILE a foreground app runs, the by-name arena refusal,
 kill+reap with the gateway seeing the close, and fg + keyboard-break handback. The literal
 irc+edit pairing works by construction (disjoint regions A and B; irc is poll-driven and
-muted-safe) and awaits a live session; the "flashing notification" is the one unbuilt piece —
-it needs a kernel-owned status cell no foreground app can accidentally own.
+muted-safe) and awaits a live session; and the "flashing notification" shipped
+as SYS_NOTIFY + the kernel-owned attention cell (`c192c7a`): irc raises it on PMs and
+word-bounded nick mentions, netecho on connections, test/bg.lua asserts it end to end.
 
 ### M11 — Real TCP/IP: the SNES gets an address
 Today the gateway *is* the network — it holds the sockets and the SNES holds a byte stream, so
@@ -405,7 +408,7 @@ a stale to-do list would only argue with those measurements.)*
   echo drain (it cancels mid-send, deliberately), edit/basic digit loops (different sinks), the
   file-picker UI and the vnc/view PPU boilerplate (behavioural; still parked). Any future shared
   code must obey the no-initialised-writable-statics rule that bit `basic`'s RND.
-- **`netbridge.lua` still has zero test coverage** — `make test` speaks the mailbox directly. The
+- ~~`netbridge.lua` still has zero test coverage~~ — **done (`795399d`)**: `test/host/bridge_test.py` covers exactly this shape and runs first in `make test`. Original text: — `make test` speaks the mailbox directly. The
   shape of the missing test: a host-side pytest driving `gateway.py` against a scripted peer that
   mimics the bridge's *file* discipline (truncate-at-start, frame-boundary joins, shrink-detect
   restart, newest-frame handover), asserting a HELLO round trip survives both a gateway restart

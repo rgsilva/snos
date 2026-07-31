@@ -26,6 +26,15 @@ def main(argv) -> None:
             raise SystemExit(f"unknown arg {argv[i]}")
 
     data = bytearray(open(src, "rb").read())
+    # Overlap check: blobs are pasted in argv order, and a grown romfs (or a
+    # multi-bank app) would silently overwrite its neighbour. Loud beats
+    # subtle here -- this is the last step before the ROM exists.
+    spans = sorted((off, off + len(b)) for off, b in blobs)
+    for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+        if a1 > b0:
+            raise SystemExit(
+                f"raw2sfc: blob overlap: [{a0:#x},{a1:#x}) collides with "
+                f"[{b0:#x},{b1:#x}) -- check the Makefile's APP_AT/ROMFS_AT")
     for off, blob in blobs:
         end = off + len(blob)
         if end > len(data):

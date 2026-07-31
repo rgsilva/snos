@@ -29,7 +29,7 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M7 — Real hardware | |
 | M8 — IRC client (`irc`, windows/tabs/user list) | ✅ |
 | VNC — `vnc`, a Super Nintendo as a live VNC thin client | ✅ |
-| M10 — Preemptive multitasking | |
+| M10 — Preemptive multitasking (`run &`, `jobs`, `kill`, `fg`, notify) | ✅ |
 
 (M9 was a browser; it shipped, was superseded by `vnc` — a real browser on the
 far side of a VNC session beats a screenshot pipeline — and was deleted.)

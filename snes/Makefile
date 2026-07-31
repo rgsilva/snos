@@ -90,8 +90,10 @@ $(BUILD)/fontvram.c: $(K)/font8x8_basic.h tools/mkfont.py | $(BUILD)
 $(BUILD)/fontvram.o: $(BUILD)/fontvram.c
 	$(CC) -o $@ $< $(CFLAGS)
 
-$(BUILD)/snos.raw: $(KERNEL_O)
-	$(LN) -o $@ $(LNFLAGS) --list-file=$(BUILD)/snos.map $^
+# linker.scm IS the kernel memory map; editing it without this prerequisite
+# shipped a stale ROM silently -- the same bug class KERNEL_H exists to stop.
+$(BUILD)/snos.raw: $(KERNEL_O) calypsi/linker.scm
+	$(LN) -o $@ $(LNFLAGS) --list-file=$(BUILD)/snos.map $(KERNEL_O)
 
 # ---------------------------------------------------------------- applications
 # Each app is a separate link into its own ROM bank, then dropped into the

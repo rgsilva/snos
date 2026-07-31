@@ -42,7 +42,10 @@
 #define SNOS_ASTACK_LO SNOS_PSTACK_LO(1)  /* $1200 */
 #define SNOS_ASTACK_HI SNOS_PSTACK_TOP(1) /* $17FF */
 #define SNOS_ADP_BASE SNOS_PDP(1)         /* $1900 */
-#define SNOS_NEAR_BASE 0x1A00u /* kernel near data           1536 B */
+/* $1A00-$1FFF: syscall parameter block ($1A00), exec+scheduler state
+ * ($1A10-$1A23), trap DPs ($1B00/$1C00), kernel near data ($1D00-$1FFF).
+ * (The old SNOS_NEAR_BASE macro mislabelled this and was referenced
+ * nowhere.) */
 
 /* Bank $00 is mirrored from WRAM $7E0000, so the kernel can reach the same
  * bytes as far pointers without needing DB games. Used by the stack painter. */
