@@ -174,16 +174,10 @@
  * hanging up with bytes unsent would truncate what the client receives. */
 #define SYS_NET_HANGUP 0x6B
 
-/* ABI 8. A browser the gateway holds open, driven a window at a time. The
- * console cannot lay out HTML — 735 KB of Wikipedia against a 64 KB arena is
- * not a tuning problem — but it is good at showing a bitmap, so the far side
- * renders and this drives it. The reply is ordinary image data. */
-#define SYS_WEB_OPEN 0x6C /* p0/p1 = URL -> channel, or SYS_ERR */
-#define SYS_WEB_OP 0x6D   /* A = op, p0 = ch, p1 = a, p2 = b -> 0 or SYS_ERR */
-#define WEB_OP_SCROLL 1   /* a = signed screens */
-#define WEB_OP_CLICK 2    /* a = x, b = y, in SNES pixels */
-#define WEB_OP_BACK 3
-#define WEB_OP_FORWARD 4
+/* $6C/$6D were ABI 8's browser calls (SYS_WEB_OPEN / SYS_WEB_OP), retired
+ * when `web` was deleted — vnc superseded it. The numbers stay reserved: an
+ * old binary trapping into them must fail as an unknown syscall, not alias
+ * onto whatever gets defined next. */
 /* $70-$7F  debug */
 #define SYS_TRACE 0x70 /* p0/p1 = string -> the test mailbox */
 
@@ -265,12 +259,6 @@ uint16_t sys_net_write_raw(uint16_t len);
 uint16_t sys_net_wspace(uint16_t ch);
 uint16_t sys_net_listen(uint16_t port);
 uint16_t sys_net_hangup(uint16_t ch);
-uint16_t sys_web_open_raw(void);
-uint16_t sys_web_op(uint16_t op);
-#define sys_web_open(u) (snos_set_ptr(u), sys_web_open_raw())
-#define sys_web(ch, op, a, b) \
-  (SNOS_ARGS.p0 = (ch), SNOS_ARGS.p1 = (a), SNOS_ARGS.p2 = (b), sys_web_op(op))
-
 /* Wrappers, so callers do not each re-do the pointer marshalling. */
 #define sys_net_connect(hp) (snos_set_ptr(hp), sys_net_connect_raw())
 #define sys_net_write(ch, buf, len) \

@@ -32,11 +32,7 @@ import signal
 import socket
 import struct
 
-import browser
-import subprocess
-import tempfile
 import traceback
-import sys
 import threading
 import time
 import urllib.error
@@ -54,10 +50,9 @@ CH_CTRL, CH_PAD = 0, 0xFF
 C2S_FETCH, C2S_CLOSE, C2S_IMAGE, C2S_HELLO = 0x01, 0x02, 0x03, 0x04
 C2S_CONNECT = 0x07
 C2S_LISTEN, C2S_HANGUP = 0x08, 0x09
-C2S_WEB = 0x0A
-
-# `web` operations, in the first payload byte after the channel.
-WEB_OPEN, WEB_SCROLL, WEB_CLICK, WEB_BACK, WEB_FORWARD = 0, 1, 2, 3, 4
+# 0x0A was C2S_WEB, retired with the `web` app (vnc superseded it); do not
+# reuse the code — an old ROM against a new gateway must fail loudly, not
+# alias onto something else.
 
 # Servers bind on every interface deliberately: the point is a SNES serving a
 # page to someone else's phone at a conference. That IS an exposure decision —
@@ -133,9 +128,9 @@ def to_img(data, out_w=None, out_h=None):
     else:
         im = im.convert("RGB")
 
-    # `web` asks for a shorter window than a photograph gets: a full-screen
-    # 8bpp image leaves no 16 KB-aligned home for the cursor's sprite tiles, so
-    # the browser gives up 32 scanlines to get a cursor. See browser.py.
+    # Callers may ask for a smaller window than a photograph gets; the
+    # dimensions stay parameters even though every current caller uses the
+    # full screen.
     tw = out_w or SCREEN_W
     th = out_h or SCREEN_H
     sw, sh = im.size
@@ -203,122 +198,6 @@ def local_ip():
         s.close()
 
 
-# ---------------------------------------------------------------- rendering
-#
-# `render:URL` hands the SNES a PICTURE of a web page instead of its bytes.
-#
-# The console cannot lay out HTML — 735 KB of Wikipedia against a 64 KB app
-# arena is not a tuning problem — but it is genuinely good at showing a 256
-# colour bitmap, and the image path to do that already exists for photographs.
-# So the browser is the same trick as TLS and JPEG: the far side does the part
-# the 65816 cannot, and the SNES does the part it is good at.
-#
-# 512x448 and not 256x224. Rendering at the console's own resolution produces a
-# grey smear where body text should be; rendering at double and letting to_img
-# downscale 2:1 keeps the greyscale antialiasing that makes 4-pixel-wide glyphs
-# readable. 512x448 is exactly twice 256x224, so the Lanczos step is a clean 2:1
-# with no aspect correction. This is supersampling, and it is the difference
-# between "you can tell those are words" and "you can read them".
-RENDER_W, RENDER_H = 512, 448
-RENDER_TIMEOUT = 30
-
-CHROME_PATHS = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-]
-
-
-def find_chrome():
-    """Chrome is OPTIONAL. Everything else in this daemon runs on the standard
-    library plus Pillow, and a headless browser is a different weight class of
-    dependency — so its absence has to be a clean message rather than a
-    traceback in a thread nobody is watching."""
-    env = os.environ.get("SNOS_CHROME")
-    if env:
-        return env if os.path.exists(env) else None
-    for path in CHROME_PATHS:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-def render_page(url, width=RENDER_W, height=RENDER_H):
-    """Screenshot a page. Returns PNG bytes, or raises with a usable message.
-
-    One invocation per page, no persistent session: this renders the current
-    window and nothing else, which is all the SNES can show at once anyway.
-    Following a link means rendering again — the page does not have to be held
-    open between requests, and not holding it open is what keeps this a
-    subprocess call rather than a browser-automation dependency.
-
-    Two things learned the hard way, both worth keeping:
-
-    A throwaway --user-data-dir is not optional. Without it Chrome uses the
-    real profile, which means rendering pages with the user's live cookies —
-    their logged-in session sent to whatever the SNES asked for — and fighting
-    their own running browser for the profile lock.
-
-    But with it, Chrome writes the PNG and then NEVER EXITS. So this waits for
-    the file rather than for the process, and kills the process itself. Waiting
-    on exit hangs forever; that is what it did the first time."""
-    chrome = find_chrome()
-    if chrome is None:
-        raise RuntimeError("no renderer configured (set SNOS_CHROME to a "
-                           "Chrome or Chromium binary)")
-    if "://" not in url:
-        url = "https://" + url
-
-    with tempfile.TemporaryDirectory() as tmp:
-        shot = os.path.join(tmp, "page.png")
-        cmd = [
-            chrome, "--headless", "--no-sandbox", "--disable-gpu",
-            f"--screenshot={shot}",
-            f"--window-size={width},{height}",
-            "--hide-scrollbars",
-            "--no-first-run", "--no-default-browser-check",
-            f"--user-data-dir={os.path.join(tmp, 'profile')}",
-            url,
-        ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE)
-        deadline = time.time() + RENDER_TIMEOUT
-        size = -1
-        try:
-            while time.time() < deadline:
-                if os.path.exists(shot):
-                    now = os.path.getsize(shot)
-                    # Stable across two polls means the write finished. Reading
-                    # the instant it appears can catch a partial PNG.
-                    if now > 0 and now == size:
-                        break
-                    size = now
-                elif proc.poll() is not None:
-                    break               # died without producing anything
-                time.sleep(0.1)
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-
-        if not os.path.exists(shot) or os.path.getsize(shot) == 0:
-            err = (proc.stderr.read() or b"").decode("utf-8", "replace")
-            # Chrome logs two harmless task_policy_set complaints on macOS every
-            # single run; they are not the failure and must not be reported as
-            # one.
-            lines = [l for l in err.splitlines()
-                     if l.strip() and "task_policy_set" not in l]
-            raise RuntimeError("render produced no image: "
-                               + (lines[-1] if lines else "timed out"))
-        with open(shot, "rb") as f:
-            return f.read()
-
-
 class Gateway:
     def __init__(self):
         self.tx_seq = 0
@@ -348,19 +227,17 @@ class Gateway:
         # carry bytes both ways until one side hangs up.
         self.socks = {}
         self.listeners = {}      # channel -> listening socket
-        self.pages = {}          # channel -> browser.Session
-        # `pages` is written by the frame loop (a close arrives) and by every
-        # web worker (a page opens), so it needs a lock of its own — separate
-        # from the send queue's, because a thread holding one must never be
-        # waiting on the other.
+        # Guards chgen; separate from the send queue's lock because a thread
+        # holding one must never be waiting on the other.
         self.plock = threading.Lock()
         # Per channel, bumped every time the SNES closes one. `gen` is the same
         # idea for the whole session; this is the same idea for one channel, and
         # it is needed because forgetting what is QUEUED does not stop a worker
-        # that has not queued anything yet. A `web` cancelled while Chrome was
-        # still starting up went on to register its page and push 49 KB into a
-        # channel the console had already given back. Captured when the request
-        # is accepted, checked before anything is claimed or sent.
+        # that has not queued anything yet: a request cancelled while its
+        # worker was still starting up would otherwise claim the channel and
+        # push a whole body into one the console had already given back.
+        # Captured when the request is accepted, checked before anything is
+        # claimed or sent.
         self.chgen = {}
         self.inflight = None
         self.out = []            # [ch, bytearray] queued for the SNES
@@ -418,14 +295,15 @@ class Gateway:
         """Throw away everything still queued for a channel the SNES has
         finished with.
 
-        Without this, a `web` window keeps being transmitted long after the
+        Without this, a dead transfer keeps being transmitted long after the
         application that asked for it has gone: 49 KB, eighty seconds of a
-        615 B/s link, spent on a page nobody will ever see. Three separate
-        symptoms came out of that one omission, and channel REUSE is why —
+        615 B/s link, spent on a body nobody will ever see. Three separate
+        symptoms came out of that one omission (in the era of the `web` app,
+        which is how it was found), and channel REUSE is why —
 
-          the next `web` is handed channel 1 again and receives the tail of the
-          dead page, S2C_OPEN and all, before its own, so two images end up
-          interleaved in one cache file and the picture is garbage;
+          the next request is handed channel 1 again and receives the tail of
+          the dead body, S2C_OPEN and all, before its own, so two payloads end
+          up interleaved in one cache file and the result is garbage;
 
           a second page queues behind the first one's corpse and the app's own
           timeout fires before a byte of it arrives;
@@ -494,20 +372,6 @@ class Gateway:
         for i in range(0, len(body), 512):
             self.push(ch, body[i:i + 512], gen)
         self.push_ctrl(S2C_EOF, bytes([ch]), gen)
-
-    def retire(self, page):
-        """Take a browser session down without stalling the caller.
-
-        close() waits for whatever CDP call is in flight — that is the whole
-        point of the session lock — and the C2S_CLOSE that asks for it arrives
-        on the frame loop, which cannot block for thirty seconds without
-        stopping the link dead. So the session is marked dead at once, which is
-        what an in-flight operation checks, and the waiting happens on a thread
-        nobody is depending on."""
-        if page is None:
-            return
-        page.dead = True
-        threading.Thread(target=page.close, daemon=True).start()
 
     def drop(self, ch):
         """Close a stream and tell the SNES, once. Both directions can discover
@@ -583,115 +447,6 @@ class Gateway:
         except OSError:
             pass
         self.drop(ch)
-
-    def do_web(self, ch, op, arg, gen, cgen=None):
-        """Drive a held-open browser page and send back a picture of it.
-
-        Every operation answers with a full window, because the console has no
-        way to apply a partial update to a bitmap it does not model — it has the
-        pixels and nothing else. That is what makes v2's tile cache the whole
-        performance story: a window is ~49 KB today and most of it is tiles the
-        SNES was already holding.
-
-        Runs on its own thread, and the page it drives can be taken away from it
-        at any moment by a C2S_CLOSE on the frame loop. So every call into the
-        browser happens under the session's own lock, and the session is checked
-        for having been retired both before the work and before the answer is
-        queued. The alternative is what this used to do: close the websocket
-        under a screenshot in progress and lose the thread to
-        `OSError: [Errno 9] Bad file descriptor`."""
-        page = None
-        try:
-            if op == WEB_OPEN:
-                with self.plock:
-                    old = self.pages.pop(ch, None)
-                self.retire(old)
-                url = arg.decode("ascii", "replace")
-                print(f"WEB ch{ch} open {url}")
-                fresh = browser.Session()
-                # Starting Chrome takes a second or two, and a `web` abandoned
-                # in that window closed a channel this had not claimed yet: the
-                # close found no page to retire, and this then registered one
-                # and pushed a whole window into a channel the console had
-                # given back. Claim and check together, under the lock.
-                with self.plock:
-                    ours = self.chgen.get(ch, 0) == cgen if cgen is not None \
-                        else True
-                    if ours:
-                        self.pages[ch] = fresh
-                if not ours:
-                    print(f"  ch{ch} was closed while the browser was starting")
-                    self.retire(fresh)
-                    return
-                page = fresh
-            else:
-                with self.plock:
-                    page = self.pages.get(ch)
-                if page is None:
-                    print(f"  ch{ch} has no page open")
-                    self.push_ctrl(S2C_ERR, bytes([ch, 5]), gen)
-                    return
-
-            with page.busy:
-                if page.dead:
-                    print(f"  ch{ch} was closed before it could be driven")
-                    return
-                if op == WEB_OPEN:
-                    page.navigate(url)
-                elif op == WEB_SCROLL:
-                    # One signed byte of screens: the console cannot afford a
-                    # finer unit when every move is a fresh image.
-                    d = arg[0] if arg else 1
-                    if d > 127:
-                        d -= 256
-                    print(f"WEB ch{ch} scroll {d:+d}")
-                    page.scroll(d)
-                elif op == WEB_CLICK:
-                    x, y = (arg[0], arg[1]) if len(arg) >= 2 else (0, 0)
-                    href = page.click(x, y)
-                    print(f"WEB ch{ch} click ({x},{y}) -> {href or 'nothing there'}")
-                elif op == WEB_BACK:
-                    print(f"WEB ch{ch} back: {page.back()}")
-                elif op == WEB_FORWARD:
-                    print(f"WEB ch{ch} forward: {page.forward()}")
-                else:
-                    self.push_ctrl(S2C_ERR, bytes([ch, 6]), gen)
-                    return
-                if page.dead:
-                    print(f"  ch{ch} was closed while it was working")
-                    return
-                png = page.shot()
-
-            # Outside the lock: converting 33 KB of PNG to tiles is the one
-            # expensive thing here that does not touch the browser, and holding
-            # a session hostage during it would make every close wait for it.
-            body = to_img(png, browser.SNES_W, browser.SNES_H)
-            print(f"  -> {len(png)} B png, {len(body)} B of tiles")
-            with self.plock:
-                gone = (self.pages.get(ch) is not page
-                        or (cgen is not None and self.chgen.get(ch, 0) != cgen))
-            if gone:
-                # Closed, or already reopened onto something else, while this
-                # window was being built. Queueing 49 KB now would be queueing
-                # it for whoever holds the channel next.
-                print(f"  ch{ch} no longer wants this window")
-                return
-            self.reply(ch, 200, 1, body, gen, cgen)
-        except Exception as e:
-            print(f"  web failed: {type(e).__name__}: {e}")
-            traceback.print_exc()
-            with self.plock:
-                mine = (page is None or self.pages.get(ch) is page) and (
-                    cgen is None or self.chgen.get(ch, 0) == cgen)
-                orphan = self.pages.pop(ch, None) if mine else None
-            self.retire(orphan)
-            if mine:
-                self.push_ctrl(S2C_ERR, bytes([ch, 4]), gen)
-            else:
-                # The channel moved on while this was failing. Reporting the
-                # error now would abort whatever holds it instead — an error
-                # from a dead request killing a live one is worse than silence.
-                print(f"  ch{ch} has moved on; the failure is not reported")
 
     def do_listen(self, ch, port, gen, cgen=None):
         """Bind, then hand ONE connection at a time to the SNES on this channel.
@@ -796,34 +551,6 @@ class Gateway:
             print(f"  [{time.time() - t0:5.1f}s] {what}")
 
         mark("thread started")
-
-        # A rendered page never touches the HTTP path below: Chrome does the
-        # fetching, so there is no response to read and no Content-Type to
-        # believe. It rejoins at the image conversion, which is the whole point
-        # — the bytes that reach the SNES are the same Mode 3 tiles a photograph
-        # would have produced, and `view` needs no idea any of this happened.
-        if url.startswith("render:"):
-            target = url[len("render:"):]
-            print(f"  rendering {target} at {RENDER_W}x{RENDER_H}")
-            try:
-                body = render_page(target)
-            except Exception as e:
-                print(f"  render failed: {e}")
-                self.push_ctrl(S2C_ERR, bytes([ch, 4]), gen)
-                return
-            mark(f"rendered: {len(body)} bytes of PNG")
-            try:
-                before = len(body)
-                body = to_img(body)
-                print(f"  converted {before} -> {len(body)} bytes of Mode 3 tiles")
-            except Exception as e:
-                print(f"  image conversion failed: {e}")
-                self.push_ctrl(S2C_ERR, bytes([ch, 2]), gen)
-                return
-            mark("replying")
-            print(f"  -> 200, {len(body)} bytes [IMG]")
-            self.reply(ch, 200, 1, body, gen, cgen)
-            return
 
         if "://" not in url:
             url = "https://" + url
@@ -961,13 +688,6 @@ class Gateway:
                              args=(ch, port, self.gen, cgen),
                              daemon=True).start()
 
-        elif self.ctype == C2S_WEB and len(self.cbuf) >= 2:
-            ch, op = self.cbuf[0], self.cbuf[1]
-            arg = bytes(self.cbuf[2:])
-            threading.Thread(target=self.do_web,
-                             args=(ch, op, arg, self.gen, cgen),
-                             daemon=True).start()
-
         elif self.ctype == C2S_HANGUP and len(self.cbuf) >= 1:
             # End this connection, keep the port. Everything the SNES sent
             # before this record has already been written to the socket —
@@ -1004,15 +724,6 @@ class Gateway:
                     sock.close()
                 except OSError:
                     pass
-            with self.plock:
-                page = self.pages.pop(ch, None)
-            # Marked dead here and closed on a thread: this is the frame loop,
-            # and close() waits for any CDP call still in flight. Closing it
-            # inline used to pull the websocket out from under a worker
-            # mid-screenshot, killing the thread on a bad file descriptor and
-            # leaving the console waiting for a window that no longer had
-            # anyone to send it.
-            self.retire(page)
             srv = self.listeners.pop(ch, None)
             if srv is not None:
                 # Release the port, or the next run of the app cannot bind it.

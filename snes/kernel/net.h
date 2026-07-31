@@ -81,8 +81,6 @@ int net_hello(void);
 int net_connect(const char *hostport);
 int net_listen(uint16_t port);
 int net_hangup(int ch);
-int net_web_open(const char *url);
-int net_web_op(int ch, uint8_t op, uint8_t a, uint8_t b);
 int net_write(int ch, const uint8_t *src, int n);
 int net_wspace(int ch);
 extern volatile uint16_t net_stat_bad_sum;

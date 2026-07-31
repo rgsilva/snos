@@ -88,7 +88,7 @@ $(BUILD)/snos.raw: $(KERNEL_O)
 # Each app is a separate link into its own ROM bank, then dropped into the
 # cartridge image at the byte offset that bank maps to. HiROM makes that
 # arithmetic trivial: SNES $C0:0000+N is ROM byte N, so bank $C8 is 0x080000.
-APPS := hello pad basic edit view get netecho httpd web vnc irc
+APPS := hello pad basic edit view get netecho httpd vnc irc
 APP_BANK_hello := c8
 APP_BANK_pad   := c9
 APP_BANK_basic := ca
@@ -97,7 +97,7 @@ APP_BANK_view  := cc
 APP_BANK_get   := cd
 APP_BANK_netecho := ce
 APP_BANK_httpd := d0
-APP_BANK_web   := d1
+# ($D1 was `web`, deleted; the slot is free for the next app.)
 APP_BANK_vnc   := d2
 APP_BANK_irc   := d3
 APP_AT_hello   := 0x080000
@@ -108,7 +108,6 @@ APP_AT_view    := 0x0C0000
 APP_AT_get     := 0x0D0000
 APP_AT_netecho := 0x0E0000
 APP_AT_httpd   := 0x100000
-APP_AT_web     := 0x110000
 APP_AT_vnc     := 0x120000
 APP_AT_irc     := 0x130000
 # The editor needs the ABI-2 full-screen calls and says so in its header, so an
@@ -123,9 +122,9 @@ APP_ABI_get    := 6
 # that does not exist.
 APP_ABI_netecho := 7
 APP_ABI_httpd  := 7
-# `web` needs the ABI-8 browser calls.
-APP_ABI_web    := 8
-APP_ABI_vnc    := 8
+# `vnc` uses only the ABI-7 stream calls plus sys_gfx; 8 was an over-claim
+# that would make an ABI-7 kernel refuse an app it could run.
+APP_ABI_vnc    := 7
 # `irc` needs the ABI-7 stream calls: it opens a plain TCP connection and both
 # talks and listens on it. Nothing it does needs ABI 8.
 APP_ABI_irc    := 7

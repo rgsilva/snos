@@ -33,7 +33,6 @@
               .public sys_net_state, sys_net_close, sys_net_stats
               .public sys_net_connect_raw, sys_net_write_raw, sys_net_wspace
               .public sys_net_listen, sys_net_hangup
-              .public sys_web_open_raw, sys_web_op
               .public sys_puts_at_raw, sys_screen, sys_pollkey, sys_osk
 
 sys_exit:       cop     #0x00
@@ -120,11 +119,6 @@ sys_net_wspace: cop     #0x69
 sys_net_listen: cop     #0x6A
                 rtl
 sys_net_hangup: cop     #0x6B
-                rtl
-sys_web_open_raw:
-                cop     #0x6C
-                rtl
-sys_web_op:     cop     #0x6D
                 rtl
 sys_gfx:        cop     #0x19
                 rtl
