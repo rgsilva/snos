@@ -631,6 +631,29 @@ rebuilds a 24-bit address from a 2-D array and a volatile index for every byte. 
 Worth measuring in `gateway.py` before assuming anything: the last three explanations offered here
 were wrong, and each was refuted by a cheaper test than the fix would have been.
 
+**MEASURED 2026-07-31 (`SNOS_GW_STATS=1` in gateway.py): the fill number was an accounting
+artifact, making it the fourth wrong explanation in this section.** The gateway classifies every
+DOWN write: a full vnc screen is **409 data frames at 120.4 of 124 payload bytes each** —
+97% full, four frames off the theoretical minimum of 403. The "52 bytes" figure was total bytes
+divided by total *exchanges*, and most exchanges carry no data at all: they are empty polls plus
+**207 retransmissions of a single frame** (`SNOS_GW_STATS=2` timestamps them: all 207 are seq 144,
+one per poll for 3.4 s mid-transfer). The SNES-side counter agrees exactly — `refused=207` — so the
+stall is **ring backpressure**: one window where the app stops draining, `frame_fits` refuses, and
+stop-and-wait marks time.
+
+Two qualifications, both measured the same night:
+
+- **Not a regression, and content-dependent.** The pre-review baseline `57aac0e`, rebuilt in a
+  worktree and run against the same desktop, reproduces the identical numbers (409/49,244/207) —
+  which both exonerates the review-wave changes and shows they cost nothing here. The earlier
+  celebrated `refused=0` run was a property of that day's desktop content, not of the fix: the ring
+  MVN work removed the *per-byte cost*, but a content burst that outruns the paint still fills the
+  1 KB ring. No plausible ring absorbs a 3.4 s stall (~25 KB at link rate) — the drain rate is the
+  lever, i.e. the paint tail (DMA coalescing, backlog), or the sliding window.
+- **The 768-tile DONE threshold is content-dependent too**: today's desktop peaks at ~738 non-zero
+  tiles, so the old benchmark times out at a painted screen. Use ~700, or compare transfer-side
+  numbers (`fresh_data` / `payload` / `resend`), which do not depend on what the desktop shows.
+
 **Where the line actually falls** (Ricardo, 2026-07-29: *"as long as you keep the frame mechanism,
 you don't really need to think too much about it"* — right, and it is a cleaner rule than the one
 this section originally had). **The framing, seq/ack and stop-and-wait are the contract; the file

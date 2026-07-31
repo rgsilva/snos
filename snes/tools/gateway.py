@@ -250,6 +250,18 @@ class Gateway:
         self.ctype = 0
         self.clen = 0
         self.cbuf = bytearray()
+        # SNOS_GW_STATS=1 telemetry: how every DOWN write was spent. The
+        # 42%-fill question (PLAN.md) is ambiguous from totals alone — 49152
+        # bytes over 947 frames is EITHER half-empty data frames (a producer
+        # problem) or full frames diluted by empty/retransmit exchanges (a
+        # pacing problem) — and those want opposite fixes. This is the
+        # instrument that tells them apart.
+        self.st_resend = 0       # re-sent the in-flight frame (dup ack)
+        self.st_fresh_data = 0   # built a new frame carrying payload
+        self.st_fresh_empty = 0  # built a new frame with nothing to say
+        self.st_payload = 0      # payload bytes across fresh data frames
+        self.st_qdepth_sum = 0   # queue depth when building, for a mean
+        self.st_qdepth_n = 0
 
     # ------------------------------------------------------------ outbound
     def push(self, ch, data, gen=None):
@@ -884,15 +896,47 @@ class Gateway:
 
     def next_out(self):
         if not self.awaiting:
+            with self.lock:
+                self.st_qdepth_sum += sum(len(d) for _, d in self.out)
+                self.st_qdepth_n += 1
             f, any_data = self.build()
             self.inflight = f
             if any_data:
                 self.awaiting = True
+                self.st_fresh_data += 1
+                self.st_payload += sum(
+                    f[i + 1] for i in self._record_offsets(f))
+            else:
+                self.st_fresh_empty += 1
             return f
+        self.st_resend += 1
+        if os.environ.get("SNOS_GW_STATS") == "2":
+            print(f"resend: seq={self.tx_seq} n={self.st_resend} "
+                  f"t={time.time():.3f}")
         self.inflight[ACK] = (self.rx_next - 1) & 0xFF
         self.inflight[SUM] = 0
         self.inflight[SUM] = checksum(self.inflight)
         return self.inflight
+
+    @staticmethod
+    def _record_offsets(f):
+        """Offsets of each [ch][len] record header in a built frame."""
+        offs, o = [], HDR
+        while o + 2 <= FRAME:
+            ch, ln = f[o], f[o + 1]
+            if ch == CH_PAD or o + 2 + ln > FRAME:
+                break
+            offs.append(o)
+            o += 2 + ln
+        return offs
+
+    def stats_line(self):
+        q = (self.st_qdepth_sum / self.st_qdepth_n) if self.st_qdepth_n else 0
+        per = (self.st_payload / self.st_fresh_data) if self.st_fresh_data else 0
+        return (f"stats: fresh_data={self.st_fresh_data} "
+                f"({per:.1f} B/frame) fresh_empty={self.st_fresh_empty} "
+                f"resend={self.st_resend} payload={self.st_payload} "
+                f"qdepth_mean={q:.0f}")
 
 
 def main():
@@ -919,8 +963,13 @@ def main():
 
     print(f"gateway: reading {UP}, writing {DOWN}")
     print("gateway: load tools/netbridge.lua in Mesen's Script Window")
+    stats = os.environ.get("SNOS_GW_STATS")
+    stats_at = time.time() + 5.0
     try:
         while True:
+            if stats and time.time() >= stats_at:
+                stats_at = time.time() + 5.0
+                print(gw.stats_line())
             moved = False
             try:
                 # The bridge truncates both files when it starts, so a restarted
