@@ -120,12 +120,11 @@ static void proc_forge(int slot, void (*fn)(void), uint16_t stack_top,
 void proc_mtest_start(uint16_t ticks) {
   test_a = 0;
   test_b = 0;
-  /* The app region is idle (the caller refuses to run over an app), so the
-   * workers borrow it: A takes the app slot as-is, B takes the lower half of
-   * the app stack with the region's bottom page as its DP. Real carving with
-   * declared slots is step 3; these constants are the step-1 hardwiring. */
-  proc_forge(1, worker_a, SNOS_ASTACK_HI, SNOS_ADP_BASE);         /* $18FF/$1900 */
-  proc_forge(2, worker_b, 0x12FF, SNOS_ASTACK_LO);                /* $12FF/$0C00 */
+  /* The process slots are idle (the caller refuses to run over an app), so
+   * the workers take one each — the same carving real processes get (step 3,
+   * SNOS_PSTACK_* in snos.h). */
+  proc_forge(1, worker_a, SNOS_PSTACK_TOP(1), SNOS_PDP(1));
+  proc_forge(2, worker_b, SNOS_PSTACK_TOP(0), SNOS_PDP(0));
   procs[0].live = 1; /* the caller; its S is filed by the first switch away */
   p_cur = 0;
   sched_ticks = 0;

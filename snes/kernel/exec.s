@@ -34,7 +34,10 @@ EXITFLAG      .equ    0x7e1a12        ; set => unwind to app_return
 EXITCODE      .equ    0x7e1a14
 APPRUNNING    .equ    0x7e1a16
 
-APP_STACK_TOP .equ    0x18ff          ; PLAN.md §2 — the app's 3328-byte slot
+;; The single-app path runs in process slot 1 (M10 step 3 carved the old
+;; region in two): stack $1200-$17FF, DP $1900. Slot sizes are measured —
+;; see SNOS_PSTACK_* in snos.h. Slot 0 belongs to a second process.
+APP_STACK_TOP .equ    0x17ff
 APP_DP        .equ    0x1900
 ARENA_BANK    .equ    0x7f            ; WRAM bank $7F: every app's data lives here
 

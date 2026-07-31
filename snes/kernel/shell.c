@@ -99,8 +99,10 @@ static void cmd_mem(void) {
   kcon_puts("bank $00 (8K, holds every stack and direct page):\n");
   put_kv("  kernel DP    ", SNOS_KDP_BASE);
   put_kv("  kernel stack ", SNOS_KSTACK_LO);
-  put_kv("  app stack    ", SNOS_ASTACK_LO);
-  put_kv("  app DP       ", SNOS_ADP_BASE);
+  put_kv("  proc0 stack  ", SNOS_PSTACK_LO(0));
+  put_kv("  proc0 DP     ", SNOS_PDP(0));
+  put_kv("  proc1 stack  ", SNOS_PSTACK_LO(1));
+  put_kv("  proc1 DP     ", SNOS_PDP(1));
   put_kv("  syscall args ", (uint16_t)(SNOS_ARGS_ADDR & 0xFFFFu));
   kcon_puts("kernel stack used ");
   kcon_putu((uint16_t)(SNOS_KSTACK_HI + 1u - low));

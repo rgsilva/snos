@@ -23,9 +23,25 @@
 #define SNOS_KDP_BASE 0x0000u  /* kernel direct page          256 B */
 #define SNOS_KSTACK_LO 0x0100u /* kernel stack               2816 B */
 #define SNOS_KSTACK_HI 0x0BFFu
-#define SNOS_ASTACK_LO 0x0C00u /* app stack                  3328 B */
-#define SNOS_ASTACK_HI 0x18FFu
-#define SNOS_ADP_BASE 0x1900u  /* app direct page             256 B */
+
+/* The old single-app region ($0C00-$19FF, stack + DP) carved into two
+ * process slots (M10 step 3). Slot sizes are MEASURED, not guessed: painted
+ * app stacks across the whole suite peak at 1,123 bytes (editor), with basic
+ * at its expression-depth cap using 1,051 — so 1,536 per slot carries 400+
+ * bytes of margin over the worst case ever observed. Slot 1 keeps the
+ * historical DP page ($1900), so the single-app path changes only its stack
+ * ceiling. Calypsi addresses stack and DP through S and D, which are
+ * per-process registers — no app relinking, only these assignments. */
+#define SNOS_PSLOTS 2u
+#define SNOS_PSTACK_SIZE 1536u
+#define SNOS_PSTACK_LO(i) (0x0C00u + (i) * SNOS_PSTACK_SIZE)
+#define SNOS_PSTACK_TOP(i) (SNOS_PSTACK_LO(i) + SNOS_PSTACK_SIZE - 1u)
+#define SNOS_PDP(i) (0x1800u + (i) * 256u)
+
+/* Compatibility names: the single-app path runs in slot 1. */
+#define SNOS_ASTACK_LO SNOS_PSTACK_LO(1)  /* $1200 */
+#define SNOS_ASTACK_HI SNOS_PSTACK_TOP(1) /* $17FF */
+#define SNOS_ADP_BASE SNOS_PDP(1)         /* $1900 */
 #define SNOS_NEAR_BASE 0x1A00u /* kernel near data           1536 B */
 
 /* Bank $00 is mirrored from WRAM $7E0000, so the kernel can reach the same
