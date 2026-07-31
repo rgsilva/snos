@@ -380,7 +380,8 @@ static void cmd_fg(char *rest) {
   char *w = rest;
   (void)split_word(rest);
   while (*w >= '0' && *w <= '9') id = (uint16_t)(id * 10 + (*w++ - '0'));
-  if (proc_state((uint8_t)id) != 1) {
+  /* id 0 is the shell itself: waiting for our own death is not a feature. */
+  if (id < 1 || proc_state((uint8_t)id) != 1) {
     kcon_puts("no such job (see `jobs`)\n");
     return;
   }
@@ -662,6 +663,12 @@ static void cmd_mtest(void) {
   uint32_t a, b;
   if (SNOS_EXEC_RUN) {
     kcon_puts("mtest: not while an application is running\n");
+    return;
+  }
+  if (proc_state(1) != 0 || proc_state(2) != 0) {
+    /* The workers forge frames into the process slots; stomping a live
+     * background job's stack is not a diagnostic. */
+    kcon_puts("mtest: not while background jobs exist (see jobs)\n");
     return;
   }
   kcon_puts("mtest: preempting two workers for ~4s...\n");

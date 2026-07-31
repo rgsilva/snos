@@ -1,5 +1,8 @@
 #include "fs.h"
 #include "proc.h"
+/* proc_lock: see the calls below — shell-direct and background-syscall
+ * callers share these structures, and only pinning the scheduler makes the
+ * multi-store spans atomic for both. */
 #include "sram.h"
 #include "farmem.h"
 
@@ -214,10 +217,19 @@ int fs_open_read(const char *name) {
  * allocator, and stream bytes straight into SRAM. The size is only written back
  * on close, so an interrupted write leaves a zero-length file rather than one
  * that claims bytes it does not have. */
+static int fs_delete_locked(const char *name);
+
 int fs_open_write(const char *name) {
   uint16_t s;
   uint32_t alloc;
   int j;
+  int rc = -1;
+
+  /* Pinned end to end: the write_owner check, the overwrite-delete's remount
+   * and the claim must be one atomic act, or a background SYS_OPEN(write)
+   * interleaves with a shell `write` and two writers share one allocator
+   * base. */
+  proc_lock();
 
   /* Every refusal must come BEFORE the delete: overwrite semantics on a full
    * volume otherwise destroys the old copy and then fails to create the new
@@ -226,21 +238,21 @@ int fs_open_write(const char *name) {
    * is delete-independent; a full directory only blocks names that do not
    * already own a slot, since deleting an existing SRAM copy frees its own. */
   alloc = sram_rd32(8);
-  if (alloc >= sram_size()) return -1;
-  if (write_owner != 0xFF) return -1; /* one writer system-wide; see hnd */
+  if (alloc >= sram_size()) goto out;
+  if (write_owner != 0xFF) goto out; /* one writer system-wide; see hnd */
 
   for (s = 0; s < SRAMFS_SLOTS; s++)
     if (sram_rd(slot_addr(s)) == 0) break;
   if (s >= SRAMFS_SLOTS) {
     const fs_entry_t *e = fs_find(name);
-    if (!e || e->ro) return -1; /* directory full */
+    if (!e || e->ro) goto out; /* directory full */
   }
 
-  fs_delete(name); /* overwrite semantics */
+  fs_delete_locked(name); /* overwrite semantics */
 
   for (s = 0; s < SRAMFS_SLOTS; s++)
     if (sram_rd(slot_addr(s)) == 0) break;
-  if (s >= SRAMFS_SLOTS) return -1; /* unreachable: guarded above */
+  if (s >= SRAMFS_SLOTS) goto out; /* unreachable: guarded above */
 
   for (j = 0; j < FS_NAME_LEN; j++)
     sram_wr(slot_addr(s) + (uint32_t)j, (uint8_t)(name[j] ? name[j] : 0));
@@ -253,7 +265,10 @@ int fs_open_write(const char *name) {
   H->write = 1;
   H->idx = -2; /* writing: not a directory index */
   write_owner = proc_current();
-  return 0;
+  rc = 0;
+out:
+  proc_unlock();
+  return rc;
 }
 
 int fs_getc(void) {
@@ -273,6 +288,7 @@ int fs_putc(uint8_t c) {
 }
 
 void fs_close(void) {
+  proc_lock(); /* commit + remount must not interleave with a bg handle op */
   if (H->write) {
     sram_wr32(slot_addr(H->slot) + 20, H->pos);
     sram_wr32(8, H->start + H->pos); /* commit the bump allocator */
@@ -281,6 +297,7 @@ void fs_close(void) {
   H->idx = -1;
   if (H->write) write_owner = 0xFF;
   H->write = 0;
+  proc_unlock();
 }
 
 uint32_t fs_open_size(void) {
@@ -289,7 +306,8 @@ uint32_t fs_open_size(void) {
   return files[H->idx].size;
 }
 
-int fs_delete(const char *name) {
+/* The unpinned body; fs_open_write calls it inside its own pin. */
+static int fs_delete_locked(const char *name) {
   int i;
   /* Not while anyone holds the write handle: the remount below reshuffles
    * directory slots, and the writer's slot number must stay true until its
@@ -310,6 +328,17 @@ int fs_delete(const char *name) {
   return -1;
 }
 
+
+int fs_delete(const char *name) {
+  int rc;
+  /* Pinned: the remount rebuilds files[] and invalidates handles, and a
+   * background fs syscall dereferencing files[] mid-rebuild reads a torn
+   * entry. */
+  proc_lock();
+  rc = fs_delete_locked(name);
+  proc_unlock();
+  return rc;
+}
 
 /* ---- straight from storage into VRAM ------------------------------------
  *
@@ -382,7 +411,16 @@ uint16_t fs_read_vram(uint16_t count) {
  * the slot never had its size written, so the file simply does not exist. */
 void fs_reap(uint8_t proc) {
   if (proc >= PROC_MAX) return;
-  if (write_owner == proc) write_owner = 0xFF;
+  if (write_owner == proc && hnd[proc].write) {
+    /* The open claimed a directory slot (name written, size 0) that only
+     * fs_close would have finalised. sramfs_mount mounts any slot with a
+     * non-zero first byte, so without this the dead writer leaves a ghost
+     * zero-length file occupying a slot until someone notices and rms it. */
+    sram_wr(slot_addr(hnd[proc].slot), 0);
+    write_owner = 0xFF;
+  } else if (write_owner == proc) {
+    write_owner = 0xFF;
+  }
   hnd[proc].idx = -1;
   hnd[proc].write = 0;
 }

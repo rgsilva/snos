@@ -231,6 +231,7 @@ void con_flush(void) {
     if (gfx_owned) return;
     int budget, n = 0, i, cell;
     uint8_t r;
+    uint8_t notify0 = notify_on; /* see the re-arm at the end */
 
     /* The split no longer costs rows. It used to halve them because HDMA had
      * taken three of the eight channels; with a single channel doing every
@@ -296,6 +297,10 @@ void con_flush(void) {
         if (!(R8(0x4212) & 0x80)) break;
         dirty[rows[i]] = 0;
     }
+    /* A notify that arrived after this flush built row 0's buffer would have
+     * its dirty bit consumed just above and nothing else may ever repaint an
+     * idle row 0 — re-arm so the NEXT flush draws the cell. */
+    if (notify_on != notify0) dirty[top] = 1;
 }
 
 /* ---- random access --------------------------------------------------------
@@ -306,9 +311,16 @@ void con_flush(void) {
  */
 
 void con_notify(int on) {
-    if (notify_on == (on ? 1 : 0)) return;
-    notify_on = (uint8_t)(on ? 1 : 0);
-    dirty[top] = 1; /* repaint screen row 0: draw the cell, or erase it */
+    /* Setting ALWAYS re-dirties: a notify that lands in con_flush's own
+     * build-to-clear window would otherwise be swallowed by the transition
+     * early-out, and on an idle screen nothing else ever repaints row 0. */
+    if (on) {
+        notify_on = 1;
+        dirty[top] = 1;
+    } else if (notify_on) {
+        notify_on = 0;
+        dirty[top] = 1; /* erase the cell */
+    }
 }
 
 int con_rows(void) { return ROWS; }

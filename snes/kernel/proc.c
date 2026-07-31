@@ -66,6 +66,10 @@
 #define PROC_NEXT_ID (*(volatile __far uint16_t *)0x7E1A20ul)
 #define PROC_CUR_ID (*(volatile __far uint16_t *)0x7E1A22ul)
 
+#define NETMASK_R8(a) (*(volatile uint8_t *)(a))
+#define NETMASK_OFF() (NETMASK_R8(0x4200) = 0x01)
+#define NETMASK_ON() (NETMASK_R8(0x4200) = 0x81)
+
 #define ST_FREE 0
 #define ST_LIVE 1
 #define ST_DEAD 2
@@ -86,6 +90,13 @@ static proc_t procs[PROC_MAX];
 static volatile uint8_t p_fg;    /* who owns the console and keyboard */
 static uint8_t p_filing_prev;    /* whose S the shim saved at that switch */
 static volatile uint8_t p_notify; /* attention bits, by process id */
+/* Scheduler lock (M10 review). Kernel functions that both the shell (direct,
+ * preemptible, kernel DP) and background syscalls (COP, deferral-atomic) may
+ * run need mutual exclusion for their multi-store spans; pinning the current
+ * process is the cheapest correct form. Locking consumes any pending switch
+ * so cop_ret cannot take one mid-span; proc_tick files but arms nothing
+ * while held. NMI itself still runs — net_service is unaffected. */
+static volatile uint8_t p_lock;
 static uint8_t sched_on;         /* mtest's bounded mode */
 static uint16_t sched_ticks, sched_limit;
 
@@ -232,6 +243,17 @@ int proc_kill(uint8_t id) {
 
 static int runnable(uint8_t i) { return procs[i].state == ST_LIVE; }
 
+void proc_lock(void) {
+  NETMASK_OFF();
+  PROC_WANT = 0;
+  p_lock++;
+  NETMASK_ON();
+}
+
+void proc_unlock(void) {
+  if (p_lock) p_lock--;
+}
+
 void proc_tick(void) {
   /* File first, decide second — see the header comment for why the order is
    * load-bearing. */
@@ -241,10 +263,24 @@ void proc_tick(void) {
     procs[p_filing_prev].s = PROC_OLD_S;
   }
 
+  /* The foreground app's death is armed. Only process 0 can take the unwind
+   * (the shims defer it from any other context), so steer the rotation to
+   * process 0 and arm nothing else until the funeral is done. */
+  if (SNOS_EXEC_RUN && SNOS_EXEC_FLAG) {
+    if (cur != 0 && !p_lock) {
+      p_filing_prev = cur;
+      PROC_NEXT_S = procs[0].s;
+      PROC_NEXT_ID = 0;
+      PROC_WANT = 1;
+    }
+    return;
+  }
+
   /* mtest's bounded mode: wind down to process 0, then stop. */
   if (sched_on && ++sched_ticks >= sched_limit) {
     if (cur == 0) {
       sched_on = 0;
+      PROC_WANT = 0; /* a deferred switch must not resurrect a freed worker */
       procs[1].state = ST_FREE;
       procs[2].state = ST_FREE;
       return;
@@ -255,6 +291,8 @@ void proc_tick(void) {
     PROC_WANT = 1;
     return;
   }
+
+  if (p_lock) return; /* pinned: file (above) but arm nothing */
 
   /* Round robin over live processes. With only process 0 live this decides
    * "stay" in two array reads — the everyday cost of having a scheduler. */

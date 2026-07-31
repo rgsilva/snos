@@ -121,11 +121,11 @@ void snos_nmi_c(void) {
     kill_held = 0;
   }
 
-  /* M10: file the previous context switch, decide the next one. After the
-   * kill logic on purpose — a frame that just armed the unwind must not also
-   * schedule; the dying process's funeral comes first. The shim performs the
-   * actual swap on its way out (header.s). */
-  if (!SNOS_EXEC_FLAG) proc_tick();
+  /* M10: file the previous context switch, decide the next one. Runs even
+   * while a foreground death is armed — proc_tick then STEERS to process 0,
+   * the only context the shims allow to take the unwind. The shim performs
+   * the actual swap on its way out (header.s). */
+  proc_tick();
 }
 
 /* ----------------------------------------------------------- COP dispatch */
@@ -220,6 +220,7 @@ uint16_t snos_cop_c(uint16_t sp) {
     uint16_t max = a, i;
     int n;
     if (!is_fg) {
+      kbd_idle(); /* same pacing as background GETC: no flat-out spinning */
       if (max) far_wr(bank, off, 0);
       return 0;
     }
@@ -272,6 +273,9 @@ uint16_t snos_cop_c(uint16_t sp) {
   /* The keyboard owns the d-pad while it is up, so an app that wants to
    * navigate a menu has to be able to put it away. */
   case SYS_OSK:
+    /* The panel rides the foreground's screen and re-enables the HDMA
+     * split; a background caller may only ask, never act. */
+    if (!is_fg) return (uint16_t)(osk_visible() ? 1 : 0);
     if (a == 0) osk_hide();
     else if (a == 1) osk_show();
     return (uint16_t)(osk_visible() ? 1 : 0);

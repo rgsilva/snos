@@ -64,6 +64,12 @@ int proc_notify_pending(uint8_t id);
  * busy, to hold the CPU against the scheduler. */
 void proc_switch_now(void);
 
+/* Pin the current process across a multi-store kernel mutation that both the
+ * shell (direct call) and a background syscall may run. Cheap, nestable; the
+ * NMI and the link keep running, only context switches pause. */
+void proc_lock(void);
+void proc_unlock(void);
+
 /* The step-1 instrument, kept: two kernel workers under the round-robin. */
 void proc_mtest_start(uint16_t ticks);
 int proc_busy(void);

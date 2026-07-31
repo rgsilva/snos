@@ -143,6 +143,15 @@ snos_nmi:
               beq     nmi_ret
               lda     long:EXITFLAG
               beq     nmi_ret
+              ;; ...and only from PROCESS 0's context. The foreground app IS
+              ;; process 0's continuation; with a background job live, this
+              ;; NMI may have interrupted THAT process, and unwinding from its
+              ;; context would teleport the CPU onto the kernel stack with the
+              ;; wrong identity published and the background frame lost.
+              ;; proc_tick steers the rotation to process 0 while the flag is
+              ;; armed, so deferring here costs at most a slice.
+              lda     long:PROC_CUR_ID
+              bne     nmi_ret
               ;; ...unless this NMI interrupted a system call. Unwinding from
               ;; the middle of a COP handler abandons whatever kernel mutation
               ;; it was inside — a half-queued control record misaligns the
@@ -231,7 +240,9 @@ snos_cop:
               beq     cop_ret
               lda     long:EXITFLAG
               beq     cop_ret
-              jmp     long:app_return
+              lda     long:PROC_CUR_ID      ; only process 0 owns the fg app;
+              bne     cop_ret               ; a bg syscall exit must not take
+              jmp     long:app_return       ; another process's funeral
 cop_ret:
               ;; A switch the NMI deferred while this syscall ran is taken
               ;; HERE, at the moment the mid-syscall reason evaporates. NMI is

@@ -40,6 +40,13 @@
  */
 #include "net.h"
 #include "link.h"
+#include "proc.h"
+/* proc_lock (M10 review): the txq record appends and channel scan-and-claim
+ * below are run BOTH by the shell directly and by background syscalls. A
+ * context switch mid-record interleaves two control records and desyncs the
+ * gateway's parser until a link restart; pinning the scheduler for the span
+ * is the mutual exclusion. The NMI itself still runs — net_service and the
+ * single-producer ring contracts are untouched. */
 
 /* ---------------------------------------------------- control protocol ---
  * Messages are [type][len][payload...] inside channel 0's byte stream, so a
@@ -391,12 +398,19 @@ static void txq_put(uint8_t b) {
 static int net_open(const char *url, uint8_t cmd) {
   int ch, n = 0, i;
   if (!net_up()) return -1;
+  proc_lock();
   for (ch = 1; ch < NET_CHANNELS; ch++)
     if (ch_state[ch] == NET_ST_FREE) break;
-  if (ch >= NET_CHANNELS) return -1;
+  if (ch >= NET_CHANNELS) {
+    proc_unlock();
+    return -1;
+  }
 
   while (url[n] && n < 250) n++;
-  if (txq_space() < n + 3) return -1;
+  if (txq_space() < n + 3) {
+    proc_unlock();
+    return -1;
+  }
 
   /* The SNES picks the channel rather than asking for one. It costs nothing and
    * it means net_fetch can return a usable handle immediately instead of the
@@ -413,6 +427,7 @@ static int net_open(const char *url, uint8_t cmd) {
   ch_http[ch] = 0;
   ch_state[ch] = NET_ST_OPENING;
   NET_NMI_ON();
+  proc_unlock();
   return ch;
 }
 
@@ -493,7 +508,11 @@ int net_hangup(int ch) {
   if (!ch_listen[ch]) return -1;
   if (((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1)) != 0) return -1;
   if (txframe_ch[ch] != 0) return -1;      /* still in flight, unacknowledged */
-  if (txq_space() < 3) return -1;
+  proc_lock();
+  if (txq_space() < 3) {
+    proc_unlock();
+    return -1;
+  }
 
   txq_put(C2S_HANGUP);
   txq_put(1);
@@ -505,16 +524,20 @@ int net_hangup(int ch) {
   ch_reuse[ch] = 0;
   ch_state[ch] = NET_ST_LISTEN;
   NET_NMI_ON();
+  proc_unlock();
   return 0;
 }
 
 int net_listen(uint16_t port) {
   int ch;
   if (!net_up()) return -1;
+  proc_lock();
   for (ch = 1; ch < NET_CHANNELS; ch++)
     if (ch_state[ch] == NET_ST_FREE) break;
-  if (ch >= NET_CHANNELS) return -1;
-  if (txq_space() < 5) return -1;
+  if (ch >= NET_CHANNELS || txq_space() < 5) {
+    proc_unlock();
+    return -1;
+  }
 
   txq_put(C2S_LISTEN);
   txq_put(3);
@@ -533,19 +556,26 @@ int net_listen(uint16_t port) {
   ch_listen[ch] = 1;
   ch_state[ch] = NET_ST_LISTEN;
   NET_NMI_ON();
+  proc_unlock();
   return ch;
 }
 
 int net_hello(void) {
+  int rc = -1;
   if (!net_up()) return -1;
-  if (txq_space() < 2) return -1;
-  txq_put(C2S_HELLO);
-  txq_put(0);
-  return 0;
+  proc_lock();
+  if (txq_space() >= 2) {
+    txq_put(C2S_HELLO);
+    txq_put(0);
+    rc = 0;
+  }
+  proc_unlock();
+  return rc;
 }
 
 void net_close(int ch) {
   if (ch < 1 || ch >= NET_CHANNELS) return;
+  proc_lock();
   if (ch_state[ch] != NET_ST_FREE && txq_space() >= 3) {
     txq_put(C2S_CLOSE);
     txq_put(1);
@@ -568,6 +598,7 @@ void net_close(int ch) {
   txring_tail[ch] = 0;
   txframe_ch[ch] = 0;
   NET_NMI_ON();
+  proc_unlock();
 }
 
 /* --------------------------------------------------------- inbound control */
