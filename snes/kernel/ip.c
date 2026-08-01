@@ -626,7 +626,12 @@ static int listen_ch_for(uint16_t netport) {
   int i;
   for (i = 1; i < NET_CHANNELS; i++) {
     if (lport[i] == 0 || HTONS(lport[i]) != netport) continue;
-    if (conn_for(i) != 0) return -1; /* already serving somebody */
+    /* Busy serving somebody: keep looking — since mc, one port may be
+     * bound by SEVERAL channels precisely so a second connection lands on
+     * the next free one (the ping/login overlap). Returning -1 at the
+     * first busy match made the second listener unreachable. */
+    if (conn_for(i) != 0) continue;
+    if (net_state(i) != NET_ST_LISTEN) continue; /* mid-teardown: not ready */
     return i;
   }
   return -1;
@@ -810,6 +815,16 @@ int ip_listen(int ch, uint16_t port) {
   lport[ch] = port;
   uip_listen(HTONS(port));
   return 0;
+}
+
+/* A dead connection's teardown: unbind it so the service loop aborts it
+ * (RST), but KEEP the port — this is net_hangup's path for a channel in
+ * ERROR, where a graceful close has nothing left to be graceful about. */
+void ip_abandon(int ch) {
+  struct uip_conn *c = conn_for(ch);
+  if (c == 0) return;
+  c->appstate.ch = 0xFFu;
+  c->appstate.closing = 0;
 }
 
 int ip_hangup(int ch) {

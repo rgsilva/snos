@@ -94,6 +94,7 @@ int ip_listen(int ch, uint16_t port); /* bind a port to a channel */
  * unacknowledged, for the same reason the stream path does: a close that
  * overtakes the response truncates what the client receives. */
 int ip_hangup(int ch);
+void ip_abandon(int ch); /* dead-connection hangup: abort, keep the port */
 
 /* ---- ping, for the shell -------------------------------------------------
  * The console composes a real ICMP echo request and parses the real reply;

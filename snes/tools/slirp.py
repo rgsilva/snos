@@ -157,7 +157,7 @@ class Slirp:
         self.udp = {}          # (sport, dip, dport) -> _Flow
         self.icmp = {}         # console ICMP id      -> _Flow
         self.forwards = {}     # real port            -> listening socket
-        self.fwd_ch = {}       # real port            -> channel that asked
+        self.fwd_ch = {}       # real port            -> set of owner channels
         self.ident = 1
         self.iss = 0x2000
         # Monotonic, because uIP holds a closed 4-tuple in TIME_WAIT for 60
@@ -712,10 +712,12 @@ class Slirp:
         proxies: the socket is ours (the console is behind NAT and unreachable
         from the LAN), but everything above the SYN is the console's."""
         if port in self.forwards:
-            # Already ours, but possibly for a DIFFERENT channel: saying yes
-            # would give two applications the same port and let either one
-            # release it.
-            return self.fwd_ch.get(port) == ch
+            # Already ours. A SECOND channel on the SAME port is legitimate
+            # since the mc server: two listeners so a ping connection and a
+            # join connection can overlap. The port keeps one socket and a
+            # SET of owner channels; it closes when the last owner leaves.
+            self.fwd_ch.setdefault(port, set()).add(ch)
+            return True
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.setblocking(False)
@@ -727,14 +729,20 @@ class Slirp:
             s.close()
             return False
         self.forwards[port] = s
-        self.fwd_ch[port] = ch
+        self.fwd_ch[port] = {ch}
         return True
 
     def forward_del(self, port, ch=None):
         # Ownership is checked: one application closing a channel must not be
-        # able to unbind a port another one is serving on.
-        if ch is not None and port in self.fwd_ch and self.fwd_ch[port] != ch:
-            return
+        # able to unbind a port another one is serving on. The socket closes
+        # only when the LAST owning channel lets go.
+        owners = self.fwd_ch.get(port)
+        if ch is not None:
+            if owners is None or ch not in owners:
+                return
+            owners.discard(ch)
+            if owners:
+                return
         s = self.forwards.pop(port, None)
         self.fwd_ch.pop(port, None)
         if s is not None:
@@ -744,7 +752,7 @@ class Slirp:
                 pass
 
     def forward_del_by_channel(self, ch):
-        for port in [p for p, c in self.fwd_ch.items() if c == ch]:
+        for port in [p for p, owners in self.fwd_ch.items() if ch in owners]:
             self.forward_del(port, ch)
 
     def _pump_forwards(self):

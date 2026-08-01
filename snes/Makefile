@@ -196,9 +196,10 @@ APP_ARENA_httpd   := 7f3c00 7f3fff
 APP_ARENA_telnetd := 7f4000 7f4fff
 APP_ARENA_irc     := 7f4000 7fffff
 APP_ARENA_vnc     := 7f0000 7fffff
-# mc shares the small-server slot with netecho/httpd: same shape (a listener
-# with modest buffers - its world is ROM, not RAM), same co-run rules.
-APP_ARENA_mc      := 7f3c00 7f3fff
+# mc carries TWO sessions' framing state (the ping/login overlap), which
+# outgrows the 1 KB small-server slot. It overlaps irc's region: they can
+# never co-run, and the kernel refuses the pairing by name.
+APP_ARENA_mc      := 7f5000 7f57ff
 
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)

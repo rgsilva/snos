@@ -638,17 +638,31 @@ int net_connect(const char *hostport) {
 int net_hangup(int ch) {
   if (ch <= 0 || ch >= NET_CHANNELS) return -1;
   if (!ch_listen[ch] || !ch_stack[ch]) return -1;
-  if (((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1)) != 0) return -1;
+
+  /* Refuse-until-drained protects a RESPONSE in flight — on a live
+   * connection. On a DEAD one (ERROR: the peer reset, or the daemon
+   * restarted) the queued bytes can never drain and never should: refusing
+   * here wedged the caller's hangup loop forever, and rebinding the channel
+   * with the corpse's bytes still queued served the NEXT client the middle
+   * of a dead session's packet — found live, as a Minecraft client
+   * disconnecting on garbage that was 25 chunks into somebody else's join. */
+  if (ch_state[ch] != NET_ST_ERROR &&
+      ((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1)) != 0)
+    return -1;
 
   /* The same refusal-until-drained rule the stream path had, but the queue
    * that matters is uIP's unacknowledged segment. The port stays bound; only
    * the connection ends, which is what makes a server a loop rather than a
-   * fresh listen per request. */
-  if (ip_hangup(ch) < 0) return -1;
+   * fresh listen per request. A dead connection is abandoned (abort, port
+   * kept) rather than closed gracefully — grace needs a living peer. */
+  if (ch_state[ch] == NET_ST_ERROR) ip_abandon(ch);
+  else if (ip_hangup(ch) < 0) return -1;
   proc_lock();
   NET_NMI_OFF();
   ring_head[ch] = 0;
   ring_tail[ch] = 0;
+  txring_head[ch] = 0;
+  txring_tail[ch] = 0;
   ch_state[ch] = NET_ST_LISTEN;
   NET_NMI_ON();
   proc_unlock();

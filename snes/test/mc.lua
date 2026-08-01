@@ -55,6 +55,7 @@ end
 
 -- ------------------------------------------------------------------ test
 local frame, step, at = 0, 1, nil
+local last_step = nil
 local claimed = false
 local status_sock, play_sock
 local burst_done_at = nil
@@ -84,6 +85,8 @@ emu.addEventCallback(function()
   end
   gw:service()
   if at and frame < at then return end
+  if step ~= last_step then print("step " .. tostring(step) ..
+                                  " @ frame " .. frame); last_step = step end
 
   -- The burst is ~146 KB over uIP's stop-and-wait: minutes of emulated
   -- frames. Guard generously, like vnc does, and gate on progress instead
@@ -115,15 +118,16 @@ emu.addEventCallback(function()
     if status_sock.rx:find("Super Nintendo", 1, true) == nil then
       at = frame + 30; return
     end
-    status_sock:close()
-    at = frame + 120
+    -- Deliberately NOT closed yet: the real client's login SYN arrives
+    -- while the ping connection is still up, and with a single listener
+    -- that SYN was refused with a RST - Ricardo's first live failure.
+    at = frame + 30
     step = 4
     return
   end
 
   if step == 4 then
-    -- Connection two: the join. Handshake(login) + Login Start, then wait
-    -- out the whole burst.
+    -- Connection two: the join, OVERLAPPING the still-open ping connection.
     play_sock = gw:dial(gw.fwd_port)
     play_sock.on_established = function(t)
       t:send(pkt(0x00, varint(754) .. mcstr("snes") ..
@@ -136,6 +140,8 @@ emu.addEventCallback(function()
   end
 
   if step == 5 then
+    -- The ping connection goes away mid-join, as the real client's does.
+    if not status_sock.closing then status_sock:close() end
     -- Progress-gated: done when Position And Look (0x34) has arrived and
     -- every frame before it walks cleanly.
     local pkts = walk(play_sock.rx, 1)
