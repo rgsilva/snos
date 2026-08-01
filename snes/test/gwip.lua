@@ -280,6 +280,16 @@ function G.new(opt)
       self.stall = self.stall + 1
       if self.stall > 60 then           -- ~1 s of polls: retransmit
         self.stall = 0
+        self.rexmits = (self.rexmits or 0) + 1
+        -- Bounded patience, mimicking the real daemon: a console whose
+        -- window stays shut for this long reads as dead, and giving up
+        -- HERE is what lets a test catch an app that stops draining (the
+        -- mc join burst did exactly that, and only the live NAT noticed).
+        if self.rexmits > 100 then
+          self.reset = true
+          self.done = true
+          return
+        end
         tcp_out(self, 0x18, self.unacked)
       end
       return
@@ -404,6 +414,7 @@ function G.new(opt)
           t.snd = edge
           t.unacked = ""
           t.stall = 0
+          t.rexmits = 0
         end
       elseif t.fin_sent and not t.fin_acked and ack == t.snd then
         t.fin_acked = true

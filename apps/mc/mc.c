@@ -83,6 +83,7 @@ static uint8_t buf[80];    /* shared: runtime-composed packets, blob copies */
 static uint16_t digs, chats;
 
 static void say(const char *s) { sys_puts(s); }
+static void pump(void); /* the burst drains between blobs; see there */
 
 /* ------------------------------------------------------------- outbound */
 
@@ -283,10 +284,19 @@ static void handle_packet(void) {
     say(" is logging in\n");
     cur->st = ST_PLAY;
 
-    /* The join burst: baked bytes, keepalives between blobs. */
+    /* The join burst: baked bytes, keepalives AND a drain between blobs.
+     * The drain is load-bearing, not politeness: the client keeps talking
+     * during the burst (settings, brand, keepalive answers), and a ring
+     * that is never drained crosses "free < MSS", which STOPS uIP's window
+     * — a stopped window drops segments unacked, and the daemon's NAT
+     * eventually reads twenty seconds of unacked retransmissions as a dead
+     * peer and RESETS the client mid-join. Found live, at chunk ~13 of 25.
+     * Between whole blobs a pump is safe: anything it composes (a chat
+     * echo, a Block Change) is a whole packet in a legal gap. */
     if (!send_blob(&BLOB_PRE)) return;
     for (i = 0; i < MC_NCHUNKS; i++) {
       if (!send_blob(&CHUNKS[i])) return;
+      pump();
       if ((i & 3) == 3) {
         if (!send_keepalive()) return;
         cur->ka_at = sys_frames();

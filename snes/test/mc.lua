@@ -142,6 +142,13 @@ emu.addEventCallback(function()
   if step == 5 then
     -- The ping connection goes away mid-join, as the real client's does.
     if not status_sock.closing then status_sock:close() end
+    -- ...and the client CHATTERS during the burst, as the real one does
+    -- (settings, brand, keepalive answers). This is what filled the ring
+    -- when the app did not drain between blobs: uIP stopped the window,
+    -- the segments went unacked, and the live NAT reset a healthy join at
+    -- chunk 13. The drain keeps the ring shallow; this traffic proves it.
+    play_sock:send(pkt(0x05, mcstr("en_us") ..
+                       string.char(2, 0, 0x7F, 1, 1, 1)))
     -- Progress-gated: done when Position And Look (0x34) has arrived and
     -- every frame before it walks cleanly.
     local pkts = walk(play_sock.rx, 1)

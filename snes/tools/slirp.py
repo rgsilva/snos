@@ -58,7 +58,14 @@ FIN, SYN, RST, PSH, ACK = 0x01, 0x02, 0x04, 0x08, 0x10
 # queue -- the backlog grew with every round until the connection was reset.
 # The hermetic test never saw it because its "link" is a Python list.
 RTO = 2.5
-MAX_RETRIES = 8        # then give the connection up
+MAX_RETRIES = 8        # handshake/FIN: then give the connection up
+# Data toward the console is different: uIP's flow control is DROP-WITHOUT-
+# ACK (a stopped window doesn't ack, it ignores), and an app that streams a
+# long burst without draining - mc's join, legitimately - keeps the window
+# shut for minutes. Eight retries read that as death and RESET a healthy
+# client mid-join (found live, silently: the reset wasn't even logged).
+# Patience is bounded by TCP_IDLE anyway, so give data the long rope.
+DATA_RETRIES = 120     # x RTO = five minutes of window-closed tolerance
 UDP_IDLE = 60.0        # forget a UDP flow after this much silence
 ICMP_IDLE = 15.0
 # TCP had none, so any flow where BOTH sides went quiet lived forever: nothing
@@ -249,7 +256,6 @@ class Slirp:
             return
         proto = pkt[9]
         src, dst = struct.unpack("!II", pkt[12:20])
-        self.log(f"DBG rx proto={proto} src={_int2ip(src)} dst={_int2ip(dst)} len={len(pkt)}")
         if src != SNES_INT:
             # Only one machine lives out there. Anything else is a bug on the
             # console worth seeing rather than a packet worth routing.
@@ -661,7 +667,9 @@ class Slirp:
             if t.unacked:
                 if now - t.sent_at > RTO:
                     t.retries += 1
-                    if t.retries > MAX_RETRIES:
+                    if t.retries > DATA_RETRIES:
+                        self.log(f"slirp: giving up on a data segment "
+                                 f"unacked for {t.retries} retries")
                         self._tcp_reset(key, t)
                         continue
                     t.sent_at = now

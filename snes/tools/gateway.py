@@ -25,6 +25,7 @@ client calls (M12).
 then load build/snosbridge.lua in Mesen's Script Window (which needs "Allow
 access to I/O and OS functions" enabled) and type `net status`.
 """
+import argparse
 import os
 import faulthandler
 import signal
@@ -91,6 +92,17 @@ def local_ip():
         return "0.0.0.0"                # no route at all: offline, and say so
     finally:
         s.close()
+
+
+# --debug: every IPv4 datagram both ways, as hex. The link is the console's
+# only voice, so when something goes wrong on the wire this is the whole
+# truth of what crossed it - and hex, not raw bytes, because this lands in
+# somebody's terminal.
+DEBUG = False
+
+
+def _hexdump(tag, data):
+    print(f"{tag} {len(data)}B {data.hex()}")
 
 
 class Gateway:
@@ -171,6 +183,8 @@ class Gateway:
 
     def push_ip(self, datagram):
         """One IPv4 datagram toward the console, length-prefixed."""
+        if DEBUG:
+            _hexdump("IP->snes", datagram)
         self.push(CH_IP, bytes([len(datagram) & 0xFF,
                                 (len(datagram) >> 8) & 0xFF]) + datagram)
 
@@ -245,6 +259,8 @@ class Gateway:
             # answering", miles from the cause. (An IPv6 resolver address in
             # /etc/resolv.conf did exactly this, once.)
             try:
+                if DEBUG:
+                    _hexdump("snes->IP", bytes(self.ipbuf[2:2 + ln]))
                 self.slirp.input(bytes(self.ipbuf[2:2 + ln]))
             except Exception:
                 traceback.print_exc()
@@ -375,6 +391,12 @@ class Gateway:
 
 
 def main():
+    global DEBUG
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--debug", action="store_true",
+                    help="hex-dump every IP datagram in both directions")
+    DEBUG = ap.parse_args().debug
+
     # SIGUSR1 dumps the stack: the only way to see WHERE a wedged daemon is
     # wedged without guessing.
     faulthandler.register(signal.SIGUSR1, all_threads=True)
