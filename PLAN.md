@@ -947,6 +947,70 @@ was current, and it is the format this machine can still read for itself.
 **Done when:** `web` fetches a rendered page over ordinary TCP from a service it did not have to
 be specially wired to, and the console decodes a GIF without help.
 
+### M13 — `mc`: the SNES is a Minecraft server *(planned with Ricardo 2026-08-01, nothing started)*
+
+The dumbest thing ever, chosen with open eyes. A real, unmodified **Java Edition** client joins
+a server whose every TCP segment was composed on a Super Nintendo, spawns into a small static
+world, and walks around. Prior art brackets the ambition: a 1960s UNIVAC did **login only**
+([farlow.dev 2026-04-17](https://farlow.dev/2026/04/17/running-a-minecraft-server-and-more-on-a-1960s-univac-computer),
+derived from bareiron, PPP through a Pi); [bareiron](https://github.com/p2r3/bareiron) on an
+ESP32 does real gameplay but on a CPU ~500× ours. We clear the UNIVAC's bar in step 2 and stop
+well short of bareiron's — the 65816 doesn't need gameplay, it needs the one trick this
+architecture is genuinely good at.
+
+**The trick, and why this is feasible at 3.58 MHz:** don't compute packets — **bake them**.
+Same insight the OS rests on ("load a program is a build-time decision"). A Python world-baker
+generates the exact wire bytes at build time — status JSON, login sequence, Join Game with its
+dimension-codec NBT, every chunk packet, light packets, keepalive/position templates — and packs
+them into the app's ROM banks (an app is N contiguous banks; the header already says so). The
+runtime is httpd with bigger canned responses: a VarInt-length framer that skips client packets
+by length (the discipline every parser in this repo already has), a handshake→status|login→play
+state machine, and a loop streaming ROM blobs into `net_write`. Runtime byte-splicing is limited
+to: the player's name/UUID echoed into Login Success, teleport IDs, keepalive IDs.
+
+**Decisions, locked 2026-08-01 (Ricardo confirmed all four):**
+
+| Decision | Choice | Why |
+|---|---|---|
+| Edition / protocol | **Java, offline mode, protocol 754 (1.16.5)** | Plain TCP (Bedrock is RakNet/UDP + mandatory compression — fights uIP instead of riding it). Pre-1.19 = no chat signing; pre-1.20.5 = no configuration-phase registry dump (tens of KB before the world starts, painful at 600 B/s); palette-era chunks (1.13+) make a superflat section ~1–2 KB. bareiron stays open as the map of client expectations. |
+| Compression | **Never** — Set Compression is simply never sent | zlib DEFLATE on a 65816 is where the idea dies; the protocol makes it optional and the server decides. |
+| Encryption | **None** — offline mode | Same reason TLS is out, period-correctly. |
+| Players | **One at a time** | uIP's listen serves one connection per port by design (the M11 known limit). A Minecraft server for exactly one friend. |
+| World | **Static, prebaked, small** (~9×9 chunks, view distance 2) | A palette-era superflat chunk ≈ 1–3 KB with biomes+light; the whole world is well under 200 KB against ~3 MB of free cart. Sculpt something (a block-art SNES logo) rather than bare flatness — it costs ROM, which is the one thing we have. |
+| Interactions | Ignore, except the cute one | Player digging gets a canned Block Update restoring the block: **the SNES puts the world back.** Static world enforced diegetically. |
+
+**Steps, each shippable, suite green after each:**
+
+1. **The baker, validated without the SNES.** `tools/mkmc.py` emits the baked blobs; a
+   ~100-line host prober serves those exact bytes over a real socket to a real 1.16.5 client on
+   the Mac. Proves every byte before the 65816 is involved — the protocol knowledge lives in
+   Python, testable at desk speed. **Done when:** a real client logs into the Python-served
+   bytes and walks the baked world.
+2. **Login on the console** — the UNIVAC bar. App `mc` (netecho-shaped): VarInt framer,
+   handshake/status/login states, blobs streamed from its own ROM banks, name/UUID splice.
+   **Done when:** the real client sees the SNES in its server list (MOTD and all) and completes
+   login to "Loading terrain"; a gwip canned-client transcript asserts the status JSON and the
+   login sequence hermetically.
+3. **The world.** Chunk streaming spawn-first at view distance 2, Update Light, position +
+   teleport-confirm acceptance, keepalives on a frame timer (~600 frames), client packet drain.
+   **Done when:** the real client spawns and walks around; the hermetic test asserts a scripted
+   client receives the spawn chunks byte-identical to the baked blobs with keepalives on
+   cadence.
+4. **The demo dressing.** Join/chat events on the console screen (UTF-8 sanitized to the
+   console's ASCII), chat FROM the SNES keyboard as System Chat, the dig-revert Block Update,
+   `mc &` background + SYS_NOTIFY on join. **Done when:** chat round-trips and a punched block
+   restores itself, asserted hermetically; a live session is recorded here.
+5. **Docs**: gateway.md gets a "join it from your Mac" section (add server → the address `net
+   status` prints, port 25565 forwarded via IPFWD like any listener); README status row.
+
+**Known risks, named in advance:** the join burst vs client patience is the one empirical
+unknown — ~27 KB of spawn chunks is ~45 s at the emulated link's ~600 B/s, brushing client
+timeouts (mitigations: spawn-chunk-first order, keepalives from the first second, view distance
+2; the real cable's ~20 KB/s makes it ~2 s, so M7 hardware is where this demo gets smooth).
+Client fiddliness (brand/plugin channels, teleport confirms, position spam ~1 KB/s inbound to
+drain) is discovered live against the real client, which is why step 1 front-loads it on the
+host. Step 2 is the milestone's early exit: if the risks bite, login-only already matches the
+UNIVAC.
 
 ---
 
