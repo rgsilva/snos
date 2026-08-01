@@ -56,17 +56,26 @@ int ip_up(void); /* link up AND the gateway claimed IP support */
  *
  * ONE query at a time, deliberately. A resolver cache and parallel queries
  * are what you build when name lookup is on a critical path; here it happens
- * once per connection, on a machine whose link moves 600 bytes a second. */
+ * once per connection, on a machine whose link moves 600 bytes a second.
+ *
+ * The slot is single but the ANSWER is tagged. ip_resolve hands back a
+ * nonzero tag naming this lookup, and every later call takes it: a caller
+ * whose lookup has been superseded reads FAIL rather than somebody else's
+ * address. That closes the recorded one-frame race (an answer arriving and a
+ * second lookup starting before the asker read it) without the owned-until-
+ * released scheme that was tried and reverted — a stale tag can never lock
+ * the resolver, because the slot itself was never the thing being owned. */
 #define IP_RES_IDLE 0
 #define IP_RES_BUSY 1
 #define IP_RES_OK 2
 #define IP_RES_FAIL 3
-int ip_resolve(const char *name); /* start a lookup: 0 ok, -1 busy/not up */
-int ip_resolve_state(void);
-void ip_resolve_addr(uint8_t out[4]); /* valid while state == IP_RES_OK */
-/* Hand the resolver back. The answer belongs to the asker until this is
- * called, so nothing else can overwrite it in between. */
-void ip_resolve_release(void);
+int ip_resolve(const char *name); /* start a lookup: tag > 0, -1 busy/not up */
+int ip_resolve_state(uint8_t tag); /* FAIL for a superseded tag */
+int ip_resolve_slot(void); /* the slot's raw state — `net status` only */
+void ip_resolve_addr(uint8_t tag, uint8_t out[4]); /* only while OK and current */
+/* Hand the resolver back. A stale tag is a no-op, so a caller that gave up
+ * long ago cannot kill the lookup somebody else is waiting on. */
+void ip_resolve_release(uint8_t tag);
 
 /* ---- TCP, behind the existing ABI ----------------------------------------
  *

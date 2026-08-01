@@ -13,44 +13,47 @@
  * overwritten if it exists. Two commands (`get` printing, `download` saving)
  * meant no way to tell from a call site which behaviour you had.
  *
- * ------------------------------------------------------------------- images
+ * ------------------------------------------------------------ the request
  *
- * There is no `image` command and no flag. The gateway looks at the
- * Content-Type and converts a picture to Mode 3 tile data on its own, because
- * it is the only party that knows what came back and the only one that could
- * decode it anyway. Asking the user to declare it in advance was asking for
- * information the system already had.
+ * Since the uIP cutover this is a real HTTP client: the request line below
+ * goes out over the console's own TCP, the status line and headers come back
+ * as bytes in the stream, and this file parses them. HTTP/1.0 on purpose —
+ * the reply is "everything until the server closes", so there is no chunked
+ * encoding and no Content-Length arithmetic, which is exactly the protocol a
+ * machine this size wants. It is also period-correct to the month.
  *
- * When that happens the saved name is forced to .IMG — the bytes are no longer
- * the resource that was requested, they are a rendition of it, and `view` finds
- * files by name. Printing them to the console is refused rather than sprayed.
+ * https:// is refused, honestly: TLS does not fit this machine and never
+ * will (PLAN.md M11 — "back in the day this wouldn't exist anyway"). The
+ * gateway that once terminated it for us is gone; anything that needs it can
+ * be fronted by a plain-HTTP service (M12).
+ *
+ * Images: the old gateway converted pictures to Mode 3 tiles in flight. No
+ * conversion happens anywhere now — what the server sends is what lands. A
+ * file that already IS tile data (.IMG) downloads byte-for-byte and `view`
+ * shows it, which is the M12 shape: conversion as an ordinary HTTP service.
  */
 #include "snos_abi.h"
 #include "snoslib.h"
 
 #define BUF 128
 #define NAME_MAX 16
+#define HOST_MAX 48
+#define PATH_MAX 128
 
-/* Conversion happens before the gateway answers, and quantising a large JPEG
- * is seconds of work on the far side — so the wait for a status has to be
- * generous. A plain fetch of a slow server can take just as long, so there is
- * no reason to distinguish. */
-/* How long to wait for the gateway's answer, covering DNS, TCP, TLS, the
- * download and — for a picture — decoding and rescaling it.
- *
- * Instrumenting the gateway showed the whole sequence takes 0.3 s for a 960 KB
- * PNG, so thirty seconds is already a hundredfold margin. I had raised this to
- * two minutes on the theory that a slow conversion was causing the reported
- * timeouts; the measurement says otherwise, so it goes back. The wait being
- * interruptible and visible below is worth keeping on its own merits. */
+/* How long to wait for the connection: DNS on the console, the SYN through
+ * the NAT, and a slow server's accept. A real Internet host through the
+ * daemon answers in well under a second; thirty is the "something is wrong,
+ * tell me about it" bound, and the wait is visible and interruptible. */
 #define OPEN_DEADLINE 1800u
 
 static char args[SNOS_ARGV_MAX];
 static char name[NAME_MAX + 1];
+static char hostport[HOST_MAX + 8];
+static char host[HOST_MAX + 1];
+static char path[PATH_MAX + 1];
 static uint8_t buf[BUF];
 
 static void say(const char *s) { sys_puts(s); }
-
 
 /* Split off the first word in place; returns the rest. */
 static char *split(char *s) {
@@ -78,60 +81,57 @@ static void copy_name(const char *src, char *dst) {
   dst[i] = 0;
 }
 
-static void force_img_ext(char *n) {
-  int i = 0, dot = -1;
-  while (n[i]) {
-    if (n[i] == '.') dot = i;
+static int starts_with(const char *s, const char *p) {
+  int i = 0;
+  while (p[i]) {
+    if (s[i] != p[i]) return 0;
     i++;
   }
-  if (dot >= 0) i = dot;
-  if (i > NAME_MAX - 4) i = NAME_MAX - 4;
-  n[i++] = '.';
-  n[i++] = 'I';
-  n[i++] = 'M';
-  n[i++] = 'G';
-  n[i] = 0;
+  return 1;
 }
 
-/* Last path segment of a URL, for when no name is wanted from it. Kept because
- * a converted image always needs a name even if DEST said something else. */
-static void name_from_url(const char *url, char *out) {
-  const char *p = url, *seg = url;
-  int i = 0;
+/* url -> host[:port] and /path. Returns 0 on success, -1 on a URL this
+ * machine cannot speak. The scheme is optional; the path defaults to "/". */
+static int parse_url(const char *url) {
+  int i = 0, h = 0, p = 0;
+  if (starts_with(url, "https://")) return -1; /* refused, loudly, above */
+  if (starts_with(url, "http://")) i = 7;
+  else if (url[0] == 0) return -1;
+  while (url[i] && url[i] != '/' && h < HOST_MAX) host[h++] = url[i++];
+  host[h] = 0;
+  if (h == 0 || url[i] == 0) {
+    path[0] = '/';
+    path[1] = 0;
+  } else {
+    while (url[i] && p < PATH_MAX) path[p++] = url[i++];
+    path[p] = 0;
+    if (url[i]) return -1; /* path longer than this machine cares to carry */
+  }
+  if (h == 0) return -1;
+  /* :80 unless the URL named a port of its own. */
+  sl_hostport(hostport, (int)sizeof hostport, host, ":80");
+  return 0;
+}
 
-  while (*p) { /* skip the scheme so "//" is not read as a path separator */
-    if (p[0] == '/' && p[1] == '/') {
-      p += 2;
-      seg = p;
-      break;
-    }
-    if (*p == '/') break;
-    p++;
-  }
-  for (; *p; p++) {
-    if (*p == '/') seg = p + 1;
-    else if (*p == '?' || *p == '#') break;
-  }
-  for (; seg < p && *seg && i < NAME_MAX; seg++) {
-    char c = *seg;
-    if (c == '?' || c == '#') break;
-    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-    out[i++] = c;
-  }
-  out[i] = 0;
-  if (i == 0) {
-    const char *d = "INDEX.HTM";
-    while (*d) out[i++] = *d++;
-    out[i] = 0;
-  }
+/* Trim a ":port" suffix off `host` for the Host: header — the header wants
+ * the name, and the port only when it is not the default. Keeping the port
+ * in would usually work; keeping it out always works at our scale. */
+static void host_only(char *s) {
+  int i = 0;
+  while (s[i] && s[i] != ':') i++;
+  s[i] = 0;
 }
 
 int main(void) {
   char *url, *dest;
-  uint16_t ch, st, http, is_img;
+  uint16_t ch, st;
   uint16_t deadline;
-  uint32_t got = 0, budget, dots = 0;
-  int to_console, aborted = 0, full = 0;
+  uint32_t got = 0, budget = 0, dots = 0;
+  uint16_t http = 0;
+  int to_console, to_file_open = 0, aborted = 0, full = 0;
+  /* Response parsing: 0 = status line, 1 = headers, 2 = body. */
+  int phase = 0, digits = 0, nl = 0;
+
   snos_getargs(args, sizeof args);
   url = args;
   dest = split(args);
@@ -142,14 +142,23 @@ int main(void) {
     return 1;
   }
   if (!sys_net_up()) {
-    say("no gateway attached\n");
+    say("no link attached\n");
+    return 1;
+  }
+  if (starts_with(url, "https://")) {
+    say("https needs TLS, which this machine does not do\n");
+    say("(period-correct; try http://, or front it with a service)\n");
+    return 1;
+  }
+  if (parse_url(url) < 0) {
+    say("cannot parse that URL (http://host[:port]/path)\n");
     return 1;
   }
 
   to_console = (dest[0] == '-' && dest[1] == 0);
-  ch = sys_net_fetch(url);
+  ch = sys_net_connect(hostport);
   if (ch == SYS_ERR) {
-    say("fetch failed: no free channel\n");
+    say("connect failed: no free channel or no ip (net status)\n");
     return 1;
   }
   deadline = (uint16_t)(sys_frames() + OPEN_DEADLINE);
@@ -160,26 +169,22 @@ int main(void) {
       st = sys_net_state(ch);
       if (st != NET_ST_OPENING) break;
       if ((int16_t)(sys_frames() - deadline) >= 0) {
-        /* Say which half stalled. A gateway log showing a clean fetch next to a
-         * SNES showing a timeout is not a contradiction — it means the reply
-         * never crossed the link — but the bare message left both ends equally
-         * suspect, and I burned a lot of time guessing between them. If frames
-         * moved during the wait the link is alive and the answer went missing;
-         * if they did not, the bridge is not running. */
+        /* Say which half stalled. If frames moved during the wait the link is
+         * alive and the answer went missing (DNS, or the far host); if they
+         * did not, the bridge is not running. */
         uint16_t moved = (uint16_t)(sys_net_stats() - frames0);
-        say("\ntimeout waiting for the gateway\n");
+        say("\ntimeout waiting for the connection\n");
         sys_putu(moved);
         say(" frames in, ");
         sys_putu(SNOS_ARGS.p0);
         say(" resends\n");
-        say(moved ? "link is alive - the reply never crossed it\n"
+        say(moved ? "link is alive - DNS or the far host never answered\n"
                   : "nothing came back - check the bridge and the daemon\n");
         sys_net_close(ch);
         return 1;
       }
-      /* Any key abandons the wait. Converting a large picture takes long enough
-       * that a silent, uninterruptible pause is indistinguishable from a hang —
-       * which is exactly what it looked like. */
+      /* Any key abandons the wait: a silent, uninterruptible pause is
+       * indistinguishable from a hang, which is what it used to be. */
       if (sys_pollkey() != SYS_ERR) {
         say("\n[cancelled]\n");
         sys_net_close(ch);
@@ -196,100 +201,45 @@ int main(void) {
       sys_putc('\n'); /* close the dotted line if we printed any */
   }
 
-  /* sys_net_state leaves the status in p0 and the image flag in p1. Read them
-   * before anything else calls a syscall and overwrites the block. */
-  http = SNOS_ARGS.p0;
-  is_img = SNOS_ARGS.p1;
-
-  if (st == NET_ST_ERROR) {
-    say("gateway error ");
-    sys_putu(http);
-    sys_putc('\n');
+  if (st != NET_ST_OPEN) {
+    say("connect failed (DNS, or the host refused)\n");
     sys_net_close(ch);
     return 1;
   }
 
-  if (to_console) {
-    if (is_img) {
-      /* Tile data is not text. Refusing is more useful than 43 KB of noise. */
-      say("that is a picture - give it a filename, then: view NAME\n");
-      sys_net_close(ch);
-      return 1;
-    }
-    say("HTTP ");
-    sys_putu(http);
-    sys_putc('\n');
-    for (;;) {
-      uint16_t n = sys_net_read(ch, buf, BUF);
-      uint16_t i;
-      if (n > 0 && n != SYS_ERR) {
-        for (i = 0; i < n; i++) sys_putc(buf[i]);
-        got += n;
-        /* Checked on EVERY pass, exactly like the save loop below and for
-         * the reason its comment gives: a wait that only checks when the
-         * ring runs dry is uninterruptible exactly when it is longest. */
-        if (sys_pollkey() != SYS_ERR) {
-          say("\n[aborted]\n");
-          break;
-        }
-        continue;
+  /* The request. Bytes this machine composed, on a socket this machine owns —
+   * paced against the send queue, because a partial request is worse than
+   * none: the server parses what arrived. */
+  {
+    const char *part[6];
+    int pi;
+    host_only(host);
+    part[0] = "GET ";
+    part[1] = path;
+    part[2] = " HTTP/1.0\r\nHost: ";
+    part[3] = host;
+    part[4] = "\r\n\r\n";
+    part[5] = 0;
+    for (pi = 0; part[pi]; pi++) {
+      uint16_t n = 0;
+      while (part[pi][n]) n++;
+      if (!sl_send_all(ch, part[pi], n)) {
+        say("the connection died mid-request\n");
+        sys_net_close(ch);
+        return 1;
       }
-      if (sys_pollkey() != SYS_ERR) {
-        say("\n[aborted]\n");
-        break;
-      }
-      st = sys_net_state(ch);
-      if (st != NET_ST_OPEN && st != NET_ST_OPENING) break;
-      sys_yield();
     }
-    say("\n[");
-    sl_putu32(got);
-    say(" bytes]\n");
-    sys_net_close(ch);
-    return 0;
   }
 
-  if (http != 200) {
-    say("HTTP ");
-    sys_putu(http);
-    say(" - not saved\n");
-    sys_net_close(ch);
-    return 1;
-  }
-
-  copy_name(dest, name);
-  if (name[0] == 0) name_from_url(url, name);
-  if (is_img) force_img_ext(name);
-
-  /* Refuse before transferring rather than after filling the volume. */
-  budget = (uint32_t)sys_fs_free() << 10;
-  if (budget < 1024ul) {
-    say("not enough room on the SRAM volume\n");
-    sys_net_close(ch);
-    return 1;
-  }
-
-  snos_set_ptr(name);
-  if (sys_open(1) == SYS_ERR) {
-    say("cannot create ");
-    say(name);
-    sys_putc('\n');
-    sys_net_close(ch);
-    return 1;
-  }
-
-  say("-> ");
-  say(name);
-  sys_putc('\n');
-
+  /* The response: status line, headers, body — a state machine over the
+   * stream, because that is all an HTTP/1.0 response is. The body ends when
+   * the server closes, which arrives here as EOF. */
   for (;;) {
     uint16_t n, i;
 
-    /* Poll for an abort on EVERY pass, not only when the ring runs dry. The
-     * obvious placement, beside the state check below, is reached only when no
-     * data is waiting — so a transfer that streams steadily becomes
-     * uninterruptible exactly when it is longest, which is the case this
-     * exists for. */
+    /* Poll for an abort on EVERY pass, not only when the ring runs dry: a
+     * transfer that streams steadily is uninterruptible exactly when it is
+     * longest otherwise. */
     if (sys_pollkey() != SYS_ERR) {
       aborted = 1;
       break;
@@ -297,27 +247,86 @@ int main(void) {
 
     n = sys_net_read(ch, buf, BUF);
     if (n > 0 && n != SYS_ERR) {
-      if ((uint32_t)n > budget) {
-        full = 1;
-        break;
-      }
       for (i = 0; i < n; i++) {
-        if (sys_putc_f(buf[i]) == SYS_ERR) {
-          full = 1;
-          break;
+        uint8_t c = buf[i];
+        if (phase == 0) {
+          /* "HTTP/1.x NNN ...": collect the first run of digits. */
+          if (c >= '0' && c <= '9' && digits < 3) {
+            http = (uint16_t)(http * 10u + (c - '0'));
+            digits++;
+          } else if (c == '\n') {
+            phase = 1;
+            nl = 1;
+          }
+          continue;
+        }
+        if (phase == 1) {
+          /* Headers end at the first empty line. */
+          if (c == '\n') {
+            nl++;
+            if (nl >= 2) {
+              phase = 2;
+              /* Decide the sink now that the status is known. */
+              if (!to_console) {
+                if (http != 200) {
+                  say("HTTP ");
+                  sys_putu(http);
+                  say(" - not saved\n");
+                  sys_net_close(ch);
+                  return 1;
+                }
+                copy_name(dest, name);
+                /* Refuse before transferring rather than after filling the
+                 * volume. */
+                budget = (uint32_t)sys_fs_free() << 10;
+                if (budget < 1024ul) {
+                  say("not enough room on the SRAM volume\n");
+                  sys_net_close(ch);
+                  return 1;
+                }
+                snos_set_ptr(name);
+                if (sys_open(1) == SYS_ERR) {
+                  say("cannot create ");
+                  say(name);
+                  sys_putc('\n');
+                  sys_net_close(ch);
+                  return 1;
+                }
+                to_file_open = 1;
+                say("-> ");
+                say(name);
+                sys_putc('\n');
+              } else {
+                say("HTTP ");
+                sys_putu(http);
+                sys_putc('\n');
+              }
+            }
+          } else if (c != '\r') {
+            nl = 0;
+          }
+          continue;
+        }
+        /* Body. */
+        if (to_console) {
+          sys_putc((char)c);
+          got++;
+        } else {
+          if (budget == 0 || sys_putc_f(c) == SYS_ERR) {
+            full = 1;
+            break;
+          }
+          budget--;
+          got++;
+          /* One dot per kilobyte — a livelier readout costs vblanks and
+           * literally slows the transfer it reports on. */
+          while (dots < (got >> 10)) {
+            sys_putc('.');
+            dots++;
+          }
         }
       }
       if (full) break;
-      got += n;
-      budget -= n;
-      /* One dot per kilobyte. Not a repainted byte count: redrawing costs a
-       * vblank each time, and the link is skipped on any frame the console is
-       * still dirty — so a livelier readout literally slows the transfer it is
-       * reporting on. */
-      while (dots < (got >> 10)) {
-        sys_putc('.');
-        dots++;
-      }
       continue;
     }
     st = sys_net_state(ch);
@@ -325,9 +334,23 @@ int main(void) {
     sys_yield();
   }
 
-  sys_putc('\n');
-  sys_close();
+  if (to_file_open) {
+    sys_putc('\n');
+    sys_close();
+  }
+  sys_net_close(ch);
 
+  if (phase < 2) {
+    say(aborted ? "[cancelled]\n"
+                : "no response - the server closed before answering\n");
+    return 1;
+  }
+  if (to_console) {
+    say("\n[");
+    sl_putu32(got);
+    say(" bytes]\n");
+    return 0;
+  }
   if (full) say("[volume full - partial file kept]\n");
   else if (aborted) say("[aborted - partial file kept]\n");
   else {
@@ -337,6 +360,5 @@ int main(void) {
     sl_putu32(got);
     say(" bytes\n");
   }
-  sys_net_close(ch);
   return 0;
 }

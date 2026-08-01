@@ -381,6 +381,11 @@ static uint16_t res_id;
 static uint8_t res_state;
 static uint8_t res_addr[4];
 static uint8_t res_tries;
+/* Which lookup the slot currently holds. Handed to the caller by ip_resolve
+ * and demanded back by every query: a caller with yesterday's tag sees FAIL,
+ * never the answer to somebody else's question. Never 0, so a zeroed caller
+ * variable cannot accidentally match. */
+static uint8_t res_tag;
 static struct uip_udp_conn *res_conn;
 /* Set by ip_resolve, consumed by ip_service: the query is BUILT by the
  * caller and SENT by the service pass, because nothing outside ip_service
@@ -500,38 +505,35 @@ void snos_udp_appcall(void) {
 int ip_resolve(const char *name) {
   int i;
   if (!ip_up()) return -1;
-  /* Only BUSY refuses. Holding the resolver until the asker released it was
-   * tried and is worse than the race it closed: any path that forgot to
-   * release — or gave up waiting — locked out every later lookup for the
-   * life of the boot, and by-name connects then failed with a timeout that
-   * pointed nowhere near the resolver.
-   *
-   * The residual race is narrow and named: between an answer arriving and
-   * the asker reading it (one frame, since every waiter polls per frame) a
-   * second lookup can overwrite the result. Both consumers copy the address
-   * out the moment they see OK. Fixing it properly means a request tag per
-   * caller, which is worth doing when something needs two lookups at once. */
+  /* Only BUSY refuses. A finished answer nobody has read yet may be
+   * displaced — the displaced asker's tag goes stale and it reads FAIL,
+   * which is the honest outcome of losing the slot, where the old scheme
+   * silently handed it the new lookup's address. Holding the slot until an
+   * explicit release was tried and reverted: one forgotten release locked
+   * the resolver for the life of the boot. */
   if (res_state == IP_RES_BUSY) return -1;
   for (i = 0; i < RES_NAME_MAX && name[i]; i++) res_name[i] = name[i];
   if (i == 0 || (i == RES_NAME_MAX && name[i])) return -1;
   res_name[i] = 0;
   res_id++;
   if (res_build(res_name) < 0) return -1;
+  res_tag = (uint8_t)(res_tag + 1);
+  if (res_tag == 0) res_tag = 1;
   res_state = IP_RES_BUSY;
   res_tries = 4; /* ~2 s of patience, at one try per periodic tick */
   res_started = snos_frames;
   res_kick = 1;  /* ip_service sends it on its next pass, about a frame away */
-  return 0;
+  return (int)res_tag;
 }
 
-/* The asker is done with the answer. Until this is called the result belongs
- * to whoever asked for it and no new lookup can start. */
-void ip_resolve_release(void) {
+/* The asker is done with the answer — or has given up waiting. Only the
+ * lookup's own tag releases it; anyone else's slot is left alone. */
+void ip_resolve_release(uint8_t tag) {
   /* BUSY counts too. A caller that gave up waiting (host_addr's deadline)
    * still owns the lookup, and leaving it BUSY made the resolver refuse
    * every request afterwards for the life of the boot — one slow answer and
    * the machine could never resolve another name. */
-  res_state = IP_RES_IDLE;
+  if (tag == res_tag) res_state = IP_RES_IDLE;
 }
 
 /* Create the resolver's socket and push the query out. ip_service only. */
@@ -554,10 +556,16 @@ static void res_service(void) {
   ip_send_uip();
 }
 
-int ip_resolve_state(void) { return res_state; }
+int ip_resolve_state(uint8_t tag) {
+  if (tag != res_tag) return IP_RES_FAIL; /* superseded: the slot moved on */
+  return res_state;
+}
 
-void ip_resolve_addr(uint8_t out[4]) {
+int ip_resolve_slot(void) { return res_state; }
+
+void ip_resolve_addr(uint8_t tag, uint8_t out[4]) {
   int i;
+  if (tag != res_tag) return;
   for (i = 0; i < 4; i++) out[i] = res_addr[i];
 }
 
@@ -599,6 +607,7 @@ static struct {
   uint8_t busy;      /* a connect is waiting on this channel */
   uint8_t resolving; /* ...and its name is with the resolver right now */
   uint8_t have_addr; /* the address is known; no lookup needed */
+  uint8_t tag;       /* which lookup is ours, while resolving */
 } pend[NET_CHANNELS];
 
 /* Ports this console is listening on, per channel. uIP's own listen list is
@@ -760,24 +769,36 @@ static void pend_service(void) {
       continue;
     }
     if (pend[i].resolving) {
-      int st = ip_resolve_state();
+      int st = ip_resolve_state(pend[i].tag);
       if (st == IP_RES_BUSY) return; /* still working; nobody else may start */
       pend[i].resolving = 0;
       pend[i].busy = 0;
       if (st == IP_RES_OK) {
         uint8_t a[4];
-        ip_resolve_addr(a);
+        ip_resolve_addr(pend[i].tag, a);
         if (start_connect(i, a, pend[i].port) < 0)
           net_stack_setstate(i, NET_ST_ERROR);
       } else {
         net_stack_setstate(i, NET_ST_ERROR);
       }
-      ip_resolve_release(); /* our answer, consumed */
+      ip_resolve_release(pend[i].tag); /* our answer, consumed */
       continue;
     }
-    if (ip_resolve(pend[i].host) == 0) {
-      pend[i].resolving = 1;
-      return; /* one lookup at a time */
+    {
+      int tag = ip_resolve(pend[i].host);
+      if (tag > 0) {
+        pend[i].tag = (uint8_t)tag;
+        pend[i].resolving = 1;
+        return; /* one lookup at a time */
+      }
+      /* Refused with the resolver idle: the NAME is unusable (malformed, or
+       * too long), and retrying next pass would wedge this slot — and, via
+       * the return below, every later channel's pending connect — forever. */
+      if (res_state != IP_RES_BUSY) {
+        pend[i].busy = 0;
+        net_stack_setstate(i, NET_ST_ERROR);
+        continue;
+      }
     }
     /* The resolver is busy with somebody else's name: try again next pass. */
     return;

@@ -61,7 +61,11 @@
  * what a server or an IRC client needs. Version 8 was the browser calls,
  * retired with the web app; the numbers stay reserved. Version 9 is M10:
  * SYS_NOTIFY, and per-process file handles under the same fs syscalls. */
-#define SNOS_ABI_VERSION 11
+/* Version 12 is the uIP-only cutover: SYS_NET_FETCH is retired (fetching is
+ * an HTTP request the application composes itself over SYS_NET_CONNECT), and
+ * SYS_NET_STATE stopped writing p0/p1 — there is no gateway to report an
+ * HTTP status or an image flag, only bytes in the stream. */
+#define SNOS_ABI_VERSION 12
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -160,14 +164,15 @@
 /* $50-$5F  time */
 #define SYS_FRAMES 0x50   /* -> free-running 60 Hz frame counter */
 #define SYS_WAITVBL 0x51
-/* $60-$6F  network. Streams via a gateway; see kernel/net.h for why the
- * gateway does TLS and HTTP and the SNES does not. */
-#define SYS_NET_UP 0x60    /* -> 1 if a gateway is attached */
-#define SYS_NET_FETCH 0x61 /* p0/p1 = URL -> channel, or SYS_ERR */
+/* $60-$6F  network. Channels on the console's own TCP/IP stack (M11); the
+ * daemon on the far end is a NAT, not a protocol proxy. */
+#define SYS_NET_UP 0x60    /* -> 1 if a link peer is attached */
+/* $61 was SYS_NET_FETCH ("gateway, do an HTTP request for me"), retired at
+ * ABI 12: an HTTP request is bytes an application writes on its own
+ * connection now. Reserved, never reused. */
 #define SYS_NET_READ 0x62  /* p0/p1 = buffer, p2 = channel, A = max -> count */
-/* A = channel -> NET_ST_*; p0 = HTTP status; p1 = 1 if the gateway converted
- * the body to Mode 3 tile data (it decides from the Content-Type, so nothing
- * has to be declared in advance). */
+/* A = channel -> NET_ST_*. (Until ABI 12 this also reported the gateway's
+ * HTTP status and image flag in p0/p1; both died with the gateway protocol.) */
 #define SYS_NET_STATE 0x63
 #define SYS_NET_CLOSE 0x64 /* A = channel */
 
@@ -285,7 +290,6 @@ uint16_t sys_dir(uint16_t index);
 uint16_t sys_unlink(void);
 uint16_t sys_trace_raw(void);
 uint16_t sys_net_up(void);
-uint16_t sys_net_fetch_raw(void); /* URL in the parameter block */
 uint16_t sys_net_read_raw(uint16_t max);
 uint16_t sys_net_state(uint16_t ch);
 uint16_t sys_net_close(uint16_t ch);
@@ -381,12 +385,6 @@ static uint16_t sys_trace(const char *s) {
 #define SNOS_NET_OPEN 2
 #define SNOS_NET_EOF 3
 #define SNOS_NET_ERROR 4
-
-static uint16_t sys_net_fetch(const char *url) {
-  snos_set_ptr(url);
-  return sys_net_fetch_raw();
-}
-
 
 static uint16_t sys_read_f(void *buf, uint16_t max) {
   snos_set_ptr((const char *)buf);

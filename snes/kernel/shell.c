@@ -908,7 +908,7 @@ static void cmd_net_status(void) {
     kcon_puts(", dns ");
     /* The resolver is a single shared slot, so "what is it doing" is a real
      * question when a connection will not start. */
-    switch (ip_resolve_state()) {
+    switch (ip_resolve_slot()) {
     case IP_RES_IDLE: kcon_puts("idle"); break;
     case IP_RES_BUSY: kcon_puts("BUSY"); break;
     case IP_RES_OK: kcon_puts("held"); break;
@@ -916,7 +916,12 @@ static void cmd_net_status(void) {
     }
     kcon_putc('\n');
   } else {
-    kcon_puts("no ip (gateway v1: streams only)\n");
+    /* The daemon answered HELLO but never claimed NAT support. Since the
+     * cutover there is no stream fallback: nothing network-shaped works
+     * against it, and saying so here beats every app failing one by one. */
+    kcon_puts("no ip - daemon did not claim NAT (v");
+    kcon_putu(net_gw_version);
+    kcon_puts("); nothing will connect\n");
   }
 }
 
@@ -950,31 +955,38 @@ static int parse_quad(const char *s, uint8_t out[4]) {
  * success and prints its own diagnosis on failure. */
 static int host_addr(const char *s, uint8_t out[4]) {
   uint16_t deadline;
+  int tag;
   if (parse_quad(s, out) == 0) return 0;
   if (!ip_up()) {
     kcon_puts("no ip: names need the console's own resolver\n");
     return -1;
   }
-  if (ip_resolve(s) < 0) {
+  tag = ip_resolve(s);
+  if (tag < 0) {
     kcon_puts("resolver busy or the name is unusable\n");
     return -1;
   }
   deadline = (uint16_t)(snos_frames + 300u); /* 5 s: four tries, half a second
                                               * apart, plus the round trips */
-  while (ip_resolve_state() == IP_RES_BUSY) {
+  while (ip_resolve_state((uint8_t)tag) == IP_RES_BUSY) {
     if ((int16_t)(snos_frames - deadline) >= 0) break;
-    if (snos_break_taken()) return -1;
+    if (snos_break_taken()) {
+      /* Safe now that release is tag-checked: if the slot has moved on to
+       * another asker, this is a no-op rather than a theft. */
+      ip_resolve_release((uint8_t)tag);
+      return -1;
+    }
     kbd_idle();
   }
-  if (ip_resolve_state() != IP_RES_OK) {
+  if (ip_resolve_state((uint8_t)tag) != IP_RES_OK) {
     kcon_puts("cannot resolve ");
     kcon_puts(s);
     kcon_putc('\n');
-    ip_resolve_release();
+    ip_resolve_release((uint8_t)tag);
     return -1;
   }
-  ip_resolve_addr(out);
-  ip_resolve_release();
+  ip_resolve_addr((uint8_t)tag, out);
+  ip_resolve_release((uint8_t)tag);
   return 0;
 }
 
@@ -1007,7 +1019,7 @@ static void cmd_ping(const char *rest) {
     return;
   }
   if (!ip_up()) {
-    kcon_puts(net_up() ? "no ip - this gateway is streams-only (net status)\n"
+    kcon_puts(net_up() ? "no ip - the daemon has not claimed NAT (net status)\n"
                        : "no link (the bridge script is not running)\n");
     return;
   }
@@ -1043,29 +1055,36 @@ static void cmd_ping(const char *rest) {
   }
 }
 
-/* `net test` — prove the whole path works, end to end.
+/* `net test` — prove the whole path works, end to end: the console's own
+ * resolver, its own SYN, its own request bytes, through the NAT to a real
+ * host and back.
  *
  * Deliberately accepts ANY response, including an error page. The target is
- * behind Cloudflare and will refuse most non-browser requests, which is fine:
- * getting *anything* back means DNS resolved, TCP connected, TLS completed and
- * the link carried bytes in both directions. Asserting on the content would
- * test Cloudflare's mood rather than our networking. */
-static const char NET_TEST_URL[] = "https://rgsilva.com/";
+ * behind Cloudflare and will refuse most non-browser requests, which is
+ * fine: getting *anything* back means DNS resolved, TCP connected and the
+ * link carried bytes in both directions. Asserting on the content would test
+ * Cloudflare's mood rather than our networking. Plain port 80 — TLS is not a
+ * thing this machine does, period-correctly. */
+static const char NET_TEST_HOST[] = "rgsilva.com:80";
 
 static uint8_t net_test_buf[64];
 
 static void cmd_net_test(void) {
-  int ch, st;
+  static const char REQ[] = "GET / HTTP/1.0\r\nHost: rgsilva.com\r\n\r\n";
+  int ch, st, sent = 0;
   uint32_t got = 0;
-  uint16_t deadline, http;
+  uint16_t deadline;
 
-  if (!net_up()) {
-    kcon_puts("fail (no gateway)\n");
+  if (!ip_up()) {
+    kcon_puts(net_up() ? "fail (no ip - is the daemon tools/gateway.py?)\n"
+                       : "fail (no link - the bridge is not running)\n");
     return;
   }
-  kcon_puts("testing...\n");
+  kcon_puts("testing ");
+  kcon_puts(NET_TEST_HOST);
+  kcon_puts("...\n");
 
-  ch = net_fetch(NET_TEST_URL);
+  ch = net_connect(NET_TEST_HOST);
   if (ch < 0) {
     kcon_puts("fail (no free channel)\n");
     return;
@@ -1074,11 +1093,24 @@ static void cmd_net_test(void) {
   deadline = (uint16_t)(snos_frames + 900u);
   while (net_state(ch) == NET_ST_OPENING) {
     if ((int16_t)(snos_frames - deadline) >= 0) {
-      kcon_puts("fail (timed out)\n");
+      kcon_puts("fail (connect timed out)\n");
       net_close(ch);
       return;
     }
     kbd_idle();
+  }
+  if (net_state(ch) != NET_ST_OPEN) {
+    kcon_puts("fail (connect refused - DNS or the NAT)\n");
+    net_close(ch);
+    return;
+  }
+
+  while (REQ[sent]) {
+    int n = net_write(ch, (const uint8_t *)REQ + sent,
+                      (int)(sizeof REQ - 1 - (unsigned)sent));
+    if (n > 0) sent += n;
+    else kbd_idle();
+    if ((int16_t)(snos_frames - deadline) >= 0) break;
   }
 
   for (;;) {
@@ -1092,23 +1124,14 @@ static void cmd_net_test(void) {
     if ((int16_t)(snos_frames - deadline) >= 0) break;
     kbd_idle();
   }
-  http = net_http_status(ch);
   net_close(ch);
 
-  /* Any reply is a pass, including an error page. The target sits behind
-   * Cloudflare and will refuse most non-browser requests; that refusal still
-   * proves DNS resolved, TCP connected, TLS completed and the link carried
-   * bytes both ways. Asserting on the content would test Cloudflare's mood. */
   if (got > 0) {
-    kcon_puts("pass (http ");
-    kcon_putu(http);
-    kcon_puts(", ");
+    kcon_puts("pass (");
     kcon_putu32(got);
-    kcon_puts(" bytes)\n");
+    kcon_puts(" bytes back)\n");
   } else {
-    kcon_puts("fail (http ");
-    kcon_putu(http);
-    kcon_puts(", 0 bytes)\n");
+    kcon_puts("fail (connected, 0 bytes back)\n");
   }
 }
 
@@ -1128,8 +1151,9 @@ static void cmd_send(char *hostport) {
     kcon_puts("usage: debug send HOST:PORT\n");
     return;
   }
-  if (!net_up()) {
-    kcon_puts("no gateway attached\n");
+  if (!ip_up()) {
+    kcon_puts(net_up() ? "no ip - the daemon has not claimed NAT (net status)\n"
+                       : "no link (the bridge script is not running)\n");
     return;
   }
   ch = net_connect(hostport);
@@ -1192,18 +1216,14 @@ static void cmd_net(char *rest) {
   if (streq(what, "status")) cmd_net_status();
   else if (streq(what, "test")) cmd_net_test();
   else {
-    kcon_puts("net status         the gateway, its address and counters\n");
-    kcon_puts("net test           fetch a known URL to prove the path works\n");
+    kcon_puts("net status         the daemon, its address and counters\n");
+    kcon_puts("net test           reach a known host to prove the path works\n");
   }
 }
 
 /* ---------------------------------------------------------------- shell */
 
-/* Diagnostics live behind `debug` rather than cluttering the root namespace.
- *
- * `get` is here because `download` replaced it for anything real: printing a
- * URL to the console is now a way to check the network works, not a way to
- * fetch something you want. */
+/* Diagnostics live behind `debug` rather than cluttering the root namespace. */
 static void cmd_debug(char *rest) {
   char *what = rest;
   const char *arg = split_word(rest);
@@ -1213,7 +1233,6 @@ static void cmd_debug(char *rest) {
     kcon_puts("debug syscheck  exercise the COP syscall path\n");
     kcon_puts("debug fstest    verify SRAM addressing\n");
     kcon_puts("debug mtest     preempt two kernel workers (M10 step 1)\n");
-    kcon_puts("debug get URL   fetch a URL to the console\n");
     kcon_puts("debug send H:P  raw stream: connect, GET /, print\n");
     return;
   }

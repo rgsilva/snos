@@ -414,19 +414,9 @@ uint16_t snos_cop_c(uint16_t sp) {
   case SYS_NET_UP:
     return (uint16_t)(net_up() ? 1 : 0);
 
-  case SYS_NET_FETCH: {
-    char url[256];
-    uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1;
-    int i, r;
-    for (i = 0; i < 255; i++) {
-      url[i] = (char)far_rd(bank, (uint16_t)(off + i));
-      if (url[i] == 0) break;
-    }
-    url[i < 255 ? i : 255] = 0;
-    r = net_fetch(url);
-    if (r >= 0 && owner_tag) net_own(r, owner_tag);
-    return r < 0 ? SYS_ERR : (uint16_t)r;
-  }
+  /* $61 (SYS_NET_FETCH) retired at the uIP cutover: fetching is an HTTP
+   * request the application composes itself over SYS_NET_CONNECT. It falls
+   * through to the unknown-syscall path like any number that was never real. */
 
   case SYS_NET_STATS:
     SNOS_ARGS.p0 = net_stat_resent;
@@ -485,11 +475,9 @@ uint16_t snos_cop_c(uint16_t sp) {
     return (uint16_t)(fs_free() >> 10);
 
   case SYS_NET_STATE:
-    SNOS_ARGS.p0 = net_http_status((int)a);
-    /* p1 carries the flags the gateway sent with the status. Bit 0 says the
-     * body is Mode 3 tile data, which the caller needs before it picks a
-     * filename or decides whether printing it makes any sense. */
-    SNOS_ARGS.p1 = (uint16_t)net_is_image((int)a);
+    /* p0/p1 (HTTP status, image flag) died with the gateway protocol: the
+     * status line is bytes in the stream now, parsed by whoever asked for
+     * it. The state alone is the answer. */
     return (uint16_t)net_state((int)a);
 
   case SYS_NET_CLOSE:

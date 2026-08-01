@@ -27,7 +27,7 @@
               .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
               .public sys_open, sys_getc_f, sys_putc_f, sys_close
               .public sys_fsize, sys_dir, sys_unlink
-              .public sys_net_up, sys_net_fetch_raw, sys_net_read_raw
+              .public sys_net_up, sys_net_read_raw
               .public sys_gfx, sys_read_f_raw
               .public sys_read_vram
               .public sys_fs_free
@@ -102,9 +102,7 @@ sys_waitvbl:    cop     #0x51
 
 sys_net_up:     cop     #0x60
                 rtl
-sys_net_fetch_raw:
-                cop     #0x61
-                rtl
+; 0x61 was sys_net_fetch_raw, retired at ABI 12 with the gateway protocol.
 sys_net_read_raw:
                 cop     #0x62
                 rtl
