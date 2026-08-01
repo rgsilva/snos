@@ -999,6 +999,15 @@ to: the player's name/UUID echoed into Login Success, teleport IDs, keepalive ID
    **Done when:** the real client sees the SNES in its server list (MOTD and all) and completes
    login to "Loading terrain"; a gwip canned-client transcript asserts the status JSON and the
    login sequence hermetically.
+   **PROVEN LIVE 2026-08-01** after two rounds the live client taught us (each hermetically
+   reproduced before fixing): the ping/login OVERLAP — joining is two connections, so `mc`
+   binds the port with two channels, `listen_ch_for` learned to try the next match, and a dead
+   connection's hangup now abandons-and-clears instead of wedging with poisoned bytes — and
+   the DRAIN — the client chatters during the burst, an undrained ring stops uIP's window,
+   and the NAT read 20 s of drop-without-ack as death at chunk 13. The app pumps between
+   blobs; slirp gives data toward a flow-controlled console DATA_RETRIES=120; gwip gives up
+   like the real NAT so tests can catch this class. Ricardo walked the world, punched blocks
+   that came back, chatted. 4,062 datagrams in the session log, zero desyncs.
 3. **The world.** Chunk streaming spawn-first at view distance 2, Update Light, position +
    teleport-confirm acceptance, keepalives on a frame timer (~600 frames), client packet drain.
    **Done when:** the real client spawns and walks around; the hermetic test asserts a scripted

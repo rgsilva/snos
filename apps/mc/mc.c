@@ -306,6 +306,7 @@ static void handle_packet(void) {
     send_chat("Welcome to a Super Nintendo. ", "The world is read-only.");
     say(cur->pname);
     say(" joined the world\n");
+    sys_notify(); /* run in the background, and a join still gets eyes */
     return;
   }
   if (cur->st == ST_PLAY) {

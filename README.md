@@ -32,6 +32,7 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M10 — Preemptive multitasking (`run &`, `jobs`, `kill`, `fg`, notify) | ✅ |
 | M11 — Real TCP/IP: uIP on the console, user-mode NAT on the host (`ping`, `resolve`) | ✅ |
 | M11.5 — Cutover: the stream gateway protocol deleted; uIP is the only backing | ✅ |
+| M13 — `mc`: a Minecraft server (Java 1.16.5, one player, world baked into ROM) | ✅ |
 
 (M9 was a browser; it shipped, was superseded by `vnc` — a real browser on the
 far side of a VNC session beats a screenshot pipeline — and was deleted.)

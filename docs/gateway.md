@@ -529,6 +529,35 @@ seconds of CPU against 80 seconds of wire. Fine now; at M7's cable speed it
 becomes the bottleneck, and it is the obvious candidate for hand-written 65816.
 
 
+## `mc` — join a Minecraft server running on the console
+
+The world is baked into cart ROM at build time (`tools/mkmc.py`); the 65816
+streams it. Java Edition 1.16.5 exactly — the console advertises protocol
+754 and other versions will refuse.
+
+```
+# on the SNES
+mc            (or `mc &` to keep the shell; a join raises the notify cell)
+
+# on your machine (or any machine that can reach it)
+Minecraft 1.16.5 -> Multiplayer -> Direct Connect -> <the address
+`net status` prints>   (localhost if the daemon runs on the same Mac)
+```
+
+What to expect: the server list shows "A Super Nintendo. Really." The join
+burst is ~146 KB over a ~600 B/s emulated link, so "Loading terrain" takes
+a few minutes (a real M7 cable would make it ~7 s); keepalives flow
+throughout, so it holds. You spawn in creative on superflat grass facing a
+stone SNOS. Chat echoes through the console (and appears on its screen),
+and every block you punch is put back — the world is read-only, enforced
+diegetically.
+
+One player at a time, by uIP's listen design — but the port is bound by TWO
+channels, because joining is two connections (the server-list ping, then
+the login) and they overlap. `tools/mcprobe.py` serves the same baked bytes
+from Python for protocol debugging at desk speed, and `gateway.py --debug`
+hex-dumps every datagram when the wire itself is in question.
+
 ## The NAT (`tools/slirp.py`)
 
 The daemon's whole understanding of traffic. It takes IPv4 datagrams the
