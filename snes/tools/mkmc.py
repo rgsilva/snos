@@ -364,8 +364,14 @@ def dimension_element():
 
 
 def biome_element():
+    # The client hard-validates this MapLike on Join Game decode and its
+    # error names any missing key outright — `depth` and `scale` were found
+    # exactly that way (first real-client run, 2026-08-01). Values are
+    # vanilla plains.
     return {
         "precipitation": "rain",
+        "depth": NFloat(0.125),
+        "scale": NFloat(0.05),
         "temperature": NFloat(0.8),
         "downfall": NFloat(0.4),
         "category": "plains",
