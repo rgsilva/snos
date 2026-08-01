@@ -173,10 +173,15 @@ int main(void) {
          * alive and the answer went missing (DNS, or the far host); if they
          * did not, the bridge is not running. */
         uint16_t moved = (uint16_t)(sys_net_stats() - frames0);
+        /* Latched NOW: say() marshals its string through the same param
+         * block (snos_set_ptr writes p0), so reading p0 after a print
+         * reports the string literal's address as the resend count -
+         * garbage in the one diagnostic this branch exists for. */
+        uint16_t resends = SNOS_ARGS.p0;
         say("\ntimeout waiting for the connection\n");
         sys_putu(moved);
         say(" frames in, ");
-        sys_putu(SNOS_ARGS.p0);
+        sys_putu(resends);
         say(" resends\n");
         say(moved ? "link is alive - DNS or the far host never answered\n"
                   : "nothing came back - check the bridge and the daemon\n");

@@ -297,21 +297,28 @@ void snos_tcp_appcall(void) {
   /* Death, in the three shapes uIP reports it. The channel keeps its state
    * for the application to read; only the binding is dropped, so a later
    * event on this connection cannot reach a channel that has since been
-   * reused by somebody else. */
+   * reused by somebody else.
+   *
+   * UNLESS a hangup is under way (closing != 0): net_hangup has already
+   * reset the rings and put the channel back in LISTEN, so writing EOF or
+   * ERROR onto it would wedge the listener — and rxput below would hand
+   * the DEAD conversation's tail bytes to the NEXT client that binds the
+   * channel. Mid-close, only the binding is dropped; the channel is no
+   * longer this connection's to describe. */
   if (uip_aborted() || uip_timedout()) {
-    net_stack_setstate(ch, NET_ST_ERROR);
+    if (s->closing == 0) net_stack_setstate(ch, NET_ST_ERROR);
     s->ch = 0xFFu;
     return;
   }
   if (uip_closed()) {
-    net_stack_setstate(ch, NET_ST_EOF);
+    if (s->closing == 0) net_stack_setstate(ch, NET_ST_EOF);
     s->ch = 0xFFu;
     return;
   }
 
   /* Inbound first, and before anything writes to uip_sappdata: on a data
    * segment the received bytes and the send buffer are the same memory. */
-  if (uip_newdata() && uip_datalen() > 0) {
+  if (uip_newdata() && uip_datalen() > 0 && s->closing == 0) {
     if (!net_stack_rxput(ch, (const uint8_t *)uip_appdata, (int)uip_datalen())) {
       /* Should not happen — the window below is closed a segment in advance
        * precisely so it cannot. If it ever does, these bytes are LOST: uIP

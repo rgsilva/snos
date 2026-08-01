@@ -322,10 +322,12 @@ void net_init(void) {
   net_stat_bad_sum = 0;
   net_stat_resent = 0;
   net_stat_refused = 0;
-  for (j = 0; j < LINK_FRAME; j++) {
-    txframe[j] = 0;
-    rxframe[j] = 0;
-  }
+  /* rxframe only: txframe was JUST filled with LINK_CH_PAD to establish the
+   * pad invariant, and zeroing it here silently defeated that — unused frame
+   * bytes went out as 0x00, which both parsers happen to read as empty
+   * control records rather than stopping at PAD. Benign by luck, wrong by
+   * the invariant this file documents. */
+  for (j = 0; j < LINK_FRAME; j++) rxframe[j] = 0;
   link_init();
   build_frame();
   net_ready = 1;
@@ -867,14 +869,20 @@ static void build_frame(void) {
   n = (int)((txq_head - txq_tail) & (TXQ_SIZE - 1));
   if (n > 0) {
     int room = LINK_FRAME - o - 2;
-    int i;
+    uint16_t first;
     if (n > room) n = room;
     if (n > 255) n = 255;
     txframe[o++] = LINK_CH_CTRL;
     txframe[o++] = (uint8_t)n;
-    for (i = 0; i < n; i++) {
-      txframe[o++] = txq[(txq_tail + i) & (TXQ_SIZE - 1)];
-    }
+    /* Block moves, split at the ring wrap — this runs inside NMI, and the
+     * per-byte loop it replaces rebuilt a ring address every iteration at
+     * the ~230-cycles/byte cost this file has already measured twice. */
+    first = (uint16_t)(TXQ_SIZE - txq_tail);
+    if (first > (uint16_t)n) first = (uint16_t)n;
+    ring_move(&txframe[o], &txq[txq_tail], first);
+    if (first < (uint16_t)n)
+      ring_move(&txframe[o + first], &txq[0], (uint16_t)((uint16_t)n - first));
+    o += n;
     txframe[LINK_FLAGS] |= LINK_F_DATA;
   }
   txframe_bytes = (uint16_t)(n > 0 ? n : 0);
@@ -885,16 +893,23 @@ static void build_frame(void) {
   {
     int have = (int)((iptx_head - iptx_tail) & (IP_TXRING - 1));
     int room = LINK_FRAME - o - 2;
-    int i;
+    uint16_t first;
     txframe_ip = 0;
     if (ip_mode && have > 0 && room > 0) {
       if (have > room) have = room;
       if (have > 255) have = 255;
       txframe[o++] = LINK_CH_IP;
       txframe[o++] = (uint8_t)have;
-      for (i = 0; i < have; i++) {
-        txframe[o++] = iptx[(iptx_tail + i) & (IP_TXRING - 1)];
-      }
+      /* Same block-move discipline as the control copy above; since the
+       * cutover EVERY payload byte on the wire passes through here, so
+       * this is the frame builder's whole variable cost. */
+      first = (uint16_t)(IP_TXRING - iptx_tail);
+      if (first > (uint16_t)have) first = (uint16_t)have;
+      ring_move(&txframe[o], &iptx[iptx_tail], first);
+      if (first < (uint16_t)have)
+        ring_move(&txframe[o + first], &iptx[0],
+                  (uint16_t)((uint16_t)have - first));
+      o += have;
       txframe_ip = (uint16_t)have;
       txframe[LINK_FLAGS] |= LINK_F_DATA;
     }

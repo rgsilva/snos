@@ -147,7 +147,9 @@ class Gateway:
         # the other way. Every datagram it produces is queued as an ordinary
         # CH_IP record, so it inherits the link's reliability, ordering and
         # backpressure without knowing any of them exist.
-        self.slirp = slirp.Slirp(self.push_ip)
+        self.slirp = slirp.Slirp(
+            self.push_ip,
+            link_busy=lambda: any(ch == CH_IP for ch, _ in self.out))
         self.ipbuf = bytearray()
 
     # ------------------------------------------------------------ outbound
@@ -338,6 +340,13 @@ class Gateway:
                 self.rx_next = f[SEQ]
                 self.teardown()
                 self.cstate, self.ctype, self.cbuf = 0, 0, bytearray()
+                # The in-flight frame belongs to the dead session as surely
+                # as the queue did: left armed, next_out() kept resending it
+                # and the FRESH console adopted, acked and delivered it -
+                # possibly the tail half of an old record, read by the new
+                # session's reassembler as a record start.
+                self.awaiting = False
+                self.inflight = None
                 print("gateway: SNES restarted, session reset")
         else:
             self.peer_syn_seen = False

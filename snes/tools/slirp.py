@@ -157,9 +157,16 @@ class _Tcp(_Flow):
 class Slirp:
     """One NAT instance. `output(datagram_bytes)` queues toward the console."""
 
-    def __init__(self, output, log=print):
+    def __init__(self, output, log=print, link_busy=None):
         self.output = output
         self.log = log
+        # Reports whether datagrams we already emitted are still waiting in
+        # the link's out queue. The retransmit timers must not run against
+        # a queue: a 578 B segment takes ~1 s to even LEAVE on a ~615 B/s
+        # link, so a wall-clock RTO armed at queue time re-queued copies of
+        # segments whose first copy had not finished transmitting - the
+        # documented death spiral, regressed whenever several flows talk.
+        self.link_busy = link_busy or (lambda: False)
         self.tcp = {}          # (sport, dip, dport) -> _Tcp
         self.udp = {}          # (sport, dip, dport) -> _Flow
         self.icmp = {}         # console ICMP id      -> _Flow
@@ -617,7 +624,9 @@ class Slirp:
                 continue
 
             if t.state == _Tcp.SYN_RCVD or t.state == _Tcp.SYN_SENT:
-                if now - t.sent_at > RTO:
+                if self.link_busy():
+                    t.sent_at = now
+                elif now - t.sent_at > RTO:
                     t.retries += 1
                     if t.retries > MAX_RETRIES:
                         self._tcp_reset(key, t)
@@ -665,7 +674,9 @@ class Slirp:
                     t.sock_eof = True
 
             if t.unacked:
-                if now - t.sent_at > RTO:
+                if self.link_busy():
+                    t.sent_at = now      # clock starts when the wire clears
+                elif now - t.sent_at > RTO:
                     t.retries += 1
                     if t.retries > DATA_RETRIES:
                         self.log(f"slirp: giving up on a data segment "

@@ -41,6 +41,9 @@
 #define RXBUF 200          /* every packet we PARSE fits; larger ones are
                             * skipped by length, streaming */
 #define KA_FRAMES 600u     /* keepalive every ~10 s; the client kicks ~30 */
+/* The trap layer copies at most 128 bytes per SYS_NET_WRITE, so asking for
+ * more just means a short write and another trip round the loop. */
+#define WRCHUNK 128
 
 static const mc_blob_t BLOB_STATUS = MC_STATUS_RESPONSE;
 static const mc_blob_t BLOB_PONG = MC_PONG;
@@ -71,6 +74,7 @@ typedef struct {
   uint32_t plen;
   uint32_t discard;
   uint16_t ka_at;
+  uint8_t poison; /* the framer met garbage; hang up, do not parse on */
   uint8_t rx[RXBUF];
   char pname[17];
   uint8_t uuid[16];
@@ -79,7 +83,9 @@ typedef struct {
 static sess_t S[NSESS];
 static sess_t *cur;        /* the session being pumped; handlers read it */
 
-static uint8_t buf[80];    /* shared: runtime-composed packets, blob copies */
+static uint8_t buf[128];   /* shared: runtime-composed packets, blob copies
+                            * - sized to the trap layer's copy cap, so each
+                            * net-write syscall carries a full helping */
 static uint16_t digs, chats;
 
 static void say(const char *s) { sys_puts(s); }
@@ -102,10 +108,23 @@ static int send_blob(const mc_blob_t *b) {
       continue;
     }
     n = (uint16_t)room;
-    if (n > sizeof buf) n = sizeof buf;
+    if (n > WRCHUNK) n = WRCHUNK;
     if (n > left) n = left;
-    for (i = 0; i < n; i++) buf[i] = src[i];
-    i = sys_net_write(cur->ch, buf, n);
+    /* The ROM address goes STRAIGHT into the syscall. SYS_NET_WRITE has
+     * always taken a far pointer (bank + offset), so staging the bytes in
+     * RAM first was a whole extra per-byte pass over ~146 KB that bought
+     * nothing — three copies of every byte where two will do. */
+    i = sys_net_write(cur->ch, (const char *)src, n);
+    if (i == 0 || i == SYS_ERR) {
+      /* Room in the ring but nothing taken: the channel state refused the
+       * write (a client RST mid-chunk lands exactly here). Spinning on it
+       * burned the whole machine once - net_wspace measures the ring, not
+       * the connection. Same exit as the no-room path. */
+      uint16_t s2 = sys_net_state(cur->ch);
+      if (s2 != NET_ST_OPEN && s2 != NET_ST_EOF) return 0;
+      sys_yield();
+      continue;
+    }
     src += i;
     left -= i;
   }
@@ -334,6 +353,15 @@ static void pump(void) {
       if (sys_net_read(cur->ch, &b, 1) != 1) return;
       cur->plen |= (uint32_t)(b & 0x7F) << cur->lenshift;
       cur->lenshift += 7;
+      /* A frame length needs at most 3 VarInt bytes at this protocol's
+       * sizes; a longer prefix (or an absurd length) is a garbled or
+       * hostile stream. Unbounded, the shift walked into undefined
+       * territory and a "legal" 5-byte length parked the session
+       * discarding 4 GB. Poison it; the main loop hangs up. */
+      if (cur->lenshift > 28 || cur->plen > 32768ul) {
+        cur->poison = 1;
+        return;
+      }
       if (b & 0x80) continue;
       cur->lenshift = 0;
       cur->rxgot = 0;
@@ -368,6 +396,7 @@ static void sess_reset(sess_t *s) {
   s->lenshift = 0;
   s->rxgot = 0;
   s->discard = 0;
+  s->poison = 0;
 }
 
 int main(void) {
@@ -405,6 +434,28 @@ int main(void) {
           cur->ka_at = sys_frames();
           send_keepalive();
         }
+      }
+      if (cur->poison && s2 == NET_ST_OPEN) {
+        /* The framer met something it cannot resynchronise on (nothing
+         * marks a packet boundary in this stream), so the connection goes
+         * rather than the parse continuing on garbage. Close aborts it —
+         * a RST, which is the honest answer — and the port survives
+         * because the OTHER session still owns the forward. */
+        uint16_t again;
+        say("garbled client - hanging up\n");
+        sys_net_close(cur->ch);
+        again = sys_net_listen(MC_PORT);
+        if (again == SYS_ERR) {
+          /* No channel to re-listen with. Park this slot instead of
+           * holding SYS_ERR as a channel number and asking the kernel
+           * about it forever; the other session still serves. */
+          say("(one listener lost - restart mc to get it back)\n");
+          cur->ch = 0;               /* channel 0 is the kernel's, never ours */
+        } else {
+          cur->ch = again;
+        }
+        sess_reset(cur);
+        continue;
       }
       if (s2 == NET_ST_EOF || s2 == NET_ST_ERROR) {
         if (cur->st == ST_PLAY) {
