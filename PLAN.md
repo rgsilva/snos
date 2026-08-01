@@ -255,7 +255,17 @@ Otherwise M6+ network tests run under bsnes while everything else stays on Mesen
 **Watch:** `$4201` is open-collector with a slow rising edge — the emulator won't punish you for
 a missing pull-up, real hardware will.
 
-### M7 — Real hardware ← *first silicon for this entire repo*
+### M7 — Real hardware *(DEFERRED 2026-08-01, on Ricardo's call: not before the talk)*
+Everything below still stands and nothing supersedes it — this remains the only
+milestone that changes what the project physically IS, and the only one that
+lifts the ~600 B/s emulated link to the cable's ~20 KB/s (a `mc` join goes from
+four minutes to seven seconds; `vnc` stops being a slideshow). It is deferred
+because it is the one item that cannot be scheduled: it needs parts, a soldering
+iron and an unknown number of evenings finding bugs no emulator surfaces. The
+demo works without it; the backlog items that say "M7 re-measures this" simply
+keep waiting.
+
+*(original heading: M7 — Real hardware ← first silicon for this entire repo)*
 Build the cable (Teensy/Pico + level shifter, **pull-up on `$4201` bit 6, port 1**). Real console
 + flashcart. Real keyboard via the existing `keyboard-test-rom` Pico protocol on **port 2**.
 Decide: two Picos, or one multiplexing keyboard + network.
@@ -1017,6 +1027,16 @@ to: the player's name/UUID echoed into Login Success, teleport IDs, keepalive ID
    console's ASCII), chat FROM the SNES keyboard as System Chat, the dig-revert Block Update,
    `mc &` background + SYS_NOTIFY on join. **Done when:** chat round-trips and a punched block
    restores itself, asserted hermetically; a live session is recorded here.
+   *(SHIPPED. Chat FROM the keyboard was dropped on Ricardo's call — the echo direction is the
+   one that matters for a demo. Instead the WORLD grew, 2026-08-01: a grass-capped hill and a
+   sand-rimmed pond, both integer cones that stay inside section 0 because the light packet's
+   design rests on it; and the void stopped being infinite. Falling past 32 blocks below zero
+   kills the player — the sign and exponent of the client's IEEE-754 Y answer that on their own,
+   which is how a machine with no FPU asks the question — and the client's own Respawn button
+   puts them back at spawn. The terrain is a RULE, not a map: the console recomputes any punched
+   block from the same cones the baker used, via two 81-byte tables indexed by SQUARED distance
+   so it never needs a square root, and mkmc_test compares the two rules over all 102,400 blocks
+   a player can reach.)*
 5. **Docs**: gateway.md gets a "join it from your Mac" section (add server → the address `net
    status` prints, port 25565 forwarded via IPFWD like any listener); README status row.
 

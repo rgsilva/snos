@@ -50,11 +50,20 @@ static const mc_blob_t BLOB_PONG = MC_PONG;
 static const mc_blob_t BLOB_PRE = MC_PLAY_PRE;
 static const mc_blob_t BLOB_POST = MC_PLAY_POST;
 static const mc_blob_t BLOB_KA = MC_KEEPALIVE;
+static const mc_blob_t BLOB_DEATH = MC_DEATH;
+static const mc_blob_t BLOB_RESPAWN = MC_RESPAWN;
 static const mc_blob_t CHUNKS[MC_NCHUNKS] = MC_CHUNK_TABLE;
 static const uint32_t SCULPT_ROWS[5] = MC_SCULPT_ROWS;
+/* The terrain, as tables indexed by SQUARED distance from each feature's
+ * centre — so "what block was here?" costs a lookup and no square root. */
+static const uint8_t MOUNT_TOP[MC_MOUNT_D2MAX] = MC_MOUNT_TOP;
+static const uint8_t LAKE_FLOOR[MC_LAKE_D2MAX] = MC_LAKE_FLOOR;
 
 /* Serverbound ids this file reacts to; everything else is skipped. */
 #define S_CHAT 0x03
+#define S_CLIENT_STATUS 0x04   /* action 0 = "respawn me" */
+#define S_POSITION 0x11
+#define S_POSITION_ROT 0x12
 #define S_DIGGING 0x1B
 
 /* Session states. */
@@ -74,6 +83,7 @@ typedef struct {
   uint32_t plen;
   uint32_t discard;
   uint16_t ka_at;
+  uint8_t dead;       /* fell out of the world; waiting to be asked back */
   uint8_t poison;     /* 1 = unparseable stream, 2 = we said goodbye */
   uint16_t poison_at; /* when, so a peer that will not read cannot pin us */
   uint8_t rx[RXBUF];
@@ -91,6 +101,12 @@ static uint16_t digs, chats;
 
 static void say(const char *s) { sys_puts(s); }
 static void pump(void); /* the burst drains between blobs; see there */
+/* A blob stream is going out. pump() is still called between blobs to keep
+ * the receive ring shallow — an undrained ring stops uIP's window, which
+ * the NAT reads as a dead peer — but while this is set it only CONSUMES:
+ * dispatching would re-enter the burst from inside itself (a second join or
+ * respawn nested in the first) on a machine with a 1.5 KB stack. */
+static uint8_t in_burst;
 
 /* ------------------------------------------------------------- outbound */
 
@@ -219,8 +235,40 @@ static void send_login_disconnect(const char *why) {
   send_small((uint16_t)(o - 1));
 }
 
+/* Squared distance from a feature's centre, or -1 for "nowhere near". The
+ * guard bounds |d| to 64, so the square stays inside 16-bit arithmetic even
+ * though the client may name any coordinate in 26 bits. */
+static int feature_d2(int32_t x, int32_t z, int32_t cx, int32_t cz) {
+  int32_t dx = x - cx, dz = z - cz;
+  if (dx < -64 || dx > 64 || dz < -64 || dz > 64) return -1;
+  return (int)(dx * dx + dz * dz);
+}
+
+/* The world, as the same RULE the baker used — hill, pond, shore, letters,
+ * superflat — so a punched block is answered from arithmetic rather than
+ * from a copy of the map. The order of the tests mirrors mkmc.block_at
+ * exactly; a divergence here would restore the wrong block. */
 static uint16_t world_block(int32_t x, int32_t y, int32_t z) {
+  int d2;
   if (y == 0) return MC_B_BEDROCK;
+
+  d2 = feature_d2(x, z, MC_MOUNT_CX, MC_MOUNT_CZ);
+  if (d2 >= 0 && d2 < MC_MOUNT_D2MAX) {
+    int32_t top = (int32_t)MOUNT_TOP[d2];
+    if (top != 0 && y > MC_SURFACE_Y && y <= top)
+      return (y == top) ? MC_B_GRASS : MC_B_STONE;
+  }
+  d2 = feature_d2(x, z, MC_LAKE_CX, MC_LAKE_CZ);
+  if (d2 >= 0 && d2 < MC_LAKE_D2MAX) {
+    uint8_t f = LAKE_FLOOR[d2];
+    if (f != MC_LAKE_SHORE) {          /* in the water */
+      if (y < (int32_t)f) return MC_B_DIRT;
+      if (y == (int32_t)f) return MC_B_SAND;
+      if (y <= MC_SURFACE_Y) return MC_B_WATER;
+      return MC_B_AIR;
+    }
+    if (y == MC_SURFACE_Y) return MC_B_SAND;   /* the beach round it */
+  }
   if (y > 0 && y < MC_SURFACE_Y) return MC_B_DIRT;
   if (y == MC_SURFACE_Y) return MC_B_GRASS;
   if (z == MC_SCULPT_Z && y >= 4 && y <= 8 &&
@@ -229,6 +277,25 @@ static uint16_t world_block(int32_t x, int32_t y, int32_t z) {
       return MC_B_STONE;
   }
   return MC_B_AIR;
+}
+
+/* The world has an edge, and past it a fall that would never end. The
+ * client reports its position as three 64-bit doubles and this machine has
+ * no FPU — but none is needed: the SIGN and EXPONENT alone answer "is the
+ * player more than 32 blocks below zero?", which is the only question. */
+static void handle_position(uint16_t off) {
+  uint8_t b0, b1;
+  uint16_t e;
+  if (cur->dead || !have(off, 16)) return;
+  b0 = cur->rx[off + 8];               /* Y is the second double */
+  b1 = cur->rx[off + 9];
+  if (!(b0 & 0x80)) return;            /* positive: still above the world */
+  e = (uint16_t)(((uint16_t)(b0 & 0x7Fu) << 4) | (uint16_t)(b1 >> 4));
+  if (e < MC_VOID_EXPONENT) return;
+  cur->dead = 1;
+  send_blob(&BLOB_DEATH);
+  say(cur->pname);
+  say(" fell out of the world\n");
 }
 
 static void handle_digging(uint16_t off) {
@@ -284,11 +351,33 @@ static void handle_chat(uint16_t off) {
   send_chat(pre, text);              /* the echo IS the server's chat */
 }
 
+/* The world: every chunk blob, spawn first, with a drain and a keepalive
+ * between them. One function because the join needs it and a respawn might
+ * (see the Client Status handler) — and because the in_burst guard wants a
+ * single home rather than a copy per caller. */
+static int send_world(void) {
+  uint16_t i;
+  int ok = 1;
+  in_burst = 1;
+  for (i = 0; i < MC_NCHUNKS; i++) {
+    if (!send_blob(&CHUNKS[i])) { ok = 0; break; }
+    pump();                          /* drain only, while in_burst holds */
+    if ((i & 3) == 3) {
+      if (!send_keepalive()) { ok = 0; break; }
+      cur->ka_at = sys_frames();
+    }
+  }
+  in_burst = 0;
+  return ok;
+}
+
 /* One serverbound packet, fully collected (or truncated: only packets we
  * skip anyway ever are). */
 static void handle_packet(void) {
   uint16_t off = 0;
-  uint32_t pid = rd_varint(&off);
+  uint32_t pid;
+  if (in_burst) return;   /* draining a burst: consume, do not dispatch */
+  pid = rd_varint(&off);
 
   if (cur->st == ST_HANDSHAKE && pid == 0x00) {
     uint32_t next;
@@ -363,14 +452,7 @@ static void handle_packet(void) {
      * Between whole blobs a pump is safe: anything it composes (a chat
      * echo, a Block Change) is a whole packet in a legal gap. */
     if (!send_blob(&BLOB_PRE)) return;
-    for (i = 0; i < MC_NCHUNKS; i++) {
-      if (!send_blob(&CHUNKS[i])) return;
-      pump();
-      if ((i & 3) == 3) {
-        if (!send_keepalive()) return;
-        cur->ka_at = sys_frames();
-      }
-    }
+    if (!send_world()) return;
     if (!send_blob(&BLOB_POST)) return;
     send_chat("Welcome to a Super Nintendo. ", "The world is read-only.");
     say(cur->pname);
@@ -381,6 +463,21 @@ static void handle_packet(void) {
   if (cur->st == ST_PLAY) {
     if (pid == S_CHAT) handle_chat(off);
     else if (pid == S_DIGGING) handle_digging(off);
+    else if (pid == S_POSITION || pid == S_POSITION_ROT) handle_position(off);
+    else if (pid == S_CLIENT_STATUS) {
+      /* The client owns the Respawn button; this is it being pressed. Back
+       * to the spawn the world was built around — and NOT followed by the
+       * chunks, because a same-dimension respawn leaves the client's
+       * terrain alone (see mkmc.respawn_blob for why, and what to change
+       * if a client ever lands in a void). */
+      if (rd_varint(&off) == 0 && cur->dead) {
+        cur->dead = 0;
+        if (!send_blob(&BLOB_RESPAWN)) return;
+        if (!send_blob(&BLOB_POST)) return;
+        say(cur->pname);
+        say(" respawned\n");
+      }
+    }
     /* Teleport confirms, settings, plugin messages, keepalive answers and
      * the 20 Hz position spam all land here and are ignored. */
   }
@@ -448,6 +545,7 @@ static void sess_reset(sess_t *s) {
   s->rxgot = 0;
   s->discard = 0;
   s->poison = 0;
+  s->dead = 0;
 }
 
 int main(void) {

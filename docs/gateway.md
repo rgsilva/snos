@@ -548,9 +548,20 @@ What to expect: the server list shows "A Super Nintendo. Really." The join
 burst is ~146 KB over a ~600 B/s emulated link, so "Loading terrain" takes
 a few minutes (a real M7 cable would make it ~7 s); keepalives flow
 throughout, so it holds. You spawn in creative on superflat grass facing a
-stone SNOS. Chat echoes through the console (and appears on its screen),
-and every block you punch is put back — the world is read-only, enforced
-diegetically.
+stone SNOS, with a small grass-capped hill to the west and a sand-rimmed
+pond to the east. Chat echoes through the console (and appears on its
+screen), and every block you punch is put back — the world is read-only,
+enforced diegetically.
+
+The world is 5x5 chunks and it ENDS. Walk off the edge and you fall; past
+32 blocks below zero the console kills you (it reads only the sign and
+exponent of the client's 64-bit Y, having no floating point to read the
+rest with) and the death screen appears. Press Respawn and you are back at
+the original spawn — the console answers Client Status with a Respawn
+packet and a position, and deliberately does NOT re-send the chunks,
+because a same-dimension respawn leaves the client's terrain alone. If a
+future client ever respawns into a void, that is the thing to change
+(`mkmc.respawn_blob` says where).
 
 One player at a time, by uIP's listen design — but the port is bound by TWO
 channels, because joining is two connections (the server-list ping, then

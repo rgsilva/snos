@@ -96,6 +96,53 @@ def skip_payload(data, off, tag):
     raise ValueError(f"nbt tag {tag}")
 
 
+def console_block(x, y, z):
+    """apps/mc/mc.c's world_block(), transliterated.
+
+    The console answers a punched block from a RULE plus two tables rather
+    than from a copy of the map, so this rule and mkmc.block_at have to
+    agree everywhere — a divergence restores the WRONG block, visibly and
+    only where somebody happens to dig. Structure and test order mirror the
+    C line for line; the tables come from mkmc so both sides index the same
+    numbers."""
+    MOUNT, LAKE = mkmc.mount_table(), mkmc.lake_table()
+
+    def d2_of(cx, cz):
+        dx, dz = x - cx, z - cz
+        if dx < -64 or dx > 64 or dz < -64 or dz > 64:
+            return -1
+        return dx * dx + dz * dz
+
+    if y == 0:
+        return mkmc.B_BEDROCK
+    d2 = d2_of(mkmc.MOUNT_CX, mkmc.MOUNT_CZ)
+    if 0 <= d2 < len(MOUNT):
+        top = MOUNT[d2]
+        if top != 0 and mkmc.SURFACE_Y < y <= top:
+            return mkmc.B_GRASS if y == top else mkmc.B_STONE
+    d2 = d2_of(mkmc.LAKE_CX, mkmc.LAKE_CZ)
+    if 0 <= d2 < len(LAKE):
+        f = LAKE[d2]
+        if f != 0xFE:
+            if y < f:
+                return mkmc.B_DIRT
+            if y == f:
+                return mkmc.B_SAND
+            if y <= mkmc.SURFACE_Y:
+                return mkmc.B_WATER
+            return mkmc.B_AIR
+        if y == mkmc.SURFACE_Y:
+            return mkmc.B_SAND
+    if 0 < y < mkmc.SURFACE_Y:
+        return mkmc.B_DIRT
+    if y == mkmc.SURFACE_Y:
+        return mkmc.B_GRASS
+    if (z == mkmc.SCULPT_Z and 4 <= y <= 8
+            and (x, y, z) in mkmc.SCULPTURE):
+        return mkmc.B_STONE
+    return mkmc.B_AIR
+
+
 def main():
     blobs, manifest = mkmc.bake()
 
@@ -169,6 +216,42 @@ def main():
     check(mkmc.block_at(int(sx), int(sy_), int(sz)) == mkmc.B_AIR and
           mkmc.block_at(int(sx), int(sy_) + 1, int(sz)) == mkmc.B_AIR,
           "spawn is not inside a block")
+
+    # The console's dig-revert rule against the baker's world, everywhere a
+    # player can reach: 80 x 80 columns, y 0..15.
+    order = manifest["chunks"]
+    cxs = [int(c.split("_")[1]) for c in order]
+    czs = [int(c.split("_")[2]) for c in order]
+    bad = None
+    for cx in range(min(cxs), max(cxs) + 1):
+        for cz in range(min(czs), max(czs) + 1):
+            for lx in range(16):
+                for lz in range(16):
+                    x, z = cx * 16 + lx, cz * 16 + lz
+                    for y in range(16):
+                        a, b = mkmc.block_at(x, y, z), console_block(x, y, z)
+                        if a != b and bad is None:
+                            bad = (x, y, z, a, b)
+    check(bad is None,
+          f"the console's rule disagrees with the world at {bad}")
+
+    # The terrain is really there, and really inside section 0.
+    surf = [mkmc.block_at(x, mkmc.SURFACE_Y, z)
+            for x in range(-32, 48) for z in range(-16, 64)]
+    check(surf.count(mkmc.B_WATER) > 50, "the pond did not make it")
+    check(surf.count(mkmc.B_SAND) > 20, "the shore did not make it")
+    peak = max(mkmc.height_at(x, z)
+               for x in range(-32, 48) for z in range(-16, 64))
+    check(4 < peak < 16, f"the hill peaks at {peak}: flat, or out of section 0")
+    check(mkmc.block_at(mkmc.MOUNT_CX, peak - 1, mkmc.MOUNT_CZ)
+          == mkmc.B_GRASS, "the hill has no grass cap")
+
+    # Death and respawn frame cleanly, and respawn really is a Respawn.
+    check(walk_packets(blobs["death"], "death") ==
+          [mkmc.P_UPDATE_HEALTH, mkmc.P_COMBAT_EVENT],
+          "the death blob is not health-then-combat-event")
+    check(walk_packets(blobs["respawn"], "respawn")[0] == mkmc.P_RESPAWN,
+          "the respawn blob does not start with Respawn")
 
     # Size sanity: the whole session must fit the step-2 ROM budget with
     # room to spare, and a single chunk must stay well under the netecho-

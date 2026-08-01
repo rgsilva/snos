@@ -166,6 +166,9 @@ P_VIEW_POSITION = 0x40
 P_SPAWN_POSITION = 0x42
 P_TIME_UPDATE = 0x4E
 # Login state
+P_COMBAT_EVENT = 0x31
+P_RESPAWN = 0x39
+P_UPDATE_HEALTH = 0x49
 P_LOGIN_SUCCESS = 0x02
 # Status state
 P_STATUS_RESPONSE = 0x00
@@ -176,6 +179,9 @@ S_TELEPORT_CONFIRM = 0x00
 S_CHAT = 0x03
 S_KEEPALIVE = 0x10
 S_PLAYER_DIGGING = 0x1B
+S_CLIENT_STATUS = 0x04       # action 0 = "respawn me"
+S_PLAYER_POSITION = 0x11
+S_PLAYER_POSITION_ROT = 0x12
 
 # --------------------------------------------------- block/biome registry
 # Global block-state ids for 1.16.5 — only the handful the world uses.
@@ -184,6 +190,8 @@ B_STONE = 1
 B_GRASS = 9        # grass_block[snowy=false]
 B_DIRT = 10
 B_BEDROCK = 33
+B_WATER = 34   # water[level=0], the source block: 16 states follow bedrock
+B_SAND = 66    # ...then lava's 16, then sand
 BIOME_PLAINS = 1
 
 # ------------------------------------------------------------- the world
@@ -202,6 +210,71 @@ SCULPT_Z = 8
 SPAWN = (0.5, 4.0, 20.5)     # standing on the grass, letters to the north
 SPAWN_CHUNK = (0, 1)         # chunk containing SPAWN
 VIEW_DISTANCE = 2            # server-dictated; 5x5 chunks around spawn
+
+# ---------------------------------------------------------------- terrain
+# A tiny hill and a pond, because ROM is the resource this machine has to
+# spare and a bare plain wastes the view. Both stay inside SECTION 0
+# (y < 16): the light packet's whole design rests on every face of the world
+# living there, and mkmc_test asserts it.
+#
+# Shapes are integer cones — no float anywhere — and the CONSOLE gets them as
+# a table indexed by SQUARED distance (81 bytes each), so its dig-revert can
+# answer "what was here?" without a square root.
+MOUNT_CX, MOUNT_CZ, MOUNT_R, MOUNT_H = -22, 4, 9, 10
+LAKE_CX, LAKE_CZ, LAKE_R = 22, 16, 7
+SHORE_R = LAKE_R + 2
+
+
+def mount_top(x, z):
+    """Top y of the hill at this column, or None."""
+    dx, dz = x - MOUNT_CX, z - MOUNT_CZ
+    d2 = dx * dx + dz * dz
+    if d2 >= MOUNT_R * MOUNT_R:
+        return None
+    h = MOUNT_H - (math.isqrt(d2) * MOUNT_H) // MOUNT_R
+    return SURFACE_Y + h if h > 0 else None
+
+
+def lake_floor(x, z):
+    """Floor y of the pond at this column, or None. Water fills from just
+    above it up to the surface."""
+    dx, dz = x - LAKE_CX, z - LAKE_CZ
+    d2 = dx * dx + dz * dz
+    if d2 >= LAKE_R * LAKE_R:
+        return None
+    depth = 2 - (2 * math.isqrt(d2)) // LAKE_R
+    return max(1, SURFACE_Y - 1 - depth)
+
+
+def mount_table():
+    """Top y per squared distance — what the console indexes instead of
+    taking a square root. Shared with emit_header so the test that compares
+    the console's RULE against this one is checking the same numbers."""
+    out = []
+    for d2 in range(MOUNT_R * MOUNT_R):
+        h = MOUNT_H - (math.isqrt(d2) * MOUNT_H) // MOUNT_R
+        out.append(SURFACE_Y + h if h > 0 else 0)
+    return out
+
+
+def lake_table():
+    """Floor y per squared distance, or 0xFE for the sand shore beyond the
+    water's edge."""
+    out = []
+    for d2 in range(SHORE_R * SHORE_R):
+        if d2 < LAKE_R * LAKE_R:
+            depth = 2 - (2 * math.isqrt(d2)) // LAKE_R
+            out.append(max(1, SURFACE_Y - 1 - depth))
+        else:
+            out.append(0xFE)
+    return out
+
+
+def is_shore(x, z):
+    dx, dz = x - LAKE_CX, z - LAKE_CZ
+    d2 = dx * dx + dz * dz
+    return LAKE_R * LAKE_R <= d2 < SHORE_R * SHORE_R
+
 
 FONT = {
     "S": ["####", "#...", "####", "...#", "####"],
@@ -233,14 +306,27 @@ SCULPTURE = sculpture_columns()
 
 
 def block_at(x, y, z):
-    """The static world, as a rule — the same rule step 2's dig-revert will
-    carry as a few lines of C rather than a lookup table."""
+    """The static world, as a RULE — which is what lets the console answer a
+    dig with the block that was there, from a few lines of C and two small
+    tables rather than a copy of the map."""
     if y == 0:
         return B_BEDROCK
+    top = mount_top(x, z)
+    if top is not None and SURFACE_Y < y <= top:
+        return B_GRASS if y == top else B_STONE
+    floor = lake_floor(x, z)
+    if floor is not None:
+        if y < floor:
+            return B_DIRT
+        if y == floor:
+            return B_SAND
+        if y <= SURFACE_Y:
+            return B_WATER
+        return B_AIR
     if y <= 2:
         return B_DIRT
     if y == SURFACE_Y:
-        return B_GRASS
+        return B_SAND if is_shore(x, z) else B_GRASS
     return SCULPTURE.get((x, y, z), B_AIR)
 
 
@@ -439,6 +525,51 @@ def spiral(cx, cz, r):
     return out
 
 
+def death_blob():
+    """What falling out of the world looks like.
+
+    No health is what raises the death screen; the combat event is what puts
+    a line on it. Nothing else happens — the client owns the Respawn button,
+    and the console does nothing until it asks (Client Status, action 0)."""
+    out = packet(P_UPDATE_HEALTH,
+                 struct.pack(">f", 0.0) + varint(0) + struct.pack(">f", 0.0))
+    out += packet(P_COMBAT_EVENT,
+                  varint(2) +                       # ENTITY_DEAD
+                  varint(1) +                       # our player entity id
+                  struct.pack(">i", -1) +           # killed by no entity
+                  mcstring('{"text":"fell out of the world"}'))
+    return out
+
+
+def respawn_blob():
+    """The answer to "respawn me": same world, same dimension, back at spawn.
+
+    Deliberately NOT followed by the chunks. In 1.16.5 the client rebuilds
+    its world only when the dimension KEY changes (handleRespawn compares it
+    against the one it already has), and this respawn stays in
+    minecraft:overworld — so the terrain it already holds is still good, and
+    re-sending 146 KB would cost four minutes on the emulated link for
+    nothing. If a client ever does respawn into a void, the fix is one line:
+    call send_world() between this blob and play_post."""
+    payload = nbt_root(dimension_element())
+    payload += mcstring("minecraft:overworld")
+    payload += struct.pack(">q", 0)          # hashed seed
+    payload += bytes([1])                    # gamemode: creative
+    payload += bytes([1])                    # previous gamemode
+    payload += b"\x00"                       # is debug
+    payload += b"\x01"                       # is flat
+    payload += b"\x00"                       # copy metadata
+    out = packet(P_RESPAWN, payload)
+    out += packet(P_UPDATE_HEALTH,
+                  struct.pack(">f", 20.0) + varint(20) + struct.pack(">f", 5.0))
+    out += packet(P_ABILITIES,
+                  bytes([0x0D]) + struct.pack(">ff", 0.05, 0.1))
+    out += packet(P_HELD_ITEM, bytes([0]))
+    out += packet(P_VIEW_POSITION,
+                  varint(SPAWN_CHUNK[0]) + varint(SPAWN_CHUNK[1]))
+    return out
+
+
 def status_json():
     return json.dumps({
         "version": {"name": VERSION_NAME, "protocol": PROTOCOL},
@@ -495,6 +626,8 @@ def bake():
     # Keepalive: framed, 8-byte id at a fixed offset for patching.
     ka = packet(P_KEEPALIVE, b"\x00" * 8)
     blobs["keepalive"] = ka
+    blobs["death"] = death_blob()
+    blobs["respawn"] = respawn_blob()
 
     manifest = {
         "protocol": PROTOCOL,
@@ -525,7 +658,7 @@ def rom_layout(blobs, manifest, base):
     first-fit with bank padding wastes almost nothing."""
     assert base % 0x10000 == 0, "MC data must start on a bank boundary"
     order = ["status_response", "pong", "login_success_id", "play_pre"] + \
-        manifest["chunks"] + ["play_post", "keepalive"]
+        manifest["chunks"] + ["play_post", "keepalive", "death", "respawn"]
     image = bytearray()
     placed = {}
     for name in order:
@@ -551,7 +684,8 @@ def emit_header(path, blobs, manifest, placed, order):
         w("#ifndef MCDATA_H\n#define MCDATA_H\n#include <stdint.h>\n\n")
         w("typedef struct { uint32_t addr; uint16_t len; } mc_blob_t;\n\n")
         for name in ("status_response", "pong", "login_success_id",
-                     "play_pre", "play_post", "keepalive"):
+                     "play_pre", "play_post", "keepalive", "death",
+                     "respawn"):
             a, ln = placed[name]
             w(f"#define MC_{name.upper()} "
               f"{{ 0x{a:06x}ul, {ln}u }}\n")
@@ -571,6 +705,33 @@ def emit_header(path, blobs, manifest, placed, order):
         w(f"#define MC_B_AIR {B_AIR}\n#define MC_B_STONE {B_STONE}\n")
         w(f"#define MC_B_GRASS {B_GRASS}\n#define MC_B_DIRT {B_DIRT}\n")
         w(f"#define MC_B_BEDROCK {B_BEDROCK}\n")
+        w("/* The hill and the pond, indexed by SQUARED distance from each\n")
+        w(" * centre — so the console answers \"what was here?\" with a table\n")
+        w(" * lookup and no square root. Entry 0 of each is the centre. */\n")
+        w(f"#define MC_MOUNT_CX ({MOUNT_CX})\n")
+        w(f"#define MC_MOUNT_CZ ({MOUNT_CZ})\n")
+        w(f"#define MC_MOUNT_D2MAX {MOUNT_R * MOUNT_R}\n")
+        w("#define MC_MOUNT_TOP { \\\n  ")
+        for d2, v in enumerate(mount_table()):
+            w(f"{v},")
+            if d2 % 16 == 15:
+                w(" \\\n  ")
+        w(" \\\n}\n")
+        w(f"#define MC_LAKE_CX ({LAKE_CX})\n")
+        w(f"#define MC_LAKE_CZ ({LAKE_CZ})\n")
+        w(f"#define MC_LAKE_D2MAX {SHORE_R * SHORE_R}\n")
+        w("#define MC_LAKE_SHORE 0xFE   /* sand, not a floor height */\n")
+        w("#define MC_LAKE_FLOOR { \\\n  ")
+        for d2, v in enumerate(lake_table()):
+            w(f"{v},")
+            if d2 % 16 == 15:
+                w(" \\\n  ")
+        w(" \\\n}\n")
+        w(f"#define MC_B_WATER {B_WATER}\n#define MC_B_SAND {B_SAND}\n")
+        w("/* Below this, the world has ended. The console only ever tests\n")
+        w(" * the SIGN and EXPONENT of the client's 64-bit Y, so the depth is\n")
+        w(" * a power of two by construction: exponent >= 1028 means |Y| >= 32. */\n")
+        w("#define MC_VOID_EXPONENT 1028\n")
         xs = [x for (x, _, _) in SCULPTURE]
         x0, x1 = min(xs), max(xs)
         w(f"#define MC_SCULPT_X0 ({x0})\n#define MC_SCULPT_X1 ({x1})\n")

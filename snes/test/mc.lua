@@ -179,6 +179,27 @@ emu.addEventCallback(function()
     end
     -- Wait past one keepalive interval to see it fire post-burst.
     at = frame + 700
+    step = 6.3
+    return
+  end
+
+  -- The world has an EDGE, and past it a fall that would never end. The
+  -- console reads only the sign and exponent of the client's 64-bit Y --
+  -- it has no FPU to read the rest with -- so this is X=0.0, Y=-100.0,
+  -- Z=0.0, not on the ground.
+  if step == 6.3 then
+    play_sock:send(pkt(0x11, string.rep("\0", 8) ..
+                       string.char(0xC0, 0x59, 0, 0, 0, 0, 0, 0) ..
+                       string.rep("\0", 8) .. string.char(0)))
+    at = frame + 400
+    step = 6.6
+    return
+  end
+  -- ...and the client's own Respawn button (Client Status, action 0) is
+  -- what asks for the way back. Nothing happens until it does.
+  if step == 6.6 then
+    play_sock:send(pkt(0x04, varint(0)))
+    at = frame + 500
     step = 7
     return
   end
@@ -261,6 +282,24 @@ emu.addEventCallback(function()
           "the dig was not reported on the console")
   r.check(text:find("snesbot joined the world", 1, true) ~= nil,
           "the join was not reported on the console")
+
+  -- Death by void, and a respawn on demand.
+  local final, fc = walk(play_sock.rx, 1), {}
+  for _, pp in ipairs(final) do fc[pp.id] = (fc[pp.id] or 0) + 1 end
+  r.check((fc[0x49] or 0) >= 2,
+          "expected two Update Health packets (dead, then healed), got " ..
+          tostring(fc[0x49]))
+  r.check((fc[0x31] or 0) >= 1,
+          "no Combat Event - the death screen would carry no reason")
+  r.check((fc[0x39] or 0) == 1,
+          "the respawn request was not answered with a Respawn packet")
+  r.check((fc[0x34] or 0) >= 2,
+          "respawn did not put the player back at spawn (no second " ..
+          "Position And Look)")
+  r.check(text:find("fell out of the world", 1, true) ~= nil,
+          "the fall was not reported on the console")
+  r.check(text:find("respawned", 1, true) ~= nil,
+          "the respawn was not reported on the console")
 
   -- One player, as advertised, and the incumbent survives saying so.
   r.check(second_sock ~= nil and
