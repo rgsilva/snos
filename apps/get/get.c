@@ -99,6 +99,10 @@ static int parse_url(const char *url) {
   else if (url[0] == 0) return -1;
   while (url[i] && url[i] != '/' && h < HOST_MAX) host[h++] = url[i++];
   host[h] = 0;
+  /* Stopped on the cap rather than on the end of the host: the rest of the
+   * name would otherwise be copied into `path` below, producing a confident
+   * request to a TRUNCATED host with the name's tail as the path. */
+  if (url[i] && url[i] != '/') return -1;
   if (h == 0 || url[i] == 0) {
     path[0] = '/';
     path[1] = 0;

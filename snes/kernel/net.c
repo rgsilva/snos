@@ -123,6 +123,12 @@ static uint8_t ch_stack[NET_CHANNELS];
  * when the channel closes — the daemon holds a real socket on that port and
  * nothing else knows which one. */
 static uint16_t ch_lport[NET_CHANNELS];
+/* Withdrawals that did not fit in the control queue at close time. The old
+ * code simply skipped them and cleared ch_lport anyway, so nothing could
+ * ever retry: the daemon held the real socket until it was restarted, and
+ * the next run of the same application found its own port taken by its
+ * previous life — the exact failure net_close's comment warns about. */
+static uint16_t unfwd_port[NET_CHANNELS];
 
 /* Channel-lifecycle mutations (claim/close/hangup) touch ch_state, which the
  * NMI also writes (S2C_ERR, and the fail-everything sweep on a peer restart).
@@ -281,6 +287,7 @@ void net_init(void) {
     txring_tail[i] = 0;
     ch_stack[i] = 0;
     ch_lport[i] = 0;
+    unfwd_port[i] = 0;
   }
   txq_head = 0;
   txq_tail = 0;
@@ -421,6 +428,36 @@ int net_ip_read(uint8_t *dst, int max) {
 int net_ip_wspace(void) {
   return (int)(IP_TXRING - 1 -
                (uint16_t)((iptx_head - iptx_tail) & (IP_TXRING - 1)));
+}
+
+/* Queue TWO spans as ONE record: the length prefix and its datagram, with a
+ * single publishing store.
+ *
+ * Two separate net_ip_write calls could be torn by the NMI's peer-restart
+ * handler — which discards the queue with `tail = head` — landing between
+ * them: the prefix is thrown away and the bare packet published after it,
+ * so the daemon reads the IP header's first two bytes as a length and every
+ * datagram after that is misframed, with no resync signal in this direction.
+ * One head store means a restart takes the whole record or none of it. */
+int net_ip_write2(const uint8_t *a, int na, const uint8_t *b, int nb) {
+  uint16_t h, first;
+  if (!ip_mode || na <= 0 || nb <= 0) return 0;
+  if (na + nb > net_ip_wspace()) return 0;
+  h = iptx_head;
+  first = (uint16_t)(IP_TXRING - h);
+  if (first > (uint16_t)na) first = (uint16_t)na;
+  ring_move(&iptx[h], a, first);
+  if (first < (uint16_t)na)
+    ring_move(&iptx[0], a + first, (uint16_t)((uint16_t)na - first));
+  h = (uint16_t)((h + (uint16_t)na) & (IP_TXRING - 1));
+  /* ...continuing at where the first span ended, still UNPUBLISHED. */
+  first = (uint16_t)(IP_TXRING - h);
+  if (first > (uint16_t)nb) first = (uint16_t)nb;
+  ring_move(&iptx[h], b, first);
+  if (first < (uint16_t)nb)
+    ring_move(&iptx[0], b + first, (uint16_t)((uint16_t)nb - first));
+  iptx_head = (uint16_t)((h + (uint16_t)nb) & (IP_TXRING - 1));
+  return na + nb;
 }
 
 int net_ip_write(const uint8_t *src, int n) {
@@ -604,7 +641,8 @@ int net_wspace(int ch) {
  * what space allows, and never blocking; uIP segments the queue out whenever
  * ip_service next runs. */
 int net_write(int ch, const uint8_t *src, int n) {
-  int i, room;
+  int room;
+  uint16_t h, first;
   if (ch <= 0 || ch >= NET_CHANNELS) return 0;
   /* EOF too, not just OPEN. EOF means the PEER stopped sending; the direction
    * we write in is still open, and refusing here is what made an echo server
@@ -613,10 +651,19 @@ int net_write(int ch, const uint8_t *src, int n) {
   if (ch_state[ch] != NET_ST_OPEN && ch_state[ch] != NET_ST_EOF) return 0;
   room = net_wspace(ch);
   if (n > room) n = room;
-  for (i = 0; i < n; i++) {
-    txring[ch][txring_head[ch]] = src[i];
-    txring_head[ch] = (uint16_t)((txring_head[ch] + 1) & (NET_TXRING - 1));
-  }
+  if (n <= 0) return 0;            /* MVN would move 65536 for a count of 0 */
+  /* Block moves, split at the wrap: `txring[ch][head]` rebuilt a 24-bit
+   * address from a 2-D array and a volatile index for EVERY byte, the
+   * ~230-cycles/byte shape measured twice in this file. src is either kernel
+   * far data or a kernel stack local — bank $00 below $2000, the hardware
+   * mirror of $7E0000 — so ring_move's fixed source bank reaches both. */
+  h = txring_head[ch];
+  first = (uint16_t)(NET_TXRING - h);
+  if (first > (uint16_t)n) first = (uint16_t)n;
+  ring_move(&txring[ch][h], src, first);
+  if (first < (uint16_t)n)
+    ring_move(&txring[ch][0], src + first, (uint16_t)((uint16_t)n - first));
+  txring_head[ch] = (uint16_t)((h + (uint16_t)n) & (NET_TXRING - 1));
   return n;
 }
 
@@ -703,6 +750,26 @@ int net_listen(uint16_t port) {
   return ch;
 }
 
+/* Emit any forward withdrawal that could not fit when its channel closed.
+ * Foreground only (txq_head is foreground-owned), and called once per
+ * ip_service pass — the port stays held by the daemon until this lands. */
+void net_unfwd_retry(void) {
+  int ch;
+  for (ch = 1; ch < NET_CHANNELS; ch++) {
+    if (unfwd_port[ch] == 0) continue;
+    proc_lock();
+    if (txq_space() >= 5) {
+      txq_put(C2S_IPUNFWD);
+      txq_put(3);
+      txq_put((uint8_t)ch);
+      txq_put((uint8_t)(unfwd_port[ch] & 0xFF));
+      txq_put((uint8_t)(unfwd_port[ch] >> 8));
+      unfwd_port[ch] = 0;
+    }
+    proc_unlock();
+  }
+}
+
 int net_hello(void) {
   int rc = -1;
   if (!net_up()) return -1;
@@ -725,12 +792,16 @@ void net_close(int ch) {
    * Withdraw the forward first: the daemon's socket outlives the channel
    * otherwise, and the next run of the same application finds its port
    * taken by its own previous life. */
-  if (ch_listen[ch] && txq_space() >= 5) {
-    txq_put(C2S_IPUNFWD);
-    txq_put(3);
-    txq_put((uint8_t)ch);
-    txq_put((uint8_t)(ch_lport[ch] & 0xFF));
-    txq_put((uint8_t)(ch_lport[ch] >> 8));
+  if (ch_listen[ch] && ch_lport[ch] != 0) {
+    if (txq_space() >= 5) {
+      txq_put(C2S_IPUNFWD);
+      txq_put(3);
+      txq_put((uint8_t)ch);
+      txq_put((uint8_t)(ch_lport[ch] & 0xFF));
+      txq_put((uint8_t)(ch_lport[ch] >> 8));
+    } else {
+      unfwd_port[ch] = ch_lport[ch];   /* net_unfwd_retry sends it later */
+    }
   }
   if (ch_stack[ch]) ip_close(ch);
   ch_stack[ch] = 0;
@@ -989,6 +1060,13 @@ void net_service(void) {
            * to ip.c exactly once via the mark/flag handoff. */
           net_gw_version = 0;
           ip_mode = 0;
+          /* The control stream broke mid-record just as surely as the IP
+           * one did: a [type][len] whose payload never arrived would eat
+           * the NEW daemon's HELLO reply as the dead record's body, and
+           * mis-set the very version that decides ip_mode. The IP side got
+           * an explicit resync for this; the control side had nothing. */
+          cmsg_state = 0;
+          cmsg_got = 0;
           iptx_tail = iptx_head;
           txframe_ip = 0;
           iprx_mark = iprx_head;

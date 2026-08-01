@@ -113,8 +113,10 @@ static void ip_output(const uint8_t *p, uint16_t n) {
   }
   pre[0] = (uint8_t)n;
   pre[1] = (uint8_t)(n >> 8);
-  net_ip_write(pre, 2);
-  net_ip_write(p, (int)n);
+  /* ONE record, one publishing store: two writes could be torn apart by the
+   * NMI's peer-restart discard, putting a bare packet on the stream whose
+   * first two bytes the daemon would read as a length. */
+  net_ip_write2(pre, 2, p, (int)n);
   ip_stat_tx++;
 }
 
@@ -771,6 +773,12 @@ void ip_close(int ch) {
 /* Advance whatever is waiting on a name. Called once per service pass. */
 static void pend_service(void) {
   int i;
+  /* The resolver is one slot, so only LOOKUPS serialise. Scanning used to
+   * `return` the moment one was in flight, which also stranded every
+   * higher-numbered channel whose address needed no lookup at all — a
+   * dotted-quad connect waited out somebody else's six-second DNS timeout
+   * for no reason. */
+  int resolver_taken = 0;
   for (i = 1; i < NET_CHANNELS; i++) {
     if (!pend[i].busy) continue;
     if (pend[i].have_addr) {
@@ -782,7 +790,10 @@ static void pend_service(void) {
     }
     if (pend[i].resolving) {
       int st = ip_resolve_state(pend[i].tag);
-      if (st == IP_RES_BUSY) return; /* still working; nobody else may start */
+      if (st == IP_RES_BUSY) {       /* still working; nobody else may start */
+        resolver_taken = 1;
+        continue;
+      }
       pend[i].resolving = 0;
       pend[i].busy = 0;
       if (st == IP_RES_OK) {
@@ -796,12 +807,14 @@ static void pend_service(void) {
       ip_resolve_release(pend[i].tag); /* our answer, consumed */
       continue;
     }
+    if (resolver_taken) continue;  /* our turn comes on a later pass */
     {
       int tag = ip_resolve(pend[i].host);
       if (tag > 0) {
         pend[i].tag = (uint8_t)tag;
         pend[i].resolving = 1;
-        return; /* one lookup at a time */
+        resolver_taken = 1; /* one lookup at a time */
+        continue;
       }
       /* Refused with the resolver idle: the NAME is unusable (malformed, or
        * too long), and retrying next pass would wedge this slot — and, via
@@ -811,9 +824,9 @@ static void pend_service(void) {
         net_stack_setstate(i, NET_ST_ERROR);
         continue;
       }
+      /* Busy with somebody else's name: try again next pass. */
+      resolver_taken = 1;
     }
-    /* The resolver is busy with somebody else's name: try again next pass. */
-    return;
   }
 }
 
@@ -983,6 +996,7 @@ void ip_service(void) {
 
   res_service();
   pend_service();
+  net_unfwd_retry();
 
   if ((uint16_t)(snos_frames - tick_last) >= IP_TICK_FRAMES) {
     tick_last = snos_frames;

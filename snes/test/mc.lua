@@ -57,7 +57,8 @@ end
 local frame, step, at = 0, 1, nil
 local last_step = nil
 local claimed = false
-local status_sock, play_sock
+local status_sock, play_sock, second_sock, junk_sock
+local incumbent_ok = nil     -- was the player still connected after the refusal
 local burst_done_at = nil
 local counts = {}
 local kept = { chat = nil, blockchange = nil }
@@ -182,7 +183,40 @@ emu.addEventCallback(function()
     return
   end
 
-  if step == 7 then L.feed(" "); at = frame + 300; step = 8; return end
+  -- A SECOND player while snesbot is in the world. The status line
+  -- advertises one, and a second join would get its own multi-minute burst
+  -- during which the incumbent is never pumped and never keepalived -- so
+  -- the newcomer would silently time the first player out to take their
+  -- place. Refused with the protocol's own Login Disconnect, not a RST.
+  if step == 7 then
+    second_sock = gw:dial(gw.fwd_port)
+    second_sock.on_established = function(t)
+      t:send(pkt(0x00, varint(754) .. mcstr("snes") ..
+                 string.char(0x63, 0xDD) .. varint(2)))
+      t:send(pkt(0x00, mcstr("intruder")))
+    end
+    at = frame + 900
+    step = 7.3
+    return
+  end
+  -- ...and a GARBLED client: a length prefix that is all continuation
+  -- bytes. Nothing marks a packet boundary in this stream, so there is
+  -- nothing to resynchronise on -- the connection goes rather than the
+  -- parse continuing on garbage (unbounded, the shift walked past 32 and
+  -- a "legal" 5-byte length parked the session discarding 4 GB).
+  if step == 7.3 then
+    -- Snapshot BEFORE the shutdown at the end of the test, which resets
+    -- every live connection by design and would mask the thing asserted.
+    incumbent_ok = not play_sock.reset and not play_sock.done
+    junk_sock = gw:dial(gw.fwd_port)
+    junk_sock.on_established = function(t)
+      t:send(string.rep(string.char(0xFF), 8))
+    end
+    at = frame + 900
+    step = 7.6
+    return
+  end
+  if step == 7.6 then L.feed(" "); at = frame + 300; step = 8; return end
 
   local r = L.new_report("mc")
   local text = L.ring_text()
@@ -227,6 +261,22 @@ emu.addEventCallback(function()
           "the dig was not reported on the console")
   r.check(text:find("snesbot joined the world", 1, true) ~= nil,
           "the join was not reported on the console")
+
+  -- One player, as advertised, and the incumbent survives saying so.
+  r.check(second_sock ~= nil and
+          second_sock.rx:find("One player", 1, true) ~= nil,
+          "a second player was not refused with a Login Disconnect")
+  r.check(text:find("refused a second player", 1, true) ~= nil,
+          "the refusal was not reported on the console")
+  r.check(incumbent_ok == true,
+          "the player already in the world was dropped by a second join")
+  -- A stream the framer cannot parse costs the CONNECTION, not the server.
+  r.check(junk_sock ~= nil and (junk_sock.reset or junk_sock.fin_rcvd),
+          "a garbled client was not hung up on")
+  r.check(text:find("garbled client", 1, true) ~= nil,
+          "the garbled client was not reported on the console")
+  r.check(text:find("will not take its answer", 1, true) == nil,
+          "a refusal had to be aborted - the goodbye never drained")
   print(string.format("burst complete at frame %d (%d bytes)",
         burst_done_at or -1, #play_sock.rx))
 

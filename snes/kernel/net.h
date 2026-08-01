@@ -91,6 +91,9 @@ extern volatile uint16_t net_stat_refused;
  * gateway claims IP support with its HELLO version (>= 2), and until it does
  * the kernel never puts a LINK_CH_IP record on the wire. */
 int net_ipmode(void); /* gateway speaks IP (slirp): HELLO version >= 2 */
+/* Retry any port-forward withdrawal that did not fit in the control queue
+ * when its channel closed. Foreground only; ip_service calls it each pass. */
+void net_unfwd_retry(void);
 
 /* ---- channels backed by the STACK rather than by the gateway -------------
  *
@@ -123,6 +126,10 @@ int net_ip_read(uint8_t *dst, int max);
 /* Queue bytes toward the gateway. All or nothing — half a datagram on the
  * wire poisons the stream for every datagram after it. */
 int net_ip_write(const uint8_t *src, int n);
+/* Two spans, one indivisible record (prefix + datagram): a peer restart in
+ * the NMI cannot land between them and leave an unprefixed packet on the
+ * stream. Prefer this over two net_ip_write calls for anything framed. */
+int net_ip_write2(const uint8_t *a, int na, const uint8_t *b, int nb);
 int net_ip_wspace(void);
 
 #endif

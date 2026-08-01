@@ -74,7 +74,8 @@ typedef struct {
   uint32_t plen;
   uint32_t discard;
   uint16_t ka_at;
-  uint8_t poison; /* the framer met garbage; hang up, do not parse on */
+  uint8_t poison;     /* 1 = unparseable stream, 2 = we said goodbye */
+  uint16_t poison_at; /* when, so a peer that will not read cannot pin us */
   uint8_t rx[RXBUF];
   char pname[17];
   uint8_t uuid[16];
@@ -177,16 +178,45 @@ static void send_chat(const char *a, const char *b) {
 
 /* ------------------------------------------------------------- parsing */
 
+/* Is that much of this packet really here? A declared length is the
+ * CLIENT's claim; rxgot is what arrived. Parsing past it read whatever the
+ * previous packet — or the previous CONNECTION, since rx survives
+ * sess_reset — had left in the buffer, and then echoed those bytes back
+ * onto the wire as a pong payload, a Block Change position or a player
+ * name. */
+static int have(uint16_t off, uint16_t need) {
+  return (uint32_t)off + (uint32_t)need <= (uint32_t)cur->rxgot;
+}
+
 static uint32_t rd_varint(uint16_t *off) {
   uint32_t v = 0;
-  uint8_t sh = 0, b;
-  do {
-    b = cur->rx[*off];
+  uint8_t sh = 0;
+  while (sh < 35 && *off < cur->rxgot) {
+    uint8_t b = cur->rx[*off];
     (*off)++;
     v |= (uint32_t)(b & 0x7F) << sh;
     sh += 7;
-  } while ((b & 0x80) && sh < 35 && *off < RXBUF);
+    if (!(b & 0x80)) break;
+  }
   return v;
+}
+
+/* Login Disconnect (login state, id 0x00): the protocol's own way to say no,
+ * so the client shows the reason instead of an IOException. */
+static void send_login_disconnect(const char *why) {
+  uint16_t o = 2, i;
+  buf[1] = 0x00;
+  o++;                               /* string length, backpatched */
+  buf[o++] = '{'; buf[o++] = '"'; buf[o++] = 't'; buf[o++] = 'e';
+  buf[o++] = 'x'; buf[o++] = 't'; buf[o++] = '"'; buf[o++] = ':';
+  buf[o++] = '"';
+  for (i = 0; why[i] && o < 100; i++) {
+    char c = why[i];
+    if (c >= 32 && c < 127 && c != '"' && c != '\\') buf[o++] = (uint8_t)c;
+  }
+  buf[o++] = '"'; buf[o++] = '}';
+  buf[2] = (uint8_t)(o - 3);
+  send_small((uint16_t)(o - 1));
 }
 
 static uint16_t world_block(int32_t x, int32_t y, int32_t z) {
@@ -207,6 +237,7 @@ static void handle_digging(uint16_t off) {
   uint16_t o = off, i, state;
   uint32_t status = rd_varint(&o);
   if (status != 0 && status != 2) return;  /* only a break needs undoing */
+  if (!have(o, 8)) return;                 /* no position: not ours to answer */
   hi = ((uint32_t)cur->rx[o] << 24) | ((uint32_t)cur->rx[o + 1] << 16) |
        ((uint32_t)cur->rx[o + 2] << 8) | cur->rx[o + 3];
   lo = ((uint32_t)cur->rx[o + 4] << 24) | ((uint32_t)cur->rx[o + 5] << 16) |
@@ -235,7 +266,7 @@ static void handle_chat(uint16_t off) {
   char text[49];
   char pre[21];
   if (n > 48) n = 48;
-  for (i = 0; i < n && o + i < RXBUF; i++) {
+  for (i = 0; i < n && o + i < cur->rxgot; i++) {
     char c = (char)cur->rx[o + i];
     text[i] = (c >= 32 && c < 127) ? c : '?';
   }
@@ -264,6 +295,10 @@ static void handle_packet(void) {
     (void)rd_varint(&off);           /* protocol; the client judges from our
                                       * status reply */
     next = rd_varint(&off);          /* server address string: skip */
+    /* Its length is the client's to state, and off is 16-bit: unchecked,
+     * the skip wrapped and the read after it wandered anywhere in the data
+     * bank looking for the next-state byte. */
+    if (next > cur->rxgot || !have((uint16_t)(off + next), 2)) return;
     off = (uint16_t)(off + next + 2);
     next = rd_varint(&off);
     cur->st = (next == 1) ? ST_STATUS : ST_LOGIN;
@@ -274,6 +309,7 @@ static void handle_packet(void) {
     if (pid == 0x01) {
       const uint8_t __far *src = (const uint8_t __far *)BLOB_PONG.addr;
       uint16_t i;
+      if (!have(off, 8)) return;     /* nothing to echo but stale bytes */
       for (i = 0; i < BLOB_PONG.len; i++) buf[i] = src[i];
       for (i = 0; i < 8; i++) buf[MC_PONG_PAYLOAD_OFF + i] = cur->rx[off + i];
       sl_send_all(cur->ch, (const char *)buf, BLOB_PONG.len);
@@ -283,7 +319,21 @@ static void handle_packet(void) {
   if (cur->st == ST_LOGIN && pid == 0x00) {
     uint32_t n = rd_varint(&off);
     uint16_t i, o;
+    /* One player, as the status line advertises. A second login would get
+     * its own multi-minute join burst, during which the incumbent's session
+     * is never pumped and never keepalived — so the newcomer would silently
+     * time the first player out to take their place. */
+    for (i = 0; i < NSESS; i++) {
+      if (&S[i] != cur && S[i].st == ST_PLAY) {
+        send_login_disconnect("One player at a time. It is a Super Nintendo.");
+        say("refused a second player\n");
+        cur->poison = 2;
+        cur->poison_at = sys_frames();
+        return;
+      }
+    }
     if (n > 16) n = 16;
+    if (n == 0 || !have(off, (uint16_t)n)) return;
     for (i = 0; i < n; i++) cur->pname[i] = (char)cur->rx[off + i];
     cur->pname[n] = 0;
     /* An offline-mode client accepts any UUID; vanilla's md5 recipe is not
@@ -360,6 +410,7 @@ static void pump(void) {
        * discarding 4 GB. Poison it; the main loop hangs up. */
       if (cur->lenshift > 28 || cur->plen > 32768ul) {
         cur->poison = 1;
+        cur->poison_at = sys_frames();
         return;
       }
       if (b & 0x80) continue;
@@ -435,26 +486,34 @@ int main(void) {
           send_keepalive();
         }
       }
-      if (cur->poison && s2 == NET_ST_OPEN) {
-        /* The framer met something it cannot resynchronise on (nothing
-         * marks a packet boundary in this stream), so the connection goes
-         * rather than the parse continuing on garbage. Close aborts it —
-         * a RST, which is the honest answer — and the port survives
-         * because the OTHER session still owns the forward. */
-        uint16_t again;
-        say("garbled client - hanging up\n");
-        sys_net_close(cur->ch);
-        again = sys_net_listen(MC_PORT);
-        if (again == SYS_ERR) {
-          /* No channel to re-listen with. Park this slot instead of
-           * holding SYS_ERR as a channel number and asking the kernel
-           * about it forever; the other session still serves. */
-          say("(one listener lost - restart mc to get it back)\n");
-          cur->ch = 0;               /* channel 0 is the kernel's, never ours */
-        } else {
-          cur->ch = again;
+      if (cur->poison && (s2 == NET_ST_OPEN || s2 == NET_ST_EOF)) {
+        /* End it — but not before anything we just SAID has actually gone.
+         * net_hangup refuses while the send queue holds bytes or uIP has a
+         * segment unacknowledged, which is exactly "the client now has our
+         * Login Disconnect"; closing outright turned a polite refusal into
+         * a RST that discarded the message along with the connection. The
+         * port is kept, so the listener simply comes back. */
+        if (sys_net_hangup(cur->ch) == 0) {
+          say(cur->poison == 2 ? "disconnected them\n"
+                               : "garbled client - hung up\n");
+          sess_reset(cur);
+        } else if ((uint16_t)(sys_frames() - cur->poison_at) > 600u) {
+          /* Ten seconds and it has not taken its answer: the peer is gone
+           * or not reading, and a listener must not be pinned by either. */
+          uint16_t again;
+          say("client will not take its answer - aborting\n");
+          sys_net_close(cur->ch);
+          again = sys_net_listen(MC_PORT);
+          if (again == SYS_ERR) {
+            /* Park the slot rather than hold SYS_ERR as a channel number
+             * and ask the kernel about it forever; the other still serves. */
+            say("(one listener lost - restart mc to get it back)\n");
+            cur->ch = 0;             /* channel 0 is the kernel's, never ours */
+          } else {
+            cur->ch = again;
+          }
+          sess_reset(cur);
         }
-        sess_reset(cur);
         continue;
       }
       if (s2 == NET_ST_EOF || s2 == NET_ST_ERROR) {

@@ -74,6 +74,15 @@ ICMP_IDLE = 15.0
 # kept open, leaked a socket and a table entry permanently.
 TCP_IDLE = 300.0
 TIME_WAIT = 4.0        # keep a closed flow's 4-tuple reserved this long
+# A forwarded port is reachable by anything that can route here, which makes
+# the accept loop the daemon's one unbounded input. Every accepted connection
+# costs a descriptor, a table entry and a SYN re-queued every RTO for ~20 s
+# before it is reaped -- so a client opening connections in a loop exhausts
+# file descriptors (after which even the NAT's own sockets fail) and floods a
+# 615 B/s link queue, all from outside. The console serves one connection per
+# listener anyway, so a small cap costs nothing real and the OS's own backlog
+# refuses the rest.
+MAX_INBOUND_PER_PORT = 4
 # How long an inbound client's half-close is held back from the console, so
 # the server's reply can leave first — see the comment at the FIN in
 # _pump_tcp. Long enough for an app polling at frame rate to answer, short
@@ -114,6 +123,7 @@ class _Flow:
     def __init__(self, sock):
         self.sock = sock
         self.touched = time.time()
+        self.queries = 0       # datagrams sent on this flow (resolver rotation)
 
     def touch(self):
         self.touched = time.time()
@@ -379,13 +389,6 @@ class Slirp:
                 self.stat_drop += 1
                 return
 
-        target = dst
-        if dst == DNS_INT:
-            # The console does its OWN DNS: this is a real query it composed,
-            # and we are only the recursive resolver's address. Aim it at
-            # whatever this machine resolves with.
-            target = _ip2int(self.resolvers()[0])
-
         key = (sport, dst, dport)
         flow = self.udp.get(key)
         if flow is None:
@@ -397,6 +400,20 @@ class Slirp:
             flow.dport = dport
             self.udp[key] = flow
         flow.touch()
+
+        target = dst
+        if dst == DNS_INT:
+            # The console does its OWN DNS: this is a real query it composed,
+            # and we are only the recursive resolver's address. Aim it at
+            # whatever this machine resolves with -- ROTATING on each retry,
+            # because the console retries a lookup four times on this same
+            # flow and a first nameserver that has gone away (a VPN teardown
+            # leaves stale entries in resolv.conf) would otherwise cost the
+            # whole lookup rather than one try. It is also what makes the
+            # public fallback pair below more than decoration.
+            rs = self.resolvers()
+            target = _ip2int(rs[flow.queries % len(rs)])
+        flow.queries += 1
         try:
             flow.sock.sendto(payload, (_int2ip(target), dport))
         except OSError:
@@ -415,13 +432,22 @@ class Slirp:
         for key, flow in list(self.udp.items()):
             while True:
                 try:
-                    data, _addr = flow.sock.recvfrom(MTU - 28)
+                    data, _addr = flow.sock.recvfrom(65535)
                 except (BlockingIOError, InterruptedError):
                     break
                 except OSError:
                     break
                 if not data:
                     break
+                if len(data) > MTU - 28:
+                    # Too large for one datagram on this link. Dropping is
+                    # what the ICMP pump already does; this path used to
+                    # truncate and then compute a VALID checksum over the
+                    # mangled payload, handing the console a well-formed
+                    # datagram containing a cut-off DNS answer with no TC
+                    # bit -- a lie it has no way to detect.
+                    self.stat_drop += 1
+                    continue
                 flow.touch()
                 self._udp_out(flow, data)
 
@@ -444,14 +470,22 @@ class Slirp:
         seg = hdr[:16] + struct.pack("!H", c) + hdr[18:] + payload
         self._emit(dip, SNES_INT, PROTO_TCP, seg)
 
-    def _rst(self, dip, sport, dport, seq, ack, had_ack):
+    def _rst(self, dip, sport, dport, ack_seq, ack, had_ack):
         """Refuse a connection we have no state for.
 
         Without this the console retransmits its SYN for the whole of uIP's
         connection timeout — twenty-odd seconds of an app looking hung — when
-        the answer ("nothing is listening") was available immediately."""
+        the answer ("nothing is listening") was available immediately.
+
+        `ack_seq` is the sequence the sender should resume at, computed by
+        the CALLER: this used to be an unconditional seq + 1, which is right
+        only when refusing a SYN and acknowledged a byte that was never sent
+        on every other path. uIP 1.0 aborts on any RST matching the tuple
+        without checking, so nothing here ever misbehaved -- but a stricter
+        stack would ignore the RST and hang instead, and M7 changes what is
+        on the far end."""
         hdr = struct.pack("!HHIIBBHHH", dport, sport,
-                          ack if had_ack else 0, (seq + 1) & 0xFFFFFFFF,
+                          ack if had_ack else 0, ack_seq & 0xFFFFFFFF,
                           5 << 4, RST | ACK, 0, 0, 0)
         c = csum16(_pseudo(dip, SNES_INT, PROTO_TCP, len(hdr)) + hdr)
         seg = hdr[:16] + struct.pack("!H", c) + hdr[18:]
@@ -475,11 +509,27 @@ class Slirp:
         key = (sport, dst, dport)
         t = self.tcp.get(key)
 
+        # A bare SYN (no ACK) on a tuple we still hold is a new connection
+        # reusing the port, not part of the old conversation: uIP has
+        # forgotten it even though our TIME_WAIT -- or a flow left stale by a
+        # peer that vanished -- has not. Falling through to the established
+        # path answered it with SILENCE, so the console retransmitted its SYN
+        # until the entry aged out: a hung connect with nothing logged.
+        # CONNECTING and SYN_RCVD are excluded on purpose, because a SYN
+        # arriving in those states IS an expected retransmission.
+        if (t is not None and (flags & SYN) and not (flags & ACK)
+                and t.state in (_Tcp.DONE, _Tcp.EST, _Tcp.FIN_SENT)):
+            t.close()
+            self.tcp.pop(key, None)
+            t = None
+
         if t is None:
             if flags & SYN:
                 self._tcp_open(key, seq)
             elif not (flags & RST):
-                self._rst(dst, sport, dport, seq, ack, bool(flags & ACK))
+                nxt = (seq + len(payload) +
+                       (1 if flags & FIN else 0)) & 0xFFFFFFFF
+                self._rst(dst, sport, dport, nxt, ack, bool(flags & ACK))
             return
 
         t.touch()
@@ -531,7 +581,17 @@ class Slirp:
                     t.closed_at = time.time()
 
         if payload:
-            if seq == t.rcv_nxt:
+            if t.inbuf:
+                # Backed up: the far socket has not taken what we already
+                # hold, so this segment is DROPPED WITHOUT AN ACK and uIP
+                # retransmits it when we have drained. That is the
+                # backpressure the comment below promises -- which the code
+                # used to contradict by acking everything into a buffer with
+                # no bound, so a slow or hostile external reader let the
+                # console push at link rate into unbounded host memory, and
+                # any reset then lost acked-but-unwritten bytes silently.
+                pass
+            elif seq == t.rcv_nxt:
                 # send(), not sendall(): these sockets are non-blocking, so
                 # sendall raises BlockingIOError the moment the kernel buffer
                 # fills -- and BlockingIOError IS an OSError, so a slow peer
@@ -776,7 +836,12 @@ class Slirp:
 
     def _pump_forwards(self):
         for port, srv in list(self.forwards.items()):
+            live = sum(1 for (sp, dip, _dp), t in self.tcp.items()
+                       if sp == port and dip == GW_INT
+                       and t.state != _Tcp.DONE)
             while True:
+                if live >= MAX_INBOUND_PER_PORT:
+                    break
                 try:
                     conn, addr = srv.accept()
                 except (BlockingIOError, InterruptedError):
@@ -805,6 +870,7 @@ class Slirp:
                 t.inbound = True
                 t.sent_at = time.time()
                 self.tcp[key] = t
+                live += 1
                 self._tcp_out(t, SYN, seq=t.iss)
                 t.snd_nxt = (t.iss + 1) & 0xFFFFFFFF
 

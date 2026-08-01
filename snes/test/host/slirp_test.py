@@ -20,7 +20,10 @@ Covered:
      connection timeout);
   5. a port forward: an OUTSIDE connection reaching the console as an
      inbound SYN it can answer;
-  6. a garbage datagram is dropped without taking the daemon with it.
+  6. a garbage datagram is dropped without taking the daemon with it;
+  7. the hardening a clean-room review asked for: the inbound accept cap,
+     a SYN reusing a tuple the daemon still holds, an oversized UDP reply,
+     and data NOT acked while the far socket is backed up.
 
 Plain assertions, no pytest: `python3 test/host/slirp_test.py`, exit 0 on
 pass, prints RESULT PASS/FAIL like every other suite.
@@ -394,6 +397,131 @@ def t_forward(c):
         c.nat.forward_del(port)
 
 
+def t_forward_cap(c):
+    """A forwarded port is reachable by anything that can route here, which
+    makes its accept loop the daemon's one unbounded input: every accepted
+    connection costs a descriptor and a SYN re-queued every RTO for ~20 s,
+    so a client opening connections in a loop exhausts both from outside."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    assert c.nat.forward_add(port), f"could not forward port {port}"
+    outs = []
+    try:
+        for _ in range(slirp.MAX_INBOUND_PER_PORT + 3):
+            o = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            o.settimeout(1.0)
+            try:
+                o.connect(("127.0.0.1", port))
+            except OSError:
+                o.close()
+                break
+            outs.append(o)
+            c.pump(0.15)          # let the daemon accept what it is willing to
+        live = [k for k, t in c.nat.tcp.items()
+                if k[0] == port and t.state != slirp._Tcp.DONE]
+        assert len(live) <= slirp.MAX_INBOUND_PER_PORT, \
+            (f"{len(live)} inbound flows accepted for one port; the cap is "
+             f"{slirp.MAX_INBOUND_PER_PORT} and nothing else bounds them")
+        assert live, "the cap refused every connection, including the first"
+    finally:
+        for o in outs:
+            o.close()
+        c.nat.forward_del(port)
+
+
+def t_syn_reuse(c):
+    """A bare SYN on a 4-tuple the daemon still holds is a NEW connection
+    reusing the port, not part of the old conversation. Falling through to
+    the established path answered it with silence, so the console
+    retransmitted its SYN until the entry aged out — a hung connect, with
+    nothing logged anywhere."""
+    srv, port = echo_server()
+    try:
+        sport = 5100
+        c.tcp_send("127.0.0.1", sport, port, SYN, 0x2222, 0)
+        assert c.wait_rx(2.0), "no SYN-ACK for the first connection"
+        sa = c.tcp_take()[0]
+        c.tcp_send("127.0.0.1", sport, port, ACK, 0x2223, sa["seq"] + 1)
+        c.pump(0.3)
+        key = (sport, slirp._ip2int("127.0.0.1"), port)
+        assert key in c.nat.tcp, "the first connection never reached the table"
+        c.rx.clear()
+        # ...and now the console comes back on the SAME tuple.
+        c.tcp_send("127.0.0.1", sport, port, SYN, 0x9999, 0)
+        assert c.wait_tcp(3.0, lambda x: x["flags"] & SYN), \
+            "a SYN reusing a live tuple got no answer at all"
+        sa2 = [x for x in c.tcp_take() if x["flags"] & SYN][0]
+        assert sa2["ack"] == 0x9999 + 1, \
+            f"the answer acknowledged {sa2['ack']:#x}, not the NEW SYN"
+    finally:
+        srv.close()
+
+
+def t_udp_oversize(c):
+    """A reply too big for one datagram on this link is DROPPED, not
+    truncated. Truncating and then computing a VALID checksum over the
+    remains hands the console a well-formed datagram containing a cut-off
+    answer with no TC bit — a lie it has no way to detect."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    big = b"x" * (slirp.MTU * 2)
+
+    def run():
+        try:
+            _d, a = s.recvfrom(512)
+            s.sendto(big, a)
+        except OSError:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        hdr = struct.pack("!HHHH", 6000, port, 8 + 3, 0)
+        before = c.nat.stat_drop
+        c.send("127.0.0.1", slirp.PROTO_UDP, hdr + b"ask")
+        c.pump(1.5)
+        got = c.take(slirp.PROTO_UDP)
+        assert not got, \
+            f"an oversized reply was delivered anyway ({len(got)} datagrams)"
+        assert c.nat.stat_drop > before, "the oversized reply was not counted"
+    finally:
+        s.close()
+
+
+def t_backpressure(c):
+    """Console data must never be acked into a buffer with no bound. While
+    the far socket has not taken what we already hold, the segment is
+    dropped UNACKED and uIP retransmits — the backpressure the code used to
+    promise in a comment and then skip in the branch under it, so a slow
+    external reader let the console push at link rate into host memory."""
+    srv, port = echo_server()
+    try:
+        sport = 5200
+        seq = 0x4444
+        c.tcp_send("127.0.0.1", sport, port, SYN, seq, 0)
+        assert c.wait_rx(2.0), "no SYN-ACK"
+        sa = c.tcp_take()[0]
+        their = sa["seq"] + 1
+        seq += 1
+        c.tcp_send("127.0.0.1", sport, port, ACK, seq, their)
+        c.pump(0.3)
+        t = c.nat.tcp[(sport, slirp._ip2int("127.0.0.1"), port)]
+        # Back the flow up, then hand it a segment WITHOUT ticking in
+        # between: input() answers synchronously, so what follows is what
+        # that one segment produced and nothing else.
+        before_nxt = t.rcv_nxt
+        t.inbuf = b"stuck"
+        c.rx.clear()
+        c.tcp_send("127.0.0.1", sport, port, PSH | ACK, seq, their, b"more")
+        assert t.rcv_nxt == before_nxt, \
+            "the daemon consumed a segment it could not write through"
+        assert not c.tcp_take(), "it acked a segment it had to drop"
+    finally:
+        srv.close()
+
+
 def t_garbage(c):
     c.nat.input(b"")
     c.nat.input(b"\x00" * 40)
@@ -410,13 +538,17 @@ def main():
              ("tcp", t_tcp),
              ("tcp-data-fin", t_tcp_data_fin), ("stray", t_stray),
              ("refused", t_refused), ("forward", t_forward),
+             ("forward-cap", t_forward_cap), ("syn-reuse", t_syn_reuse),
+             ("udp-oversize", t_udp_oversize),
+             ("backpressure", t_backpressure),
              ("garbage", t_garbage)]
     try:
         for name, fn in tests:
             c.rx.clear()
             fn(c)
         print("RESULT PASS slirp -- icmp, udp, dns front, tcp both ways, "
-              "data+fin, rst x2, forward")
+              "data+fin, rst x2, forward, accept cap, syn reuse, "
+              "oversize drop, backpressure")
         return 0
     except AssertionError as e:
         print(f"RESULT FAIL slirp -- {e}")
