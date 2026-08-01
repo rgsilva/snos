@@ -218,6 +218,11 @@ static int ping_intercept(const uint8_t *p, uint16_t n) {
  * SNOS's (a channel with two rings, drained by an application whenever it
  * gets round to it).
  */
+/* Defined with the connection table further down, but needed here: the
+ * appcall is the first thing that asks "which channel was listening on this
+ * port?" and C would otherwise infer a non-static declaration for it. */
+static int listen_ch_for(uint16_t netport);
+
 /* Move as much of the channel's send queue into this segment as uIP will
  * take. The bytes go STRAIGHT into uIP's own send buffer: uip_send memcpys
  * unless the pointer it is given is already uip_sappdata, so writing there
@@ -239,7 +244,24 @@ static void tcp_fill(uint8_t ch, uip_tcp_appstate_t *s, int max) {
 
 void snos_tcp_appcall(void) {
   uip_tcp_appstate_t *s = &uip_conn->appstate;
-  uint8_t ch = s->ch;
+  uint8_t ch;
+
+  /* An INBOUND connection: uIP accepted it against a port ip_listen bound,
+   * and the connection carries no channel yet. Outbound connections are
+   * bound before their SYN leaves, so an unbound one here can only have come
+   * from a listen — and every appstate is stamped 0xFF at init and again
+   * when a connection ends, so a recycled slot cannot be mistaken for one. */
+  if (uip_connected() && s->ch == 0xFFu) {
+    int lch = listen_ch_for(uip_conn->lport);
+    if (lch < 0) {
+      uip_abort(); /* nobody is listening there any more */
+      return;
+    }
+    s->ch = (uint8_t)lch;
+    s->sent = 0;
+    s->closing = 0;
+  }
+  ch = s->ch;
 
   /* An orphan: the application closed its channel while the connection was
    * still live, so there is nowhere to put anything. Abort rather than let
@@ -505,6 +527,19 @@ static struct {
   uint8_t resolving; /* ...and its name is with the resolver right now */
 } pend[NET_CHANNELS];
 
+/* Ports this console is listening on, per channel. uIP's own listen list is
+ * a set of PORTS with no room for a channel number, so an inbound connection
+ * arrives knowing only which port it landed on — this table is what turns
+ * that back into the channel an application is waiting on. */
+static uint16_t lport[NET_CHANNELS];
+
+static int listen_ch_for(uint16_t netport) {
+  int i;
+  for (i = 1; i < NET_CHANNELS; i++)
+    if (lport[i] != 0 && HTONS(lport[i]) == netport) return i;
+  return -1;
+}
+
 static struct uip_conn *conn_for(int ch) {
   int i;
   for (i = 0; i < UIP_CONNS; i++)
@@ -606,6 +641,10 @@ int ip_connect(const char *hostport) {
 void ip_close(int ch) {
   struct uip_conn *c = conn_for(ch);
   pend[ch & (NET_CHANNELS - 1)].busy = 0;
+  if (ch > 0 && ch < NET_CHANNELS && lport[ch] != 0) {
+    uip_unlisten(HTONS(lport[ch]));
+    lport[ch] = 0;
+  }
   if (c == 0) return;
   /* Unbind FIRST: uip_abort runs the appcall, and an appcall that still
    * believed in this channel would write into rings net_close is clearing. */
@@ -645,10 +684,24 @@ static void pend_service(void) {
 }
 
 int ip_listen(int ch, uint16_t port) {
-  /* Step 5. */
-  (void)ch;
-  (void)port;
-  return -1;
+  if (ch <= 0 || ch >= NET_CHANNELS || port == 0) return -1;
+  lport[ch] = port;
+  uip_listen(HTONS(port));
+  return 0;
+}
+
+int ip_hangup(int ch) {
+  struct uip_conn *c = conn_for(ch);
+  if (c == 0) return 0; /* already gone: the caller may return to LISTEN */
+  if (c->appstate.sent != 0) return -1; /* a segment is still unacknowledged */
+  /* Graceful: uip_close sends a FIN, so a client reading a response sees the
+   * end of it rather than a reset in the middle. The port stays bound. */
+  c->appstate.ch = 0xFFu;
+  c->appstate.closing = 0;
+  uip_conn = c;
+  uip_close();
+  ip_send_uip();
+  return 0;
 }
 
 /* ----------------------------------------------------------- the service */
@@ -688,8 +741,13 @@ void ip_init(void) {
   tick_last = 0;
   if (!ip_started) {
     uip_ipaddr_t a;
+    int i;
     ip_started = 1;
     uip_init();
+    /* 0xFF means "no channel". Set here because uIP does not clear appstate
+     * for a connection it accepts, and the inbound path above reads it to
+     * tell a fresh connection from a bound one. */
+    for (i = 0; i < UIP_CONNS; i++) uip_conns[i].appstate.ch = 0xFFu;
     uip_ipaddr(a, IP_SELF0, IP_SELF1, IP_SELF2, IP_SELF3);
     uip_sethostaddr(a);
     uip_ipaddr(a, IP_SELF0, IP_SELF1, IP_SELF2, IP_GW3);

@@ -66,6 +66,16 @@
 #define C2S_CONNECT 0x07 /* [len][ch][host:port...] */
 #define C2S_LISTEN 0x08  /* [3][ch][port lo][port hi] */
 #define C2S_HANGUP 0x09  /* [1][ch] */
+/* M11. Not the same request as C2S_LISTEN, and deliberately a different
+ * number: LISTEN means "bind this port and pump the bytes to me", FWD means
+ * "bind this port and route the PACKETS to my stack". The console is behind
+ * the NAT, so it cannot be dialled from the LAN without the daemon holding a
+ * real socket on its behalf — that socket is the only thing the daemon
+ * contributes to an inbound connection. Failure is reported as an ordinary
+ * S2C_ERR against the channel, so "port already in use" surfaces through the
+ * path applications already handle. */
+#define C2S_IPFWD 0x0B   /* [3][ch][port lo][port hi] */
+#define C2S_IPUNFWD 0x0C /* [3][ch][port lo][port hi] */
 /* 0x0A was C2S_WEB, retired with the web app. Reserved, never reused. */
 /* [3][ch][status_lo][status_hi] or [4][...][flags].
  *
@@ -113,6 +123,10 @@ static uint8_t ch_listen[NET_CHANNELS];
  * The NMI must never pack its txring (uIP consumes it in the foreground) and
  * the gateway is never told about it. */
 static uint8_t ch_stack[NET_CHANNELS];
+/* The port a stack-backed listener bound, so its forward can be withdrawn
+ * when the channel closes — the daemon holds a real socket on that port and
+ * nothing else knows which one. */
+static uint16_t ch_lport[NET_CHANNELS];
 
 /* Listen-channel reuse handoff, NMI -> foreground. When the gateway reuses an
  * EOF channel for the next connection, the old connection's undrained receive
@@ -721,6 +735,24 @@ int net_hangup(int ch) {
   if (!ch_listen[ch]) return -1;
   if (((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1)) != 0) return -1;
   if (txframe_ch[ch] != 0) return -1;      /* still in flight, unacknowledged */
+
+  /* Stack-backed: the same refusal-until-drained rule, but the queue that
+   * matters is uIP's unacknowledged segment rather than the link's. The
+   * port stays bound; only the connection ends, which is what makes a
+   * server a loop rather than a fresh listen per request. */
+  if (ch_stack[ch]) {
+    if (ip_hangup(ch) < 0) return -1;
+    proc_lock();
+    NET_NMI_OFF();
+    ring_head[ch] = 0;
+    ring_tail[ch] = 0;
+    ch_reuse[ch] = 0;
+    ch_state[ch] = NET_ST_LISTEN;
+    NET_NMI_ON();
+    proc_unlock();
+    return 0;
+  }
+
   proc_lock();
   if (txq_space() < 3) {
     proc_unlock();
@@ -744,6 +776,36 @@ int net_hangup(int ch) {
 int net_listen(uint16_t port) {
   int ch;
   if (!net_up()) return -1;
+
+  /* The stack's own listen. uIP binds the port on this side; the daemon is
+   * asked for a matching real socket. The channel behaves exactly as a
+   * gateway-backed listener does — LISTEN, then OPEN per connection, then
+   * back to LISTEN on hangup — so httpd and netecho need no changes. */
+  if (ip_up()) {
+    ch = net_stack_claim();
+    if (ch < 0) return -1;
+    if (ip_listen(ch, port) < 0) {
+      net_close(ch);
+      return -1;
+    }
+    proc_lock();
+    if (txq_space() < 5) {
+      proc_unlock();
+      net_close(ch);
+      return -1;
+    }
+    txq_put(C2S_IPFWD);
+    txq_put(3);
+    txq_put((uint8_t)ch);
+    txq_put((uint8_t)(port & 0xFF));
+    txq_put((uint8_t)(port >> 8));
+    ch_listen[ch] = 1;
+    ch_lport[ch] = port;
+    ch_state[ch] = NET_ST_LISTEN;
+    proc_unlock();
+    return ch;
+  }
+
   proc_lock();
   for (ch = 1; ch < NET_CHANNELS; ch++)
     if (ch_state[ch] == NET_ST_FREE) break;
@@ -793,8 +855,19 @@ void net_close(int ch) {
    * that matters is uIP's, and it is torn down here. Done BEFORE the state
    * goes FREE so ip_close can still find the connection by channel. */
   if (ch_stack[ch]) {
+    /* Withdraw the forward first: the daemon's socket outlives the channel
+     * otherwise, and the next run of the same application finds its port
+     * taken by its own previous life. */
+    if (ch_listen[ch] && txq_space() >= 5) {
+      txq_put(C2S_IPUNFWD);
+      txq_put(3);
+      txq_put((uint8_t)ch);
+      txq_put((uint8_t)(ch_lport[ch] & 0xFF));
+      txq_put((uint8_t)(ch_lport[ch] >> 8));
+    }
     ip_close(ch);
     ch_stack[ch] = 0;
+    ch_lport[ch] = 0;
     NET_NMI_OFF();
     ch_state[ch] = NET_ST_FREE;
     ring_head[ch] = 0;

@@ -9,9 +9,11 @@ code{background:#26264a;padding:.1em .4em;border-radius:3px}
 </style>
 <h1>Hello from a SNES</h1>
 <p class="sub">This page came off cartridge ROM, through a 65816 at 3.58 MHz.</p>
-<p>The console has no TCP/IP stack. It speaks a 64-byte framed protocol over
-what will be a controller-port cable, and a gateway on the other side turns that
-into sockets. The HTTP you are reading was composed here, on the SNES, by
-<code>httpd</code>.</p>
+<p>The console runs its own TCP/IP stack. The packets carrying this page were
+composed here &mdash; IP headers, TCP sequence numbers, checksums and all &mdash;
+by a 65816. They travel as raw datagrams over what will be a controller-port
+cable to a box doing nothing cleverer than address translation, which is why
+the address you typed is not the console's own. The HTTP was composed here too,
+by <code>httpd</code>.</p>
 <p>It serves one connection at a time at about 615 bytes per second. Your
 browser opened six connections; five of them are waiting.</p>

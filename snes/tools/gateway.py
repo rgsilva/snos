@@ -67,6 +67,11 @@ C2S_FETCH, C2S_CLOSE, C2S_HELLO = 0x01, 0x02, 0x04
 # 0x03 was C2S_IMAGE, retired: conversion is decided from the Content-Type.
 C2S_CONNECT = 0x07
 C2S_LISTEN, C2S_HANGUP = 0x08, 0x09
+# M11. Distinct from C2S_LISTEN on purpose: that one asks us to hold the
+# socket AND pump the bytes, this one asks only for the socket, because the
+# console's own stack terminates the connection. The console is behind the
+# NAT and unreachable from the LAN without it.
+C2S_IPFWD, C2S_IPUNFWD = 0x0B, 0x0C
 # 0x0A was C2S_WEB, retired with the `web` app (vnc superseded it); do not
 # reuse the code — an old ROM against a new gateway must fail loudly, not
 # alias onto something else.
@@ -778,6 +783,19 @@ class Gateway:
                              args=(ch, hostport, self.gen, cgen),
                              daemon=True).start()
 
+        elif self.ctype == C2S_IPFWD and len(self.cbuf) >= 3:
+            ch = self.cbuf[0]
+            port = self.cbuf[1] | (self.cbuf[2] << 8)
+            if self.slirp.forward_add(port, ch):
+                print(f"gateway: forwarding port {port} to the console's stack")
+            else:
+                # Reported against the channel, so "address already in use"
+                # reaches the application through the path it already has for
+                # a failed listen rather than as silence.
+                self.push_ctrl(S2C_ERR, bytes([ch, 1]))
+        elif self.ctype == C2S_IPUNFWD and len(self.cbuf) >= 3:
+            port = self.cbuf[1] | (self.cbuf[2] << 8)
+            self.slirp.forward_del(port)
         elif self.ctype == C2S_LISTEN and len(self.cbuf) >= 3:
             ch = self.cbuf[0]
             port = self.cbuf[1] | (self.cbuf[2] << 8)

@@ -77,7 +77,11 @@ void ip_resolve_addr(uint8_t out[4]); /* valid while state == IP_RES_OK */
  * stays OPENING while that happens). */
 int ip_connect(const char *hostport); /* -> channel, or -1 */
 void ip_close(int ch);                /* abort/close whatever holds it */
-int ip_listen(int ch, uint16_t port); /* bind a port to a channel (step 5) */
+int ip_listen(int ch, uint16_t port); /* bind a port to a channel */
+/* End the current connection, keep the port. Refuses (-1) while a segment is
+ * unacknowledged, for the same reason the stream path does: a close that
+ * overtakes the response truncates what the client receives. */
+int ip_hangup(int ch);
 
 /* ---- ping, for the shell -------------------------------------------------
  * The console composes a real ICMP echo request and parses the real reply;

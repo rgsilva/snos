@@ -27,7 +27,9 @@ local CH_CTRL, CH_PAD, CH_IP = 0, 0xFF, 0x10
 local WRAM = emu.memType.snesWorkRam
 
 local C2S_HELLO = 0x04
+local C2S_IPFWD, C2S_IPUNFWD = 0x0B, 0x0C
 local S2C_HELLO = 0x84
+local fwd_port, fwd_ch = nil, nil
 
 local function rb(o) return emu.read(MB + o, WRAM) end
 local function wb(o, v) emu.write(MB + o, v & 0xFF, WRAM) end
@@ -73,6 +75,13 @@ local function ctrl_byte(b)
   if not c.dispatch then return end
   c.dispatch = false
 
+  if c.typ == C2S_IPFWD and #c.buf >= 3 then
+    -- The console asked us to hold a real socket for it. We do not need one
+    -- here: this script IS the outside world, and it dials the console
+    -- directly on its own schedule.
+    fwd_ch = c.buf[1]
+    fwd_port = c.buf[2] | (c.buf[3] << 8)
+  end
   if c.typ == C2S_HELLO then
     gw.hello_seen = true
     if not typed_anything then gw.hello_before_typing = true end
@@ -310,6 +319,10 @@ local RESPONSE = "HTTP/1.0 200 OK\r\nContent-Length: " .. #BODY ..
                  "\r\nConnection: close\r\n\r\n" .. BODY
 local tcp = {}                 -- keyed by the console's source port
 local tcp_requests = 0         -- complete requests received
+local inbound = nil            -- our connection INTO the console (httpd)
+local inbound_body = ""        -- what the console served us
+local inbound_n = 0            -- how many inbound connections we have made
+local inbound_bodies = {}      -- one entry per connection
 local tcp_syns = 0
 local syn_frame = nil          -- when the first SYN arrived
 local connect_typed = nil      -- when `debug send` was typed
@@ -344,6 +357,23 @@ local function tcp_out(t, flags, payload)
   send_dgram(ip .. seg)
 end
 
+-- Dial the console: the daemon's half of a port forward, in miniature.
+local function inbound_open(port)
+  -- tcp_out labels its fields by ROLE, not by direction: snes_port is
+  -- always the console's port and peer_port always ours. For an inbound
+  -- connection the console is the SERVER, so its port is the well-known one
+  -- and ours is ephemeral -- the reverse of every other connection here,
+  -- which is exactly the thing to get wrong once.
+  inbound_n = inbound_n + 1
+  if inbound then inbound_bodies[#inbound_bodies + 1] = inbound_body end
+  inbound_body = ""
+  inbound = { snes_port = port, peer_port = 40000 + inbound_n,
+              peer_ip = "10.0.2.2", snd = 0x7000 + inbound_n * 0x1000,
+              rcv = 0, established = false }
+  tcp_out(inbound, 0x02)                            -- SYN
+  inbound.snd = (inbound.snd + 1) & 0xFFFFFFFF
+end
+
 local function handle_tcp(p, ihl, dst)
   local o = ihl + 1
   local sport = p:byte(o) * 256 + p:byte(o + 1)
@@ -360,6 +390,33 @@ local function handle_tcp(p, ihl, dst)
   local pseudo = quad("10.0.2.15") .. quad(dst) .. "\0\6" .. be16(#p - ihl)
   if csum(pseudo .. p:sub(ihl + 1), 1, #pseudo + #p - ihl) ~= 0xFFFF then
     tcp_bad_csum = (tcp_bad_csum or 0) + 1
+    return
+  end
+
+  -- Segments from the console's httpd, answering the connection we opened.
+  if inbound and sport == inbound.snes_port and dport == inbound.peer_port then
+    local t = inbound
+    if (flags & 0x02) ~= 0 and (flags & 0x10) ~= 0 and not t.established then
+      t.rcv = (seq + 1) & 0xFFFFFFFF
+      t.established = true
+      tcp_out(t, 0x10)                               -- ACK completes it
+      local req = "GET / HTTP/1.0\r\nHost: snes\r\n\r\n"
+      tcp_out(t, 0x18, req)                          -- and ask for a page
+      t.snd = (t.snd + #req) & 0xFFFFFFFF
+      return
+    end
+    if #data > 0 and seq == t.rcv then
+      t.rcv = (t.rcv + #data) & 0xFFFFFFFF
+      inbound_body = inbound_body .. data
+      tcp_out(t, 0x10)
+    end
+    if (flags & 0x01) ~= 0 then
+      local fs = (seq + #data) & 0xFFFFFFFF
+      if fs == t.rcv then
+        t.rcv = (t.rcv + 1) & 0xFFFFFFFF
+        tcp_out(t, 0x10)
+      end
+    end
     return
   end
 
@@ -527,8 +584,32 @@ emu.addEventCallback(function()
     connect_typed = frame
     send("debug send 10.0.2.99:80\n", 900); step = 5.5; return
   end
-  if step == 5.5 then send("mem\n", 400); step = 5.7; return end
-  if step == 5.7 then send("net status\n", 400); step = 6; return end
+  if step == 5.5 then send("mem\n", 300); step = 5.6; return end
+  -- INBOUND: httpd serves a page over the console's own TCP, to a
+  -- connection opened from outside the NAT.
+  if step == 5.6 then send("run httpd 8080 &\n", 400); step = 5.62; return end
+  if step == 5.62 then
+    if not fwd_port then
+      print("--- console ---"); print(L.ring_text())
+      print("RESULT FAIL ip - httpd never asked for a port forward")
+      emu.stop(1); return
+    end
+    inbound_open(fwd_port)
+    at = frame + 900
+    step = 5.7
+    return
+  end
+  -- A SECOND connection on the same port. `httpd` hangs up and returns to
+  -- LISTEN between requests -- that loop is what ip_hangup exists for, and
+  -- one connection would never exercise it.
+  if step == 5.7 then
+    inbound_open(fwd_port)
+    at = frame + 900
+    step = 5.75
+    return
+  end
+  if step == 5.75 then send("kill 1\n", 300); step = 5.8; return end
+  if step == 5.8 then send("net status\n", 400); step = 6; return end
 
   local r = L.new_report("ip")
   local text = L.ring_text()
@@ -581,6 +662,22 @@ emu.addEventCallback(function()
           "the response never reached the console")
   r.check(text:find("uip tcp rx 0 ", 1, true) == nil,
           "uIP says it received no TCP at all")
+  -- ...and INBOUND: the console as a server on its own stack
+  r.check(fwd_port == 8080,
+          "httpd asked to forward port " .. tostring(fwd_port) .. ", not 8080")
+  r.check(inbound_body:find("HTTP/1.0 200", 1, true) ~= nil or
+          inbound_body:find("HTTP/1.1 200", 1, true) ~= nil,
+          "httpd served nothing over the stack (got " .. #inbound_body ..
+          " bytes: " .. inbound_body:sub(1, 60):gsub("[^%\32-%\126]", ".") .. ")")
+  r.check(inbound_body:find("Hello from a SNES", 1, true) ~= nil,
+          "the served page is not the console's INDEX.HTM")
+  r.check(#inbound_bodies >= 1 and
+          inbound_bodies[1]:find("Hello from a SNES", 1, true) ~= nil,
+          "the FIRST connection got no page - httpd only serves once, so " ..
+          "the listen loop does not survive a hangup")
+  r.check(#inbound_body > 400,
+          "only " .. #inbound_body .. " bytes of the page arrived - the " ..
+          "response is being truncated, not just delayed")
   -- uIP is the thing answering, not leftover hand-written code: the stack's
   -- OWN counters have to show the echo request arriving and a reply leaving.
   -- A correct reply on the wire proves only that something replied.
