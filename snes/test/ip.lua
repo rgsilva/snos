@@ -584,7 +584,11 @@ emu.addEventCallback(function()
     connect_typed = frame
     send("debug send 10.0.2.99:80\n", 900); step = 5.5; return
   end
-  if step == 5.5 then send("mem\n", 300); step = 5.6; return end
+  -- ...and again BY NAME, which is a different path entirely: the connect
+  -- waits on the resolver before uIP ever sees it. Testing only the dotted
+  -- quad left that half uncovered, and it was broken.
+  if step == 5.5 then send("debug send snos.test:80\n", 900); step = 5.55; return end
+  if step == 5.55 then send("mem\n", 300); step = 5.6; return end
   -- INBOUND: httpd serves a page over the console's own TCP, to a
   -- connection opened from outside the NAT.
   if step == 5.6 then send("run httpd 8080 &\n", 400); step = 5.62; return end
@@ -658,8 +662,11 @@ emu.addEventCallback(function()
   r.check(tcp_requests >= 1,
           "the request never arrived complete - the handshake finished but " ..
           "data did not cross")
-  r.check(text:find("HELLO FROM REAL TCP", 1, true) ~= nil,
-          "the response never reached the console")
+  local _, hellos = text:gsub("HELLO FROM REAL TCP", "")
+  r.check(hellos >= 2,
+          "only " .. hellos .. " of the two `debug send` runs got a response " ..
+          "- connecting BY NAME goes through the resolver first and is a " ..
+          "different path from connecting to an address")
   r.check(text:find("uip tcp rx 0 ", 1, true) == nil,
           "uIP says it received no TCP at all")
   -- ...and INBOUND: the console as a server on its own stack

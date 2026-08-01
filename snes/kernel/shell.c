@@ -905,6 +905,15 @@ static void cmd_net_status(void) {
     kcon_putu(u.tcp_rst);
     kcon_puts(", udp drop ");
     kcon_putu(u.udp_drop);
+    kcon_puts(", dns ");
+    /* The resolver is a single shared slot, so "what is it doing" is a real
+     * question when a connection will not start. */
+    switch (ip_resolve_state()) {
+    case IP_RES_IDLE: kcon_puts("idle"); break;
+    case IP_RES_BUSY: kcon_puts("BUSY"); break;
+    case IP_RES_OK: kcon_puts("held"); break;
+    default: kcon_puts("failed"); break;
+    }
     kcon_putc('\n');
   } else {
     kcon_puts("no ip (gateway v1: streams only)\n");
@@ -961,9 +970,11 @@ static int host_addr(const char *s, uint8_t out[4]) {
     kcon_puts("cannot resolve ");
     kcon_puts(s);
     kcon_putc('\n');
+    ip_resolve_release();
     return -1;
   }
   ip_resolve_addr(out);
+  ip_resolve_release();
   return 0;
 }
 

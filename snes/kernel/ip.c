@@ -103,7 +103,11 @@ static uint16_t tick_last;
  * stream with half a length-prefixed record. */
 static void ip_output(const uint8_t *p, uint16_t n) {
   uint8_t pre[2];
-  if (n == 0 || (int)n + 2 > net_ip_wspace()) {
+  /* net_ip_wspace does not consider ip_mode, but net_ip_write refuses on it
+   * PER CALL — so a mode that flips between the two writes below would put a
+   * bare packet on the stream with no length prefix, and the daemon would
+   * read its version byte as a length. Check once, here. */
+  if (!net_ipmode() || n == 0 || (int)n + 2 > net_ip_wspace()) {
     ip_stat_drop++;
     return;
   }
@@ -218,10 +222,12 @@ static int ping_intercept(const uint8_t *p, uint16_t n) {
  * SNOS's (a channel with two rings, drained by an application whenever it
  * gets round to it).
  */
-/* Defined with the connection table further down, but needed here: the
- * appcall is the first thing that asks "which channel was listening on this
- * port?" and C would otherwise infer a non-static declaration for it. */
+/* Both are defined with the connection table further down, but the appcall
+ * above needs them: it is the first thing that asks "which channel was
+ * listening on this port, and is it free?". Without these C would infer
+ * non-static declarations and the definitions would then conflict. */
 static int listen_ch_for(uint16_t netport);
+static struct uip_conn *conn_for(int ch);
 
 /* Move as much of the channel's send queue into this segment as uIP will
  * take. The bytes go STRAIGHT into uIP's own send buffer: uip_send memcpys
@@ -233,6 +239,14 @@ static int listen_ch_for(uint16_t netport);
  * safe to forget. */
 static void tcp_fill(uint8_t ch, uip_tcp_appstate_t *s, int max) {
   int n;
+  /* Clamp to THIS connection's MSS, not to the compile-time maximum.
+   * uip_process re-clamps uip_slen to uip_conn->mss and records that as the
+   * segment length — and mss is recomputed from the peer's advertised window
+   * on every segment. Offering 400 bytes to a peer advertising 256 sends 256
+   * but recorded sent=400, so the ACK advanced the ring by 400 and 144 bytes
+   * were skipped and never transmitted. Silent stream corruption, not a
+   * stall, which is the worst kind. */
+  if (max > (int)uip_mss()) max = (int)uip_mss();
   if (max > UIP_TCP_MSS) max = UIP_TCP_MSS;
   if (max <= 0) return;
   n = net_stack_txcopy(ch, (uint8_t *)uip_sappdata, max);
@@ -263,10 +277,14 @@ void snos_tcp_appcall(void) {
   }
   ch = s->ch;
 
-  /* An orphan: the application closed its channel while the connection was
-   * still live, so there is nowhere to put anything. Abort rather than let
-   * uIP keep a connection nobody can read. */
   if (ch == 0xFFu) {
+    /* closing == 2 means a graceful close is already under way: the FIN has
+     * been issued and the channel deliberately detached, so uIP is simply
+     * finishing. Aborting here would turn that polite close into a RST — and
+     * a RST lets the client discard response bytes it has not read yet. */
+    if (s->closing == 2) return;
+    /* A true orphan: the application closed its channel while the connection
+     * was live, so there is nowhere to put anything. */
     uip_abort();
     return;
   }
@@ -295,10 +313,11 @@ void snos_tcp_appcall(void) {
    * segment the received bytes and the send buffer are the same memory. */
   if (uip_newdata() && uip_datalen() > 0) {
     if (!net_stack_rxput(ch, (const uint8_t *)uip_appdata, (int)uip_datalen())) {
-      /* The application is not draining. Close the receive window instead of
-       * dropping: uIP will advertise zero and the peer stops, which is
-       * backpressure all the way through to the far side's TCP — the same
-       * discipline the stream rings already use. */
+      /* Should not happen — the window below is closed a segment in advance
+       * precisely so it cannot. If it ever does, these bytes are LOST: uIP
+       * advanced rcv_nxt before calling us, so the ack already claims them
+       * and the peer will never resend. Stopping now at least prevents the
+       * next one. */
       uip_stop();
     }
   }
@@ -324,19 +343,32 @@ void snos_tcp_appcall(void) {
       int have = net_stack_txused(ch);
       if (have > 0) {
         tcp_fill(ch, s, have);
-      } else if (s->closing) {
+      } else if (s->closing == 1) {
         /* Everything queued has been acknowledged, so the FIN cannot
-         * overtake data the far end still needs. */
+         * overtake data the far end still needs. The channel is released
+         * here rather than when uIP finally reports the close, because it
+         * has already gone back to LISTEN for the next connection — letting
+         * a later event write EOF onto it would break the server loop. */
         uip_close();
+        s->closing = 2;
+        s->ch = 0xFFu;
       }
     }
   }
 
-  /* Reopen the window once the application has read enough for a whole
-   * segment. Without this the connection stays stopped forever and looks
-   * exactly like a hung server. */
-  if (uip_stopped(uip_conn) && net_stack_rxfree(ch) >= UIP_TCP_MSS)
-    uip_restart();
+  /* THE WINDOW MUST CLOSE ONE SEGMENT EARLY.
+   *
+   * uIP advances rcv_nxt and acks BEFORE calling the application, so by the
+   * time a ring is discovered full the data is already acknowledged and the
+   * peer will never send it again — dropping it makes a hole in the stream
+   * rather than backpressure. Advertising zero while there is still a whole
+   * segment of room means the peer stops before sending anything we cannot
+   * hold, which is the real thing. */
+  if (uip_stopped(uip_conn)) {
+    if (net_stack_rxfree(ch) >= UIP_TCP_MSS) uip_restart();
+  } else if (net_stack_rxfree(ch) < UIP_TCP_MSS) {
+    uip_stop();
+  }
 }
 
 /* ------------------------------------------------------------------- DNS */
@@ -350,6 +382,15 @@ static uint8_t res_state;
 static uint8_t res_addr[4];
 static uint8_t res_tries;
 static struct uip_udp_conn *res_conn;
+/* Set by ip_resolve, consumed by ip_service: the query is BUILT by the
+ * caller and SENT by the service pass, because nothing outside ip_service
+ * may run uIP. One frame of latency instead of the half second a periodic
+ * tick would cost. */
+static uint8_t res_kick;
+/* When the current lookup started. uIP has no UDP timer of its own and the
+ * retry count only advances on polls, so a lookup whose replies simply stop
+ * needs a wall-clock bound as well or it pins the single resolver. */
+static uint16_t res_started;
 
 /* Encode "www.example.com" as 3www7example3com0, then QTYPE=A, QCLASS=IN.
  * Returns 0 on success. */
@@ -457,29 +498,60 @@ void snos_udp_appcall(void) {
 }
 
 int ip_resolve(const char *name) {
-  uip_ipaddr_t a;
   int i;
   if (!ip_up()) return -1;
+  /* Only BUSY refuses. Holding the resolver until the asker released it was
+   * tried and is worse than the race it closed: any path that forgot to
+   * release — or gave up waiting — locked out every later lookup for the
+   * life of the boot, and by-name connects then failed with a timeout that
+   * pointed nowhere near the resolver.
+   *
+   * The residual race is narrow and named: between an answer arriving and
+   * the asker reading it (one frame, since every waiter polls per frame) a
+   * second lookup can overwrite the result. Both consumers copy the address
+   * out the moment they see OK. Fixing it properly means a request tag per
+   * caller, which is worth doing when something needs two lookups at once. */
   if (res_state == IP_RES_BUSY) return -1;
   for (i = 0; i < RES_NAME_MAX && name[i]; i++) res_name[i] = name[i];
   if (i == 0 || (i == RES_NAME_MAX && name[i])) return -1;
   res_name[i] = 0;
   res_id++;
   if (res_build(res_name) < 0) return -1;
+  res_state = IP_RES_BUSY;
+  res_tries = 4; /* ~2 s of patience, at one try per periodic tick */
+  res_started = snos_frames;
+  res_kick = 1;  /* ip_service sends it on its next pass, about a frame away */
+  return 0;
+}
+
+/* The asker is done with the answer. Until this is called the result belongs
+ * to whoever asked for it and no new lookup can start. */
+void ip_resolve_release(void) {
+  /* BUSY counts too. A caller that gave up waiting (host_addr's deadline)
+   * still owns the lookup, and leaving it BUSY made the resolver refuse
+   * every request afterwards for the life of the boot — one slow answer and
+   * the machine could never resolve another name. */
+  res_state = IP_RES_IDLE;
+}
+
+/* Create the resolver's socket and push the query out. ip_service only. */
+static void res_service(void) {
+  uip_ipaddr_t a;
+  if (!res_kick) return;
+  res_kick = 0;
   if (res_conn == 0) {
     uip_ipaddr(a, IP_SELF0, IP_SELF1, IP_SELF2, IP_DNS3);
     res_conn = uip_udp_new(&a, HTONS(53));
-    if (res_conn == 0) return -1;
+    if (res_conn == 0) {
+      res_state = IP_RES_FAIL;
+      return;
+    }
     res_conn->appstate.kind = 1;
   }
-  res_state = IP_RES_BUSY;
-  res_tries = 4; /* ~2 s of patience, at one try per periodic tick */
-  /* Send the first query NOW rather than waiting for the next 0.5 s tick.
-   * uip_udp_periodic_conn runs the appcall with uip_poll() set, which is the
+  /* uip_udp_periodic_conn runs the appcall with uip_poll() set, which is the
    * only event a UDP connection ever gets. */
   uip_udp_periodic_conn(res_conn);
   ip_send_uip();
-  return 0;
 }
 
 int ip_resolve_state(void) { return res_state; }
@@ -522,9 +594,11 @@ void ip_uipstat(ip_uipstat_t *o) {
 #define PEND_HOST_MAX 48
 static struct {
   char host[PEND_HOST_MAX + 1];
+  uint8_t addr[4];
   uint16_t port;
-  uint8_t busy;     /* a connect is waiting on this channel */
+  uint8_t busy;      /* a connect is waiting on this channel */
   uint8_t resolving; /* ...and its name is with the resolver right now */
+  uint8_t have_addr; /* the address is known; no lookup needed */
 } pend[NET_CHANNELS];
 
 /* Ports this console is listening on, per channel. uIP's own listen list is
@@ -533,10 +607,19 @@ static struct {
  * that back into the channel an application is waiting on. */
 static uint16_t lport[NET_CHANNELS];
 
+/* Which channel is listening on this port, and is it free to take a
+ * connection? uIP will accept a second SYN on a bound port perfectly happily,
+ * and binding it to the same channel would interleave two clients' bytes in
+ * both rings. The gateway-backed path was safe only because the daemon
+ * serialised accepts; nothing serialises them here, so the second is
+ * refused. */
 static int listen_ch_for(uint16_t netport) {
   int i;
-  for (i = 1; i < NET_CHANNELS; i++)
-    if (lport[i] != 0 && HTONS(lport[i]) == netport) return i;
+  for (i = 1; i < NET_CHANNELS; i++) {
+    if (lport[i] == 0 || HTONS(lport[i]) != netport) continue;
+    if (conn_for(i) != 0) return -1; /* already serving somebody */
+    return i;
+  }
   return -1;
 }
 
@@ -621,19 +704,24 @@ int ip_connect(const char *hostport) {
   ch = net_stack_claim();
   if (ch < 0) return -1;
 
-  if (parse_dotted(host, a) == 0) {
-    if (start_connect(ch, a, port) < 0) {
-      net_close(ch);
-      return -1;
-    }
-    return ch;
-  }
-  /* A name. The channel stays OPENING while the resolver works, which is a
-   * state the application already knows how to wait in. */
-  for (i = 0; i < PEND_HOST_MAX && host[i]; i++) pend[ch].host[i] = host[i];
-  pend[ch].host[i] = 0;
+  /* Recorded, not performed — see the comment at the top of ip_service for
+   * why nothing outside that function may call into uIP. The channel stays
+   * OPENING until it happens, which is a state applications already wait in
+   * whether the name needed resolving or not. */
   pend[ch].port = port;
   pend[ch].resolving = 0;
+  if (parse_dotted(host, a) == 0) {
+    pend[ch].addr[0] = a[0];
+    pend[ch].addr[1] = a[1];
+    pend[ch].addr[2] = a[2];
+    pend[ch].addr[3] = a[3];
+    pend[ch].have_addr = 1;
+    pend[ch].host[0] = 0;
+  } else {
+    for (i = 0; i < PEND_HOST_MAX && host[i]; i++) pend[ch].host[i] = host[i];
+    pend[ch].host[i] = 0;
+    pend[ch].have_addr = 0;
+  }
   pend[ch].busy = 1;
   return ch;
 }
@@ -648,12 +736,15 @@ void ip_close(int ch) {
     lport[ch] = 0;
   }
   if (c == 0) return;
-  /* Unbind FIRST: uip_abort runs the appcall, and an appcall that still
-   * believed in this channel would write into rings net_close is clearing. */
+  /* Unbind, and leave the teardown to ip_service. Two reasons, both
+   * load-bearing: uip_abort() is a FLAG uip_process consumes when an appcall
+   * returns, so calling it from here would emit nothing at all; and this runs
+   * from a syscall, which must never touch uIP (see ip_service). The poll
+   * loop there picks up orphaned connections and aborts them from inside
+   * uip_process, where it becomes a RST on the wire. Unbinding first is also
+   * what stops that appcall from writing into rings net_close is clearing. */
   c->appstate.ch = 0xFFu;
-  uip_conn = c;
-  uip_abort();
-  ip_send_uip();
+  c->appstate.closing = 0; /* a stale "graceful close" would suppress the abort */
 }
 
 /* Advance whatever is waiting on a name. Called once per service pass. */
@@ -661,6 +752,13 @@ static void pend_service(void) {
   int i;
   for (i = 1; i < NET_CHANNELS; i++) {
     if (!pend[i].busy) continue;
+    if (pend[i].have_addr) {
+      pend[i].busy = 0;
+      pend[i].have_addr = 0;
+      if (start_connect(i, pend[i].addr, pend[i].port) < 0)
+        net_stack_setstate(i, NET_ST_ERROR);
+      continue;
+    }
     if (pend[i].resolving) {
       int st = ip_resolve_state();
       if (st == IP_RES_BUSY) return; /* still working; nobody else may start */
@@ -674,6 +772,7 @@ static void pend_service(void) {
       } else {
         net_stack_setstate(i, NET_ST_ERROR);
       }
+      ip_resolve_release(); /* our answer, consumed */
       continue;
     }
     if (ip_resolve(pend[i].host) == 0) {
@@ -696,13 +795,14 @@ int ip_hangup(int ch) {
   struct uip_conn *c = conn_for(ch);
   if (c == 0) return 0; /* already gone: the caller may return to LISTEN */
   if (c->appstate.sent != 0) return -1; /* a segment is still unacknowledged */
-  /* Graceful: uip_close sends a FIN, so a client reading a response sees the
-   * end of it rather than a reset in the middle. The port stays bound. */
-  c->appstate.ch = 0xFFu;
-  c->appstate.closing = 0;
-  uip_conn = c;
-  uip_close();
-  ip_send_uip();
+  /* Graceful, and it has to go through an appcall to be graceful at all:
+   * uip_close() is a flag uip_process reads after the callback returns, so
+   * setting it here would emit nothing and the connection would eventually
+   * be aborted instead — a RST, which lets the client discard the response
+   * bytes it has received but not yet read. That truncation is the exact
+   * thing this function exists to prevent. `closing` is the request; the
+   * appcall issues the close once the send queue has drained. */
+  c->appstate.closing = 1;
   return 0;
 }
 
@@ -772,6 +872,25 @@ void ip_service(void) {
   ip_busy = 1;
   R8(0x4200) = 0x81;
   if (take) return;
+  /* ONLY THIS FUNCTION MAY TOUCH uIP.
+   *
+   * ip_busy stops a second ip_service, but that is not enough on its own: the
+   * shell reaches here from kernel code rather than mid-syscall, so the
+   * scheduler can preempt it anywhere in this function, and the application
+   * that gets scheduled can then call SYS_NET_CONNECT. If those entry points
+   * ran uIP they would repoint uip_conn under a half-finished uip_process —
+   * aborting a healthy connection, or rebuilding uip_buf mid-segment.
+   *
+   * So they do not run uIP at all. ip_connect records the request in pend[],
+   * ip_close unbinds the channel, ip_hangup sets `closing`, and the loops at
+   * the bottom of this function perform the actual uip_process calls. Every
+   * one of those is a single-byte or single-word store, which no context
+   * switch can tear.
+   *
+   * proc_lock() is NOT the answer here and was tried: it clears PROC_WANT,
+   * which cancels the switch kbd_idle requests immediately before calling
+   * this — so the two processes stopped alternating and the machine wedged
+   * the moment anything ran in the background. */
 
   if (!net_up()) {
     ip_busy = 0;
@@ -813,6 +932,13 @@ void ip_service(void) {
     }
   }
 
+  /* Six seconds is well past four tries half a second apart; past it the
+   * answer is not coming and the resolver must be usable again. */
+  if (res_state == IP_RES_BUSY &&
+      (uint16_t)(snos_frames - res_started) > 360u)
+    res_state = IP_RES_FAIL;
+
+  res_service();
   pend_service();
 
   if ((uint16_t)(snos_frames - tick_last) >= IP_TICK_FRAMES) {
@@ -829,9 +955,17 @@ void ip_service(void) {
     int i;
     for (i = 0; i < UIP_CONNS; i++) {
       if (uip_conns[i].tcpstateflags == UIP_CLOSED) continue;
-      if (uip_conns[i].appstate.ch == 0xFFu) continue;
+      if (uip_conns[i].appstate.ch == 0xFFu) {
+        /* Orphaned by ip_close, or already closing gracefully. The first
+         * needs one poll so the appcall can abort it; the second needs to be
+         * left alone to finish. */
+        if (uip_conns[i].appstate.closing == 2) continue;
+        uip_poll_conn(&uip_conns[i]);
+        ip_send_uip();
+        continue;
+      }
       if (net_stack_txused(uip_conns[i].appstate.ch) == 0 &&
-          !uip_conns[i].appstate.closing)
+          uip_conns[i].appstate.closing != 1)
         continue; /* nothing to say; do not spend a uip_process on it */
       uip_poll_conn(&uip_conns[i]);
       ip_send_uip();
@@ -852,9 +986,10 @@ desync:
    * exchanged, which makes the counter useless for the thing it is for. */
   if (asm_len != 0) ip_stat_desync++;
   asm_len = 0;
+  /* Drain the WHOLE ring, not one bufferful: the ring holds 2 KB and a single
+   * read takes at most 576, so the old loop-with-a-break left up to 1471
+   * poisoned bytes to be parsed as a length prefix on the very next pass. */
   while (net_ip_read(pkt, IP_MTU) > 0) {
-    ip_stat_desync++;
-    break;
   }
   ip_busy = 0;
 }

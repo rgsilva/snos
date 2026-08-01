@@ -51,10 +51,21 @@ PROTO_ICMP, PROTO_TCP, PROTO_UDP = 1, 6, 17
 # Flags
 FIN, SYN, RST, PSH, ACK = 0x01, 0x02, 0x04, 0x08, 0x10
 
-RTO = 0.4              # retransmit an unacked segment after this long
-MAX_RETRIES = 12       # then give the connection up
+# A full segment is 578 bytes on a link that moves ~615 B/s, so it takes most
+# of a second to arrive before the ack can even start back. A 0.4 s timer
+# therefore retransmitted every large segment two or three times BEFORE the
+# first copy had finished transmitting, and each copy was appended to the same
+# queue -- the backlog grew with every round until the connection was reset.
+# The hermetic test never saw it because its "link" is a Python list.
+RTO = 2.5
+MAX_RETRIES = 8        # then give the connection up
 UDP_IDLE = 60.0        # forget a UDP flow after this much silence
 ICMP_IDLE = 15.0
+# TCP had none, so any flow where BOTH sides went quiet lived forever: nothing
+# drives the retransmit path, so MAX_RETRIES never fires. A console whose app
+# died without a link reset, or a half-closed connection the far end simply
+# kept open, leaked a socket and a table entry permanently.
+TCP_IDLE = 300.0
 TIME_WAIT = 4.0        # keep a closed flow's 4-tuple reserved this long
 
 
@@ -117,6 +128,7 @@ class _Tcp(_Flow):
         self.snd_una = iss
         self.rcv_nxt = 0
         self.outbuf = b""      # read from the socket, not yet sent
+        self.inbuf = b""       # taken from the console, not yet written out
         self.unacked = 0       # bytes of outbuf currently in flight
         self.sent_at = 0.0
         self.retries = 0
@@ -140,6 +152,12 @@ class Slirp:
         self.fwd_ch = {}       # real port            -> channel that asked
         self.ident = 1
         self.iss = 0x2000
+        # Monotonic, because uIP holds a closed 4-tuple in TIME_WAIT for 60
+        # seconds and answers a SYN that matches one with a bare ACK, never a
+        # SYN-ACK. Deriving the port from the table SIZE handed out 40000
+        # again the moment the table emptied, so the second request to a
+        # console server within a minute hung and then failed.
+        self.next_eport = 40000
         self.stat_in = 0
         self.stat_out = 0
         self.stat_drop = 0
@@ -223,6 +241,7 @@ class Slirp:
             return
         proto = pkt[9]
         src, dst = struct.unpack("!II", pkt[12:20])
+        self.log(f"DBG rx proto={proto} src={_int2ip(src)} dst={_int2ip(dst)} len={len(pkt)}")
         if src != SNES_INT:
             # Only one machine lives out there. Anything else is a bug on the
             # console worth seeing rather than a packet worth routing.
@@ -287,7 +306,7 @@ class Slirp:
         for ident, flow in list(self.icmp.items()):
             while True:
                 try:
-                    data, addr = flow.sock.recvfrom(2048)
+                    data, addr = flow.sock.recvfrom(MTU)
                 except (BlockingIOError, InterruptedError):
                     break
                 except OSError:
@@ -305,6 +324,14 @@ class Slirp:
                     peer = _ip2int(addr[0])
                     icmp = bytearray(data)
                 if len(icmp) < 8:
+                    continue
+                # The console drops anything over its MTU by discarding the
+                # WHOLE reassembly buffer, so one oversized reply costs
+                # unrelated datagrams that were in flight. Every other emit
+                # path here is bounded; this socket is unconnected and anyone
+                # can send to it, so bound it explicitly.
+                if len(icmp) + 20 > MTU:
+                    self.stat_drop += 1
                     continue
                 # Restore the console's identifier: Linux rewrites it to the
                 # socket's port, macOS does not, and the console matches its
@@ -381,8 +408,16 @@ class Slirp:
     def _tcp_out(self, t, flags, payload=b"", seq=None):
         seq = t.snd_nxt if seq is None else seq
         sport, dip, dport = t.key
+        # A SYN carries an MSS option. Omitting it is legal and was a mistake:
+        # uIP only learns an MSS from this option on a passive open, so a
+        # bare SYN left the console with whatever its connection slot held --
+        # zero on a fresh one -- and it could never send a byte back.
+        opts = b""
+        if flags & SYN:
+            opts = struct.pack("!BBH", 2, 4, MSS)
+        off = (20 + len(opts)) // 4
         hdr = struct.pack("!HHIIBBHHH", dport, sport, seq, t.rcv_nxt,
-                          5 << 4, flags, TCP_WINDOW, 0, 0)
+                          off << 4, flags, TCP_WINDOW, 0, 0) + opts
         c = csum16(_pseudo(dip, SNES_INT, PROTO_TCP, len(hdr) + len(payload)) +
                    hdr + payload)
         seg = hdr[:16] + struct.pack("!H", c) + hdr[18:] + payload
@@ -412,6 +447,7 @@ class Slirp:
             self.stat_drop += 1
             return
         if csum16(_pseudo(SNES_INT, dst, PROTO_TCP, len(body)) + body) != 0:
+            self.log(f"DBG tcp BAD CHECKSUM off={off} len={len(body)} flags={flags:02x}")
             self.stat_drop += 1
             return
         payload = body[off:]
@@ -462,18 +498,35 @@ class Slirp:
                 t.unacked -= data_acked
                 t.snd_una = ack
                 t.retries = 0
-                t.last_seg = None
+                # A PARTIAL ack leaves bytes still in flight. Clearing
+                # last_seg unconditionally meant the retransmit path passed
+                # None to len() one RTO later, which raised out of the pump
+                # loop -- so every flow after this one in dict order stopped
+                # being serviced too, and the connection was reset after a
+                # dozen tracebacks.
+                t.last_seg = t.outbuf[:t.unacked] if t.unacked else None
                 if t.fin_sent and acked > data_acked:
                     t.state = _Tcp.DONE
                     t.closed_at = time.time()
 
         if payload:
             if seq == t.rcv_nxt:
+                # send(), not sendall(): these sockets are non-blocking, so
+                # sendall raises BlockingIOError the moment the kernel buffer
+                # fills -- and BlockingIOError IS an OSError, so a slow peer
+                # used to get the connection reset out from under it mid
+                # upload. Whatever the kernel would not take is held here and
+                # retried; the segment is acked only once all of it is gone,
+                # which is what makes the console stop sending.
                 try:
-                    t.sock.sendall(payload)
+                    sent = t.sock.send(payload) if not t.inbuf else 0
+                except (BlockingIOError, InterruptedError):
+                    sent = 0
                 except OSError:
                     self._tcp_reset(key, t)
                     return
+                if sent < len(payload):
+                    t.inbuf += payload[sent:]
                 t.rcv_nxt = (t.rcv_nxt + len(payload)) & 0xFFFFFFFF
                 self._tcp_out(t, ACK)
             else:
@@ -493,10 +546,11 @@ class Slirp:
                 t.rcv_nxt = (t.rcv_nxt + 1) & 0xFFFFFFFF
                 t.peer_fin = True
                 self._tcp_out(t, ACK)
-                try:
-                    t.sock.shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
+                if not t.inbuf:
+                    try:
+                        t.sock.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
             elif t.peer_fin and (fin_seq + 1) & 0xFFFFFFFF == t.rcv_nxt:
                 self._tcp_out(t, ACK)  # retransmitted FIN: re-ack, say no more
 
@@ -560,6 +614,24 @@ class Slirp:
                         self._tcp_out(t, SYN, seq=t.iss)
                 continue
 
+            # Drain anything the far side's socket would not take earlier.
+            if t.inbuf:
+                try:
+                    n = t.sock.send(t.inbuf)
+                    t.inbuf = t.inbuf[n:]
+                    t.touch()
+                    if not t.inbuf and t.peer_fin:
+                        # The close was held back until its data was written.
+                        try:
+                            t.sock.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                except (BlockingIOError, InterruptedError):
+                    pass
+                except OSError:
+                    self._tcp_reset(key, t)
+                    continue
+
             # Established: read what the far side has, if there is room.
             if not t.sock_eof and len(t.outbuf) < MSS:
                 try:
@@ -582,6 +654,7 @@ class Slirp:
                     t.sent_at = now
                     self._tcp_out(t, PSH | ACK, t.last_seg, seq=t.snd_una)
             elif t.outbuf:
+                t.touch()
                 n = min(len(t.outbuf), MSS)
                 t.last_seg = t.outbuf[:n]
                 t.unacked = n
@@ -612,7 +685,10 @@ class Slirp:
         proxies: the socket is ours (the console is behind NAT and unreachable
         from the LAN), but everything above the SYN is the console's."""
         if port in self.forwards:
-            return True
+            # Already ours, but possibly for a DIFFERENT channel: saying yes
+            # would give two applications the same port and let either one
+            # release it.
+            return self.fwd_ch.get(port) == ch
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.setblocking(False)
@@ -627,7 +703,11 @@ class Slirp:
         self.fwd_ch[port] = ch
         return True
 
-    def forward_del(self, port):
+    def forward_del(self, port, ch=None):
+        # Ownership is checked: one application closing a channel must not be
+        # able to unbind a port another one is serving on.
+        if ch is not None and port in self.fwd_ch and self.fwd_ch[port] != ch:
+            return
         s = self.forwards.pop(port, None)
         self.fwd_ch.pop(port, None)
         if s is not None:
@@ -635,6 +715,10 @@ class Slirp:
                 s.close()
             except OSError:
                 pass
+
+    def forward_del_by_channel(self, ch):
+        for port in [p for p, c in self.fwd_ch.items() if c == ch]:
+            self.forward_del(port, ch)
 
     def _pump_forwards(self):
         for port, srv in list(self.forwards.items()):
@@ -651,9 +735,15 @@ class Slirp:
                 # relative to an outbound flow: it must look to uIP like a
                 # connection arriving at `port` from somewhere on the NAT.
                 sport = port
-                dport = 40000 + (len(self.tcp) % 20000)
+                dport = self.next_eport
+                self.next_eport += 1
+                if self.next_eport >= 60000:
+                    self.next_eport = 40000
                 while (sport, GW_INT, dport) in self.tcp:
-                    dport = 40000 + ((dport + 1) % 20000)
+                    dport = self.next_eport
+                    self.next_eport += 1
+                    if self.next_eport >= 60000:
+                        self.next_eport = 40000
                 key = (sport, GW_INT, dport)
                 self.iss = (self.iss + 0x1000) & 0xFFFFFFFF
                 t = _Tcp(conn, key, self.iss)
@@ -681,6 +771,11 @@ class Slirp:
             if now - flow.touched > UDP_IDLE:
                 flow.close()
                 self.udp.pop(key, None)
+        for key, t in list(self.tcp.items()):
+            if now - t.touched > TCP_IDLE:
+                self.log(f"slirp: dropping idle connection {key}")
+                t.close()
+                self.tcp.pop(key, None)
 
     def stats_line(self):
         return (f"slirp: in={self.stat_in} out={self.stat_out} "

@@ -64,6 +64,9 @@ int ip_up(void); /* link up AND the gateway claimed IP support */
 int ip_resolve(const char *name); /* start a lookup: 0 ok, -1 busy/not up */
 int ip_resolve_state(void);
 void ip_resolve_addr(uint8_t out[4]); /* valid while state == IP_RES_OK */
+/* Hand the resolver back. The answer belongs to the asker until this is
+ * called, so nothing else can overwrite it in between. */
+void ip_resolve_release(void);
 
 /* ---- TCP, behind the existing ABI ----------------------------------------
  *

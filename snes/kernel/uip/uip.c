@@ -1309,6 +1309,15 @@ uip_process(u8_t flag)
   uip_connr->rport = BUF->srcport;
   uip_ipaddr_copy(uip_connr->ripaddr, BUF->srcipaddr);
   uip_connr->tcpstateflags = UIP_SYN_RCVD;
+  /* SNOS PATCH. Upstream sets mss/initialmss on this path ONLY from an MSS
+   * option in the incoming SYN; a SYN without one (which is legal, and which
+   * plain slirp SYNs were) leaves whatever the connection slot held from its
+   * previous life. On a fresh slot that is ZERO, and uip_process clamps
+   * uip_slen to mss further down — so the console completed the handshake,
+   * acknowledged the request, and then sent nothing at all, forever. It only
+   * ever worked when the slot had been recycled from an outbound connect,
+   * which is why one test passed and the real gateway did not. */
+  uip_connr->initialmss = uip_connr->mss = UIP_TCP_MSS;
 
   uip_connr->snd_nxt[0] = iss[0];
   uip_connr->snd_nxt[1] = iss[1];

@@ -45,7 +45,11 @@ typedef unsigned short uip_stats_t;
  * and none of them can find the stack full when the channel layer says there
  * is room. ~30 bytes each in far WRAM, where there is ~29 KB spare. */
 #define UIP_CONF_MAX_CONNECTIONS 8
-#define UIP_CONF_MAX_LISTENPORTS 4
+/* Eight, to match the channels. uip_listen() returns void and silently does
+ * nothing when its table is full, so a fifth server used to start, ask the
+ * daemon for a real port, report success — and then RST every connection
+ * that arrived. */
+#define UIP_CONF_MAX_LISTENPORTS 8
 
 /* UDP, for DNS. The console resolves names ITSELF — real queries in real
  * packets — which is the difference between having a network stack and having

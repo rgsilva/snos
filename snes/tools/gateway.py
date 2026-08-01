@@ -795,7 +795,7 @@ class Gateway:
                 self.push_ctrl(S2C_ERR, bytes([ch, 1]))
         elif self.ctype == C2S_IPUNFWD and len(self.cbuf) >= 3:
             port = self.cbuf[1] | (self.cbuf[2] << 8)
-            self.slirp.forward_del(port)
+            self.slirp.forward_del(port, self.cbuf[0])
         elif self.ctype == C2S_LISTEN and len(self.cbuf) >= 3:
             ch = self.cbuf[0]
             port = self.cbuf[1] | (self.cbuf[2] << 8)
@@ -809,6 +809,13 @@ class Gateway:
             # before this record has already been written to the socket —
             # records are processed in order — so closing now cannot truncate.
             ch = self.cbuf[0]
+            # M11: a forward belongs to a channel, and the console does not
+            # always get to say so -- C2S_IPUNFWD is dropped when the control
+            # queue is full, and an app killed outright never sends one. So
+            # closing the channel releases it here too, which is the same
+            # lesson teardown() already learned for stream listeners:
+            # otherwise the next run of the app finds its own port taken.
+            self.slirp.forward_del_by_channel(ch)
             sock = self.socks.pop(ch, None)
             if sock is not None:
                 try:
@@ -834,6 +841,13 @@ class Gateway:
             # not claimed a socket or a page yet and would otherwise sail past
             # the teardown below.
             self.released(ch)
+            # M11: a forward belongs to a channel, and the console does not
+            # always get to say so -- C2S_IPUNFWD is dropped when the control
+            # queue is full, and an app killed outright never sends one. So
+            # closing the channel releases it here too, which is the same
+            # lesson teardown() already learned for stream listeners:
+            # otherwise the next run of the app finds its own port taken.
+            self.slirp.forward_del_by_channel(ch)
             sock = self.socks.pop(ch, None)
             if sock is not None:
                 try:
