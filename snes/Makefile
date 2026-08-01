@@ -234,6 +234,7 @@ test: test-host test-boot test-input test-history test-shell test-shadow test-ap
 test-host:
 	python3 test/host/bridge_test.py
 	python3 test/host/slirp_test.py
+	python3 test/host/mkmc_test.py
 
 test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
 	$(call check_env)
