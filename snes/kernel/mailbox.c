@@ -5,6 +5,13 @@ void mb_init(void)
   MB_WINDEX = 0;
   MB_IN_WINDEX = 0;
   MB_IN_RINDEX = 0;
+  /* WRAM is garbage at power-on and the NMI latches this flag into
+   * snos_break on the very first frame — where it then SITS, because the
+   * shell prompt never consumes it, until the first long-running command
+   * polls snos_break_taken() and silently aborts. With Mesen's random RAM
+   * init that was a coin-flip landmine under every breakable command; the
+   * first `ping` ever run stepped on it deterministically. */
+  MB_BREAK = 0;
   MB_STATUS = MB_STATUS_RUNNING;
   MB_MAGIC = MB_MAGIC_ALIVE;
 }

@@ -150,6 +150,47 @@ static uint8_t txq[TXQ_SIZE];
 static uint16_t txq_head; /* foreground writes */
 static uint16_t txq_tail; /* NMI writes */
 
+/* ---- M11: the raw-IP byte stream ----------------------------------------
+ *
+ * One ring pair for the whole IP layer, not per anything: below ip.c the
+ * datagrams are just bytes on one more link channel, and the multiplexing IP
+ * itself provides (ports, connections) happens above, in the stack.
+ *
+ * Ownership mirrors the stream channels exactly:
+ *   iprx head   NMI writes (frame_deliver), foreground reads   (producer)
+ *   iprx tail   foreground writes (net_ip_read), NMI reads     (consumer)
+ *   iptx head   foreground writes (net_ip_write), NMI reads
+ *   iptx tail   NMI writes (ack release), foreground reads
+ *
+ * RX is larger than TX for the same reason NET_RING beats NET_TXRING: what
+ * arrives must be buffered against a consumer that runs when it runs, while
+ * what we send we can simply generate less of. 2 KB holds three MTU-sized
+ * datagrams; when it fills, frame_fits refuses the frame and the link's own
+ * backpressure does the rest — no datagram is ever half-delivered. */
+#define IP_RXRING 2048
+#define IP_TXRING 1024
+typedef char ip_rings_must_be_power_of_two[((IP_RXRING & (IP_RXRING - 1)) == 0 &&
+                                            (IP_TXRING & (IP_TXRING - 1)) == 0)
+                                               ? 1
+                                               : -1];
+static uint8_t iprx[IP_RXRING];
+static uint16_t iprx_head; /* NMI writes */
+static uint16_t iprx_tail; /* foreground writes */
+static uint8_t iptx[IP_TXRING];
+static uint16_t iptx_head; /* foreground writes */
+static uint16_t iptx_tail; /* NMI writes */
+static uint16_t txframe_ip; /* iptx bytes in the frame in flight */
+/* Set from the HELLO reply (version >= 2). Cleared on a peer restart: the new
+ * gateway process must claim IP support again before we send it packets. */
+static volatile uint8_t ip_mode;
+/* Peer-restart handoff, NMI -> foreground — the ch_reuse idiom. The daemon
+ * dying mid-datagram leaves a partial length-prefixed datagram in the ring,
+ * and every byte after it would be parsed one off forever. The NMI may not
+ * clear the foreground-owned tail, so it records the boundary and raises the
+ * flag; net_ip_read applies the discard and reports it once. */
+static volatile uint8_t iprx_resync;
+static volatile uint16_t iprx_mark;
+
 /* Inbound control reassembly. Sized for a URL-length reply plus slack. */
 #define CMSG_MAX 288
 static uint8_t cmsg[CMSG_MAX];
@@ -240,6 +281,13 @@ void net_init(void) {
   }
   txq_head = 0;
   txq_tail = 0;
+  iprx_head = 0;
+  iprx_tail = 0;
+  iptx_head = 0;
+  iptx_tail = 0;
+  txframe_ip = 0;
+  ip_mode = 0;
+  iprx_resync = 0;
   /* Establish the pad invariant build_frame relies on: everything at and
    * beyond txframe_fill is LINK_CH_PAD. Statics are zeroed, and zero is a
    * valid channel number, not PAD. */
@@ -313,6 +361,77 @@ static int ring_put(int ch, const uint8_t *src, int n) {
     ring_move(&ring[ch][0], src + first, (uint16_t)((uint16_t)n - first));
   ring_head[ch] = (uint16_t)((h + (uint16_t)n) & (NET_RING - 1));
   return 1;
+}
+
+/* ------------------------------------------------------------ IP ring I/O */
+
+static uint16_t iprx_used(void) {
+  return (uint16_t)((iprx_head - iprx_tail) & (IP_RXRING - 1));
+}
+
+/* NMI side, from frame_deliver. frame_fits has already reserved the space. */
+static void iprx_put(const uint8_t *src, int n) {
+  uint16_t h, first;
+  if (n <= 0) return; /* MVN would move 65536 for a count of 0 */
+  h = iprx_head;
+  first = (uint16_t)(IP_RXRING - h);
+  if (first > (uint16_t)n) first = (uint16_t)n;
+  ring_move(&iprx[h], src, first);
+  if (first < (uint16_t)n)
+    ring_move(&iprx[0], src + first, (uint16_t)((uint16_t)n - first));
+  iprx_head = (uint16_t)((h + (uint16_t)n) & (IP_RXRING - 1));
+}
+
+int net_ipmode(void) { return ip_mode != 0; }
+
+int net_ip_read(uint8_t *dst, int max) {
+  uint16_t t, avail, n, first;
+  /* Apply a pending peer-restart discard first, and SAY SO: the caller's
+   * half-assembled datagram is garbage now, and silently handing it the new
+   * stream's bytes would graft two streams together at a random offset. */
+  if (iprx_resync) {
+    iprx_resync = 0;
+    iprx_tail = iprx_mark;
+    return -1;
+  }
+  if (max <= 0) return 0;
+  t = iprx_tail;
+  avail = (uint16_t)((iprx_head - t) & (IP_RXRING - 1));
+  if (avail == 0) return 0;
+  n = ((uint16_t)max < avail) ? (uint16_t)max : avail;
+  /* ip.c's buffers are either kernel far data (bank $7E by the linker
+   * invariant ring_move already relies on) or kernel STACK locals — bank $00
+   * below $2000, which is the hardware mirror of $7E0000-$7E1FFF, so
+   * ring_move's hard-coded $7E reaches the identical bytes. That mirror is
+   * why no bank test is needed here where net_read has one: the only caller
+   * is the kernel, whose stack can never leave the mirrored window. */
+  first = (uint16_t)(IP_RXRING - t);
+  if (first > n) first = n;
+  ring_move(dst, &iprx[t], first);
+  if (first < n) ring_move(dst + first, &iprx[0], (uint16_t)(n - first));
+  iprx_tail = (uint16_t)((t + n) & (IP_RXRING - 1));
+  return (int)n;
+}
+
+int net_ip_wspace(void) {
+  return (int)(IP_TXRING - 1 -
+               (uint16_t)((iptx_head - iptx_tail) & (IP_TXRING - 1)));
+}
+
+int net_ip_write(const uint8_t *src, int n) {
+  uint16_t h, first;
+  if (!ip_mode || n <= 0) return 0;
+  if (n > net_ip_wspace()) return 0; /* all or nothing; see net.h */
+  /* src may be a kernel stack local (bank $00): same $7E mirror argument as
+   * net_ip_read's destination, and the same reason it is safe. */
+  h = iptx_head;
+  first = (uint16_t)(IP_TXRING - h);
+  if (first > (uint16_t)n) first = (uint16_t)n;
+  ring_move(&iptx[h], src, first);
+  if (first < (uint16_t)n)
+    ring_move(&iptx[0], src + first, (uint16_t)((uint16_t)n - first));
+  iptx_head = (uint16_t)((h + (uint16_t)n) & (IP_TXRING - 1));
+  return n;
 }
 
 int net_read(int ch, uint8_t __far *dst, int max) {
@@ -648,6 +767,10 @@ static void ctrl_message(void) {
     if (n > NET_TEXT_MAX) n = NET_TEXT_MAX;
     for (i = 0; i < n; i++) net_text[i] = (char)cmsg[1 + i];
     net_text[n] = 0;
+    /* Version 2 = the daemon does user-mode NAT and will route LINK_CH_IP
+     * records (M11). Gated on the reply, not assumed: the Lua test gateways
+     * and any older daemon stay at 1 and never see an IP record. */
+    ip_mode = (uint8_t)(net_gw_version >= 2 ? 1 : 0);
     net_stat_hello++;                 /* last: the shell watches this to wake */
     break;
   }
@@ -708,6 +831,7 @@ static void ctrl_bytes(const uint8_t *p, int n) {
 static int frame_fits(const uint8_t *f) {
   int o = LINK_HDR;
   uint16_t need[NET_CHANNELS];
+  uint16_t need_ip = 0;
   int i;
   for (i = 0; i < NET_CHANNELS; i++) need[i] = 0;
   while (o + 2 <= LINK_FRAME) {
@@ -724,10 +848,16 @@ static int frame_fits(const uint8_t *f) {
      * discarded in frame_deliver instead, which is what a closed stream means. */
     if (ch != LINK_CH_CTRL && ch < NET_CHANNELS && ch_state[ch] != NET_ST_FREE)
       need[ch] = (uint16_t)(need[ch] + len);
+    else if (ch == LINK_CH_IP)
+      need_ip = (uint16_t)(need_ip + len);
     o += 2 + len;
   }
   for (i = 1; i < NET_CHANNELS; i++)
     if (need[i] > ring_free(i)) return 0;
+  /* The tail read here is foreground-owned and may be stale; stale only
+   * UNDERSTATES free space, so the worst case is one refused frame that the
+   * peer resends — the ordinary backpressure path, never corruption. */
+  if (need_ip > (uint16_t)(IP_RXRING - 1 - iprx_used())) return 0;
   return 1;
 }
 
@@ -743,6 +873,8 @@ static void frame_deliver(const uint8_t *f) {
      * yet seen our CLOSE, and there is nowhere for it to go. */
     else if (ch < NET_CHANNELS && ch_state[ch] != NET_ST_FREE)
       ring_put(ch, &f[o + 2], len);
+    else if (ch == LINK_CH_IP)
+      iprx_put(&f[o + 2], len); /* frame_fits reserved the space */
     o += 2 + len;
   }
 }
@@ -804,6 +936,27 @@ static void build_frame(void) {
     }
   }
 
+  /* IP last: the stream channels are interactive (a keystroke's echo, an IRC
+   * line) and IP is where bulk will live once the stack carries downloads.
+   * Greedy fill still gives IP the whole frame when nothing else talks. */
+  {
+    int have = (int)((iptx_head - iptx_tail) & (IP_TXRING - 1));
+    int room = LINK_FRAME - o - 2;
+    int i;
+    txframe_ip = 0;
+    if (ip_mode && have > 0 && room > 0) {
+      if (have > room) have = room;
+      if (have > 255) have = 255;
+      txframe[o++] = LINK_CH_IP;
+      txframe[o++] = (uint8_t)have;
+      for (i = 0; i < have; i++) {
+        txframe[o++] = iptx[(iptx_tail + i) & (IP_TXRING - 1)];
+      }
+      txframe_ip = (uint16_t)have;
+      txframe[LINK_FLAGS] |= LINK_F_DATA;
+    }
+  }
+
   /* Re-pad only what the previous frame's records covered (see txframe_fill);
    * the checksum still sums the whole frame, so a hole in the invariant would
    * fail loudly on the far side rather than corrupt silently. */
@@ -858,6 +1011,8 @@ void net_service(void) {
               (uint16_t)((txring_tail[c] + txframe_ch[c]) & (NET_TXRING - 1));
           txframe_ch[c] = 0;
         }
+        iptx_tail = (uint16_t)((iptx_tail + txframe_ip) & (IP_TXRING - 1));
+        txframe_ip = 0;
         awaiting_ack = 0;
         tx_seq++;
         syn_out = 0; /* it acked us, so it has our sequence base */
@@ -874,6 +1029,18 @@ void net_service(void) {
           rx_next = rxframe[LINK_SEQ];
           for (i = 1; i < NET_CHANNELS; i++)
             if (ch_state[i] != NET_ST_FREE) ch_state[i] = NET_ST_ERROR;
+          /* The IP layer dies with the daemon too. Mode drops until the NEW
+           * process claims it in its own HELLO; unsent datagrams are for a
+           * NAT table that no longer exists (tail skip: both stores are
+           * NMI-owned here, the txring_tail precedent in ctrl_message); and
+           * received bytes may end mid-datagram, which net_ip_read reports
+           * to ip.c exactly once via the mark/flag handoff. */
+          net_gw_version = 0;
+          ip_mode = 0;
+          iptx_tail = iptx_head;
+          txframe_ip = 0;
+          iprx_mark = iprx_head;
+          iprx_resync = 1;
         }
       } else {
         peer_syn_seen = 0;

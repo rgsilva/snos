@@ -67,6 +67,15 @@
 #define LINK_CH_CTRL 0  /* commands and their replies */
 #define LINK_CH_PAD 0xFF /* filler; stop parsing records here */
 
+/* Raw IP datagrams (M11). Deliberately OUTSIDE the stream-channel range
+ * 0..NET_CHANNELS-1: every parser on both sides has always skipped a record
+ * whose channel it does not know by its length byte, so a pre-M11 gateway
+ * that never claims IP support simply never sees one of these, and an old
+ * kernel fed one steps over it. The record payload is a byte-stream slice;
+ * datagram boundaries inside that stream are a 2-byte little-endian length
+ * prefix per datagram (kernel/ip.c) — link-local convention, not IP. */
+#define LINK_CH_IP 0x10
+
 /* The emulated backend's mailbox, mirroring the physical exchange exactly.
  * Carved out of HiRAM in calypsi/linker.scm. The host claims the link by
  * writing the magic; the kernel zeroes it at boot, so on real hardware nothing

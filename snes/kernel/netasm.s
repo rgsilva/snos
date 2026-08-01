@@ -99,7 +99,7 @@
               .extern _Dp
 
               .section farcode, root
-              .public link_mb_move, net_checksum, ring_move
+              .public link_mb_move, net_checksum, ring_move, ip_sum
 
 ;;; The one bank kernel far data and the link mailbox share; see above.
 WRAM_BANK     .equ    0x7e
@@ -240,6 +240,58 @@ step16        .macro
               iny
               iny
               .endm
+
+;;; ---------------------------------------------------------------------------
+;;; uint16_t ip_sum(const uint8_t *p, uint16_t n)
+;;;
+;;; The Internet ones-complement sum of p[0..n-1], NOT complemented, so callers
+;;; can chain ranges and fold in a TCP/UDP pseudo-header before the final ~
+;;; (RFC 1071: the sum is associative and commutative). n MUST BE EVEN — an odd
+;;; trailing byte is the C caller's job (kernel/ip.c csum_odd), because handling
+;;; it here costs a flag juggle on every call to serve the rare case.
+;;;
+;;; The loop adds LITTLE-ENDIAN words with the carry deliberately chained from
+;;; one ADC into the next — that IS the end-around carry, deferred — and swaps
+;;; the result once at the end (RFC 1071 §2(B): the sum is byte-order
+;;; independent, so summing swapped words gives the byte-swap of the true sum).
+;;; That makes the inner loop one 16-bit ADC per word, ~9 cycles per pair,
+;;; against ~200+ for the same arithmetic in C at -O0 — and uIP checksums every
+;;; TCP segment twice (verify in, compute out), so this is the stack's floor.
+;;;
+;;; Any bank: the pointer's own bank byte goes into DB, same as net_checksum.
+;;; ---------------------------------------------------------------------------
+ip_sum:
+              rep     #0x30           ; A/X/Y 16 bits: A arrives holding n
+              phb
+              pha                     ; n, while the bank goes into DB
+              sep     #0x20
+              lda     dp:.tiny (_Dp+2) ; the buffer's bank ...
+              pha
+              plb                     ; ... into DB, for absolute,Y below
+              rep     #0x20
+              ldy     dp:.tiny _Dp    ; Y = the buffer's offset
+              pla                     ; A = n
+              lsr     a               ; A = word count (n even by contract)
+              tax                     ; X = words; TAX sets Z, leaves C alone
+              beq     ipsum_zero
+              lda     ##0
+              clc
+ipsum_loop:
+              adc     abs:0,y         ; carry chains into the NEXT add: that is
+                                      ; the ones-complement end-around, deferred
+              iny                     ; INY/DEX/BNE leave C untouched
+              iny
+              dex
+              bne     ipsum_loop
+              adc     ##0             ; fold the final carry ...
+              adc     ##0             ; ... twice: 0xFFFF + C refolds once more
+              xba                     ; back to network byte order (RFC 1071)
+              plb
+              rtl
+ipsum_zero:
+              lda     ##0
+              plb
+              rtl
 
 net_checksum:
               rep     #0x30           ; A/X/Y 16 bits: A arrives holding n

@@ -18,6 +18,7 @@
 #include "fs.h"
 #include "sram.h"
 #include "net.h"
+#include "ip.h"
 #include "proc.h"
 
 static char line[128];
@@ -87,6 +88,7 @@ static void cmd_help(void) {
   kcon_puts("rm NAME       delete a file (instant; bytes stay spent)\n");
   kcon_puts("compact       recopy files, reclaim deleted space (slow)\n");
   kcon_puts("net           gateway diagnostics\n");
+  kcon_puts("ping A.B.C.D  ICMP echo, composed on this machine (M11)\n");
   kcon_puts("debug         other diagnostics\n");
 }
 
@@ -862,6 +864,94 @@ static void cmd_net_status(void) {
   kcon_puts(", resends ");
   kcon_putu(net_stat_resent);
   kcon_putc('\n');
+
+  /* M11: whether this gateway is a slirp box, and what our address is when
+   * it is. The address is a constant of the design (ip.h), but printing it
+   * here is what makes `net status` the one command that answers "what do I
+   * ping / point a port-forward at". */
+  if (net_ipmode()) {
+    kcon_puts("ip 10.0.2.15 via 10.0.2.2 (slirp), dns 10.0.2.3\n");
+    kcon_puts("ip rx ");
+    kcon_putu(ip_stat_rx);
+    kcon_puts(", tx ");
+    kcon_putu(ip_stat_tx);
+    kcon_puts(", drop ");
+    kcon_putu(ip_stat_drop);
+    kcon_puts(", desync ");
+    kcon_putu(ip_stat_desync);
+    kcon_putc('\n');
+  } else {
+    kcon_puts("no ip (gateway v1: streams only)\n");
+  }
+}
+
+/* `ping A.B.C.D` — four real ICMP echo requests, composed on this machine.
+ *
+ * NOT the deleted `net ping`, and the difference is the milestone: that one
+ * asked the gateway how the gateway felt over control records, this one puts
+ * IPv4 packets this kernel built onto the link and parses the replies. */
+static int parse_quad(const char *s, uint8_t out[4]) {
+  int i;
+  for (i = 0; i < 4; i++) {
+    uint16_t v = 0;
+    int any = 0;
+    while (*s >= '0' && *s <= '9') {
+      v = (uint16_t)(v * 10u + (uint16_t)(*s - '0'));
+      if (v > 255) return -1;
+      s++;
+      any = 1;
+    }
+    if (!any) return -1;
+    out[i] = (uint8_t)v;
+    if (i < 3) {
+      if (*s != '.') return -1;
+      s++;
+    }
+  }
+  return (*s == 0 || *s == ' ') ? 0 : -1;
+}
+
+static void cmd_ping(const char *rest) {
+  uint8_t dst[4];
+  int i;
+  if (parse_quad(rest, dst) < 0) {
+    kcon_puts("usage: ping A.B.C.D   (10.0.2.2 is the gateway)\n");
+    return;
+  }
+  if (!ip_up()) {
+    kcon_puts(net_up() ? "no ip - this gateway is streams-only (net status)\n"
+                       : "no link (the bridge script is not running)\n");
+    return;
+  }
+  for (i = 0; i < 4; i++) {
+    uint16_t got = ip_ping_replies;
+    uint16_t deadline;
+    if (ip_ping_send(dst) < 0) {
+      kcon_puts("send failed (queue full)\n");
+      return;
+    }
+    /* Two seconds per echo: an emulated round trip is a handful of frames,
+     * a real Internet host through the NAT can take dozens. */
+    deadline = (uint16_t)(snos_frames + 120u);
+    while (ip_ping_replies == got) {
+      if ((int16_t)(snos_frames - deadline) >= 0) break;
+      if (snos_break_taken()) return;
+      kbd_idle();
+    }
+    if (ip_ping_replies != got) {
+      kcon_puts("reply from ");
+      kcon_puts(rest);
+      kcon_puts(": seq=");
+      kcon_putu(ip_ping_seq);
+      kcon_puts(" time=");
+      kcon_putu(ip_ping_rtt);
+      kcon_puts(" frames\n");
+    } else {
+      kcon_puts("timeout (seq=");
+      kcon_putu((uint16_t)i);
+      kcon_puts(")\n");
+    }
+  }
 }
 
 /* `net test` — prove the whole path works, end to end.
@@ -1056,6 +1146,7 @@ void shell_run(void) {
    * net_service() is guarded by a readiness flag, so the NMI handler does
    * nothing until this runs. */
   net_init();
+  ip_init();
 
   kcon_puts("type 'help' for commands\n\n");
   for (;;) {
@@ -1080,6 +1171,7 @@ void shell_run(void) {
     else if (streq(line, "rm")) cmd_rm(rest);
     else if (streq(line, "compact")) cmd_compact();
     else if (streq(line, "net")) cmd_net(rest);
+    else if (streq(line, "ping")) cmd_ping(rest);
     else if (streq(line, "debug")) cmd_debug(rest);
     else {
       /* Not a builtin? Try an application of that name — this is what lets

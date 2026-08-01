@@ -86,4 +86,21 @@ extern volatile uint16_t net_stat_resent;
  * retransmitting at it; see the comment on the definition in net.c. */
 extern volatile uint16_t net_stat_refused;
 
+/* ---- M11: the raw-IP datagram path (kernel/ip.c is the only consumer) ----
+ *
+ * net.c owns the rings and their single-writer discipline, exactly as it does
+ * for the stream channels; ip.c owns everything above the byte stream. The
+ * gateway claims IP support with its HELLO version (>= 2), and until it does
+ * the kernel never puts a LINK_CH_IP record on the wire. */
+int net_ipmode(void); /* gateway speaks IP (slirp): HELLO version >= 2 */
+/* Drain received IP-stream bytes. Returns bytes moved, 0 for none — and -1
+ * exactly ONCE after a peer restart: the length-prefixed datagram framing
+ * broke mid-stream when the peer died, so the caller must reset its
+ * reassembly state. The stale bytes are already discarded when -1 returns. */
+int net_ip_read(uint8_t *dst, int max);
+/* Queue bytes toward the gateway. All or nothing — half a datagram on the
+ * wire poisons the stream for every datagram after it. */
+int net_ip_write(const uint8_t *src, int n);
+int net_ip_wspace(void);
+
 #endif

@@ -19,6 +19,7 @@
 #include "mailbox.h"
 #include "snos.h"
 #include "proc.h"
+#include "ip.h"
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -308,6 +309,12 @@ void kbd_idle(void) {
   proc_switch_now();
   while (snos_frames == f) {
   }
+  /* The IP layer's foreground pump (M11). Here for the same reason the OSK
+   * is serviced here: every blocking loop funnels through, so the stack gets
+   * cycles whenever anything waits — which is most of every second. It
+   * guards itself against the two processes arriving at once, and it is NOT
+   * foreground-gated: a background server's packets matter exactly as much. */
+  ip_service();
   /* Display work belongs to the FOREGROUND process only. A background
    * process yielding through here used to run con_flush concurrently with
    * the shell's own printing — two writers in the console's row buffers and

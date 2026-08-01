@@ -42,6 +42,8 @@ import time
 import urllib.error
 import urllib.request
 
+import slirp
+
 # SNES -> gateway and back. Overridable so the host-side bridge test
 # (test/host/bridge_test.py) can run against a private pair of files while a
 # real session owns /tmp's.
@@ -53,6 +55,13 @@ HDR = 4
 SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 F_DATA = 0x01
 CH_CTRL, CH_PAD = 0, 0xFF
+# Raw IPv4 datagrams (M11), on a channel outside the stream range. Both record
+# parsers have always skipped an unknown channel by its length byte, so an old
+# console against this gateway never sees one and a new console against an old
+# gateway never gets one -- the version handshake below is what gates it.
+# Datagrams are length-prefixed (2 bytes, little-endian) inside the byte
+# stream; see kernel/ip.c.
+CH_IP = 0x10
 
 C2S_FETCH, C2S_CLOSE, C2S_HELLO = 0x01, 0x02, 0x04
 # 0x03 was C2S_IMAGE, retired: conversion is decided from the Content-Type.
@@ -70,7 +79,10 @@ LISTEN_ADDR = "0.0.0.0"
 S2C_OPEN, S2C_EOF, S2C_ERR, S2C_HELLO = 0x81, 0x82, 0x83, 0x84
 
 F_SYN = 0x02
-GW_VERSION = 1
+# 2 = "I do user-mode NAT": the console may run its own IP stack and send
+# LINK_CH_IP records (M11). The console asks for this with HELLO before it
+# sends a single packet, so a v1 gateway simply never sees IP traffic.
+GW_VERSION = 2
 
 USER_AGENT = "SNOS/0.1 (Super Nintendo; via gateway)"
 # What the SNES will actually receive. It arrives at roughly 600 B/s, so half a
@@ -271,6 +283,13 @@ class Gateway:
         self.st_qdepth_sum = 0   # queue depth when building, for a mean
         self.st_qdepth_n = 0
 
+        # M11: the NAT, and the reassembly buffer for the datagram stream
+        # coming the other way. Every datagram it produces is queued as an
+        # ordinary CH_IP record, so it inherits the link's reliability,
+        # ordering and backpressure without knowing any of them exist.
+        self.slirp = slirp.Slirp(self.push_ip)
+        self.ipbuf = bytearray()
+
     # ------------------------------------------------------------ outbound
     def push(self, ch, data, gen=None):
         with self.lock:
@@ -431,6 +450,11 @@ class Gateway:
             self.out_started = False
         for ch in set(self.chgen) | set(self.socks) | set(self.listeners) | set(range(8)):
             self.released(ch)
+        # The NAT's flows named sockets that belonged to the dead session as
+        # surely as the stream ones did, and its bound forwards hold ports the
+        # next run of the same app needs.
+        self.slirp.close()
+        self.ipbuf = bytearray()
         for sock in list(self.socks.values()):
             try:
                 sock.close()
@@ -810,6 +834,31 @@ class Gateway:
             # of the channel — channels are reused — the tail of a dead page.
             self.forget(ch)
 
+    def push_ip(self, datagram):
+        """One IPv4 datagram toward the console, length-prefixed."""
+        self.push(CH_IP, bytes([len(datagram) & 0xFF,
+                                (len(datagram) >> 8) & 0xFF]) + datagram)
+
+    def ip_bytes(self, data):
+        """Stream bytes from the console's IP channel: reassemble and route.
+
+        A length that could not possibly be a datagram means the stream
+        desynchronised, and nothing marks a boundary to resynchronise ON — so
+        the buffer is dropped whole and the console is told, by the only means
+        available on a byte stream, to start again: F_SYN at the next session
+        reset. In practice this fires only after a restart on one side."""
+        self.ipbuf += data
+        while len(self.ipbuf) >= 2:
+            ln = self.ipbuf[0] | (self.ipbuf[1] << 8)
+            if ln == 0 or ln > slirp.MTU:
+                print(f"gateway: IP stream desync (length {ln}), resetting")
+                self.ipbuf = bytearray()
+                return
+            if len(self.ipbuf) < 2 + ln:
+                return
+            self.slirp.input(bytes(self.ipbuf[2:2 + ln]))
+            del self.ipbuf[:2 + ln]
+
     def deliver(self, f):
         o = HDR
         while o + 2 <= FRAME:
@@ -819,6 +868,8 @@ class Gateway:
             if ch == CH_CTRL:
                 for i in range(ln):
                     self.ctrl_byte(f[o + 2 + i])
+            elif ch == CH_IP:
+                self.ip_bytes(bytes(f[o + 2:o + 2 + ln]))
             else:
                 # Stream bytes from the SNES. Until connect existed this branch
                 # had nothing to do — every byte the console sent was a control
@@ -977,6 +1028,8 @@ def main():
             if stats and time.time() >= stats_at:
                 stats_at = time.time() + 5.0
                 print(gw.stats_line())
+                if gw.slirp.stat_in or gw.slirp.stat_out:
+                    print(gw.slirp.stats_line())
             moved = False
             try:
                 # The bridge truncates both files when it starts, so a restarted
@@ -1020,6 +1073,12 @@ def main():
             # the down file grows four times faster than it is consumed. The
             # bridge falls permanently behind, reads frames from minutes ago,
             # and the file reaches megabytes in a couple of minutes.
+            # The NAT moves on wall-clock time, not on the console's polling:
+            # a socket becomes readable when it becomes readable. Ticked on
+            # BOTH paths for that reason -- ticking only when a frame arrived
+            # would make every reply wait for the console to ask again.
+            gw.slirp.tick()
+
             if moved:
                 down.write(bytes(gw.next_out()))
             else:
