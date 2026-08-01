@@ -12,6 +12,11 @@ is replaced by the whole library wrapped in an immediately-invoked function, so
 `L` ends up bound to exactly what lib.lua returns. Test sources stay readable
 and there is still one copy of the harness.
 
+The same splice serves test/gwip.lua (the shared v2 gateway + IP/TCP peer)
+through the optional line
+
+    local G = dofile("test/gwip.lua")
+
 Usage: mktest.py <test.lua> <lib.lua> <out.lua>
 """
 import os
@@ -19,11 +24,14 @@ import re
 import sys
 
 MARKER = re.compile(r'^\s*local\s+L\s*=\s*dofile\(["\']test/lib\.lua["\']\)\s*$')
+GW_MARKER = re.compile(
+    r'^\s*local\s+G\s*=\s*dofile\(["\']test/gwip\.lua["\']\)\s*$')
 
 
 def main(argv):
     test_path, lib_path, out_path = argv
     lib = open(lib_path).read()
+    gwip_path = os.path.join(os.path.dirname(lib_path), "gwip.lua")
     lines = open(test_path).read().splitlines()
 
     out, spliced = [], False
@@ -35,6 +43,12 @@ def main(argv):
             out.append("end)()")
             out.append("-- <<< end of inlined library")
             spliced = True
+        elif GW_MARKER.match(line):
+            out.append("-- >>> inlined from test/gwip.lua by tools/mktest.py")
+            out.append("local G = (function()")
+            out.append(open(gwip_path).read())
+            out.append("end)()")
+            out.append("-- <<< end of inlined library")
         else:
             out.append(line)
 

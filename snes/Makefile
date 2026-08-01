@@ -77,7 +77,7 @@ $(BUILD):
 
 # Mesen's Lua sandbox blocks dofile/require, so the shared harness is spliced
 # into each test at build time. See tools/mktest.py.
-$(BUILD)/test/%.lua: test/%.lua test/lib.lua tools/mktest.py | $(BUILD)
+$(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua tools/mktest.py | $(BUILD)
 	python3 tools/mktest.py $< test/lib.lua $@
 
 # Every object depends on every kernel header. Coarse, but the kernel is a
@@ -272,8 +272,13 @@ test-editor: $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
 	rm -f "$(MESEN_SRM)"
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
 
+# Downloads write the SRAM volume, and SRAMFS is a bump allocator: without a
+# wipe, the accumulated DLTEST/BIG/WINLOSS of every previous run eventually
+# fill the 256 K and `get` starts refusing with "not enough room" — a failure
+# of the HARNESS state, not of the code under test.
 test-net: $(BUILD)/snos.sfc $(BUILD)/test/net.lua
 	$(call check_env)
+	rm -f "$(MESEN_SRM)"
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/net.lua
 
 test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua

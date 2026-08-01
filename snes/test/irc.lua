@@ -1,70 +1,39 @@
 -- M8: the IRC client, tested against an ircd written in Lua.
 --
--- Same shape as test/net.lua and for the same reason: the link layer here is
--- the real one, frame for frame, and what sits on top of it is a real IRC
--- server rather than a stub. So this exercises registration, PING/PONG, JOIN,
--- NAMES, both directions of PRIVMSG and a clean QUIT without Docker, a socket
--- or a human — which is what makes it worth running in CI.
+-- Same shape as test/httpd.lua and for the same reason: the link layer here
+-- is the real one, frame for frame, and since the uIP cutover the transport
+-- above it is the real one too — the console's own TCP, spoken against the
+-- hermetic slirp box in test/gwip.lua, with an actual IRC server behind the
+-- socket rather than a stub. So this exercises registration, PING/PONG,
+-- JOIN, NAMES, both directions of PRIVMSG and a clean QUIT without Docker, a
+-- socket or a human — which is what makes it worth running in CI.
 --
 -- The two protocol facts that cost other clients real time are asserted
 -- directly: that a PING is answered (a missed PONG is a silent disconnection
 -- minutes later), and that a CTCP PRIVMSG is dropped rather than printed (OFTC
 -- sends an unsolicited VERSION on connect, and \1VERSION\1 sprayed into the
 -- message pane looks exactly like the link corrupting data).
+--
+-- The keepalive scenario is MORE faithful now than it was over the stream
+-- gateway: the ircd application goes silent while gwip's TCP keeps acking,
+-- so the client's probe rides a healthy transport into a dead server —
+-- exactly the failure keepalive exists for.
 local L = dofile("test/lib.lua")
+local G = dofile("test/gwip.lua")
 
-local MB = 0xE000          -- link mailbox, WRAM $7EE000
-local MAGIC = 0x4B4C       -- "LK"
-local FRAME, HDR = 128, 4
-local TXOFF, RXOFF = 0x10, 0x10 + FRAME
-local SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
-local F_DATA = 0x01
-local CH_CTRL, CH_PAD = 0, 0xFF
-local WRAM = emu.memType.snesWorkRam
-
-local C2S_CLOSE, C2S_HELLO = 0x02, 0x04
-local C2S_CONNECT, C2S_HANGUP = 0x07, 0x09
-local S2C_OPEN, S2C_EOF, S2C_HELLO = 0x81, 0x82, 0x84
-
-local function rb(o) return emu.read(MB + o, WRAM) end
-local function wb(o, v) emu.write(MB + o, v & 0xFF, WRAM) end
-local function ru16(o) return emu.read16(MB + o, WRAM) end
-local function wu16(o, v) emu.write16(MB + o, v & 0xFFFF, WRAM) end
-
-local function sum_of(f)
-  local s = 0
-  for i = 0, FRAME - 1 do
-    if i ~= SUM then s = s + f[i] end
-  end
-  return s & 0xFF
-end
-
--- ---------------------------------------------------------------- gateway
-local gw = {
-  tx_seq = 0, rx_next = 0, last_snes_seq = 0, out = {},
-  cmsg = { state = 0, typ = 0, len = 0, buf = {} },
-  window = {}, stall = 0,
-  upstream = {}, hangups = 0,
-}
-
-local function push(ch, s)
-  gw.out[#gw.out + 1] = { ch = ch, data = s, pos = 1 }
-end
-
-local function push_ctrl(typ, payload)
-  push(CH_CTRL, string.char(typ, #payload) .. payload)
-end
+local gw = G.new{}
 
 -- -------------------------------------------------------------------- ircd
 local ircd = {
-  ch = nil, hostport = nil, nick = nil, user = nil,
+  sock = nil, dst = nil, port = nil, rx_seen = 0,
+  nick = nil, user = nil,
   buf = "", lines = {}, privmsgs = {}, joined = {},
   registered = false, pongs = 0, quit = nil,
 }
 
 -- Server -> SNES. One IRC line, CRLF-terminated exactly as the wire has it.
 local function srv(s)
-  if ircd.ch then push(ircd.ch, s .. "\r\n") end
+  if ircd.sock then ircd.sock:send(s .. "\r\n") end
 end
 
 -- Long on purpose. ergo's stock MOTD is 2.5 KB of ASCII art and wraps to about
@@ -120,7 +89,10 @@ local function irc_line(line)
   elseif cmd == "QUIT" then
     ircd.quit = rest
     srv("ERROR :Closing Link: snos (Quit)")
-    push_ctrl(S2C_EOF, string.char(ircd.ch))
+    -- The FIN goes out after the ERROR line's bytes are acknowledged —
+    -- gwip's sock queues the close behind the send, the same ordering the
+    -- old S2C_EOF-after-the-body had.
+    ircd.sock:close()
   end
 end
 
@@ -135,146 +107,14 @@ local function irc_rx(s)
   end
 end
 
--- ------------------------------------------------------------------- link
-local function ctrl_byte(b)
-  local c = gw.cmsg
-  if c.state == 0 then
-    c.typ = b; c.state = 1
-  elseif c.state == 1 then
-    c.len = b; c.buf = {}; c.state = (b > 0) and 2 or 0
-    if c.state == 0 then c.dispatch = true end
-  else
-    c.buf[#c.buf + 1] = b
-    if #c.buf >= c.len then c.state = 0; c.dispatch = true end
-  end
-  if not c.dispatch then return end
-  c.dispatch = false
-
-  if c.typ == C2S_CONNECT and #c.buf >= 1 then
-    local ch = c.buf[1]
-    local hp = ""
-    for i = 2, #c.buf do hp = hp .. string.char(c.buf[i]) end
-    ircd.ch = ch
-    ircd.hostport = hp
-    push_ctrl(S2C_OPEN, string.char(ch, 200 & 0xFF, (200 >> 8) & 0xFF, 0))
-  end
-  if c.typ == C2S_HELLO then
-    push_ctrl(S2C_HELLO, string.char(1) .. "10.0.0.1")
-  end
-  if c.typ == C2S_HANGUP and #c.buf >= 1 then gw.hangups = gw.hangups + 1 end
-  if c.typ == C2S_CLOSE and #c.buf >= 1 then
-    local ch = c.buf[1]
-    local i = 1
-    while i <= #gw.out do
-      if gw.out[i].ch == ch then table.remove(gw.out, i) else i = i + 1 end
-    end
-  end
-end
-
-local function deliver(f)
-  local o = HDR
-  while o + 2 <= FRAME do
-    local ch, len = f[o], f[o + 1]
-    if ch == CH_PAD then break end
-    if o + 2 + len > FRAME then break end
-    if ch == CH_CTRL then
-      for i = 0, len - 1 do ctrl_byte(f[o + 2 + i]) end
-    else
-      local s = {}
-      for i = 0, len - 1 do s[#s + 1] = string.char(f[o + 2 + i]) end
-      s = table.concat(s)
-      gw.upstream[ch] = (gw.upstream[ch] or "") .. s
-      if ch == ircd.ch then irc_rx(s) end
-    end
-    o = o + 2 + len
-  end
-end
-
-local function build()
-  local f = {}
-  for i = 0, FRAME - 1 do f[i] = 0 end
-  f[SEQ] = gw.tx_seq
-  f[ACK] = (gw.rx_next - 1) & 0xFF
-  f[FLAGS] = 0
-
-  local o = HDR
-  local any = false
-  while #gw.out > 0 and o + 2 < FRAME do
-    local item = gw.out[1]
-    local room = FRAME - o - 2
-    local left = #item.data - item.pos + 1
-    local n = (left < room) and left or room
-    if n <= 0 then break end
-    f[o] = item.ch; f[o + 1] = n
-    for i = 0, n - 1 do f[o + 2 + i] = item.data:byte(item.pos + i) end
-    o = o + 2 + n
-    item.pos = item.pos + n
-    if item.pos > #item.data then table.remove(gw.out, 1) end
-    any = true
-  end
-  while o < FRAME do f[o] = CH_PAD; o = o + 1 end
-  if any then f[FLAGS] = f[FLAGS] | F_DATA end
-  f[SUM] = 0
-  f[SUM] = sum_of(f)
-  return f, any
-end
-
-local function seq_le(a, b) return ((b - a) & 0xFF) < 128 end
-
-local function write_frame(f)
-  for i = 0, FRAME - 1 do wb(RXOFF + i, f[i]) end
-  wu16(0x04, ru16(0x04) + 1)
-end
-
-local function service()
-  local ss = ru16(0x02)
-  local polled = (ss ~= gw.last_snes_seq)
-  if polled then
-    gw.last_snes_seq = ss
-    local f = {}
-    for i = 0, FRAME - 1 do f[i] = rb(TXOFF + i) end
-    if f[SUM] == sum_of(f) then
-      while #gw.window > 0 and seq_le(gw.window[1].seq, f[ACK]) do
-        table.remove(gw.window, 1)
-        gw.stall = 0
-      end
-      if (f[FLAGS] & F_DATA) ~= 0 and f[SEQ] == gw.rx_next then
-        deliver(f)
-        gw.rx_next = (gw.rx_next + 1) & 0xFF
-      end
-    end
-  end
-
-  if not polled then return end
-
-  local WIN, RESEND_AFTER = 4, 12
-  gw.stall = gw.stall + 1
-  if #gw.window > 0 and gw.stall > RESEND_AFTER then
-    gw.stall = 0
-    local head = gw.window[1]
-    head.frame[ACK] = (gw.rx_next - 1) & 0xFF
-    head.frame[SUM] = 0
-    head.frame[SUM] = sum_of(head.frame)
-    write_frame(head.frame)
-  elseif #gw.window < WIN then
-    local f, any = build()
-    if any then
-      gw.window[#gw.window + 1] = { seq = gw.tx_seq, frame = f }
-      gw.tx_seq = (gw.tx_seq + 1) & 0xFF
-    end
-    write_frame(f)
-  else
-    local f = {}
-    for i = 0, FRAME - 1 do f[i] = 0 end
-    f[SEQ] = gw.tx_seq
-    f[ACK] = (gw.rx_next - 1) & 0xFF
-    f[FLAGS] = 0
-    local o = HDR
-    while o < FRAME do f[o] = CH_PAD; o = o + 1 end
-    f[SUM] = 0
-    f[SUM] = sum_of(f)
-    write_frame(f)
-  end
+-- The console dials out; the ircd answers whatever port it dialled. The
+-- request bytes accumulate in sock.rx, drained into the line parser each
+-- frame below.
+gw.on_connect = function(sock, port)
+  ircd.sock = sock
+  ircd.dst = sock.peer_ip
+  ircd.port = port
+  ircd.rx_seen = 0
 end
 
 -- ------------------------------------------------------------------ test
@@ -304,21 +144,28 @@ emu.addEventCallback(function()
 
   if not claimed then
     if frame < 200 then return end
-    wu16(0x00, MAGIC)
+    gw:claim()
     claimed = true
     at = frame + 60
     return
   end
 
-  service()
+  gw:service()
+  -- Feed the ircd whatever the client's TCP delivered since last frame.
+  if ircd.sock and #ircd.sock.rx > ircd.rx_seen then
+    local fresh = ircd.sock.rx:sub(ircd.rx_seen + 1)
+    ircd.rx_seen = #ircd.sock.rx
+    irc_rx(fresh)
+  end
   if frame < at then return end
 
   -- Launched by name, with no `run` prefix, like every other application here.
   if step == 1 then
     L.feed("irc 10.0.0.9:6667 snesbot\n")
-    -- Connect, NICK/USER, then ~1.5 KB of welcome and MOTD in one burst. That
-    -- burst is the thing being timed: it is what the repaint pacing exists for.
-    at = frame + 2600
+    -- Connect (a real handshake now), NICK/USER, then ~1.5 KB of welcome and
+    -- MOTD in one burst. That burst is the thing being timed: it is what the
+    -- repaint pacing exists for.
+    at = frame + 2720
     step = 2
     return
   end
@@ -407,11 +254,13 @@ emu.addEventCallback(function()
 
   if step == 6.75 then
     back_shot = L.display_text(0, 27)
-    -- Keepalive: the ircd now goes COMPLETELY silent. The client last heard
-    -- from it at step 4, so KEEPALIVE_FRAMES (10800) after that it must probe
-    -- with its own PING; the ircd deliberately never answers, and PONG_GRACE
-    -- (1800) later the client must declare the connection lost. Real windows,
-    -- no test backdoor — the testrunner is unthrottled, so this is wall-cheap.
+    -- Keepalive: the ircd now goes COMPLETELY silent — at the application
+    -- layer; gwip's TCP still acks, which is exactly the shape of a dead
+    -- server on a live network. The client last heard from it at step 4, so
+    -- KEEPALIVE_FRAMES (10800) after that it must probe with its own PING;
+    -- the ircd deliberately never answers, and PONG_GRACE (1800) later the
+    -- client must declare the connection lost. Real windows, no test
+    -- backdoor — the testrunner is unthrottled, so this is wall-cheap.
     ping_wait_until = frame + 14000
     at = frame + 30
     step = 6.8
@@ -451,16 +300,20 @@ emu.addEventCallback(function()
   local text = L.ring_text()
   print("--- mailbox ---"); print(text); print("---------------")
   print("--- screen ---"); print(shot or "(never sampled)"); print("--------------")
-  print(string.format("ircd: nick=%s host=%s joined=%d privmsgs=%d pongs=%d",
-        tostring(ircd.nick), tostring(ircd.hostport), #ircd.joined,
-        #ircd.privmsgs, ircd.pongs))
+  print(string.format("ircd: nick=%s dst=%s:%s joined=%d privmsgs=%d pongs=%d",
+        tostring(ircd.nick), tostring(ircd.dst), tostring(ircd.port),
+        #ircd.joined, #ircd.privmsgs, ircd.pongs))
 
   r.check(L.status() ~= L.STATUS_PANIC, "kernel panicked")
 
-  -- The connection itself: the host:port the app was given has to survive the
-  -- link intact, or nothing below this means anything.
-  r.check(ircd.hostport == "10.0.0.9:6667",
-          "gateway was asked to connect to " .. tostring(ircd.hostport))
+  -- The connection itself: the host:port the app was given has to survive
+  -- into the SYN's destination, or nothing below this means anything. This
+  -- used to be a C2S_CONNECT string; now it is where the packet went.
+  r.check(ircd.dst == "10.0.0.9" and ircd.port == 6667,
+          "the SYN went to " .. tostring(ircd.dst) .. ":" .. tostring(ircd.port))
+  r.check(gw.tcp_bad_csum == 0,
+          "the console sent " .. gw.tcp_bad_csum ..
+          " TCP segments with a bad checksum")
 
   -- Registration. No CAP LS: three networks answer that with 421 or with
   -- silence, so a client that waits for it hangs on all three.

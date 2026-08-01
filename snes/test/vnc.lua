@@ -1,9 +1,11 @@
--- Regression test for `vnc`: a Lua RFB SERVER behind the Lua gateway.
+-- Regression test for `vnc`: a Lua RFB SERVER on the far side of the console's
+-- OWN TCP (the uIP cutover: there is no stream gateway to ride any more).
 --
--- test/net.lua implements the gateway; this implements what is on the far side
--- of it, so the console runs the real RFB protocol — version handshake, security
+-- test/gwip.lua is the hermetic slirp box; this implements what is beyond it,
+-- so the console runs the real RFB protocol — version handshake, security
 -- type, SetPixelFormat, SetEncodings, FramebufferUpdate, PointerEvent — against
--- something that answers frame for frame. Nothing is stubbed below the app.
+-- something that answers frame for frame, over TCP segments the 65816 composed
+-- and checksummed itself. Nothing is stubbed below the app.
 --
 -- It exists because two bugs Ricardo reported were both invisible to every other
 -- kind of check, and both are asserted here:
@@ -52,8 +54,8 @@
 --      (0,0) must point at the tile the pan origin lands in.
 --
 --   3. ONLY THE EXPOSED STRIP IS REQUESTED. A pan that re-asks for the whole
---      48 KB window would still paint the right picture, in fourteen seconds.
---      The request log is checked rectangle by rectangle.
+--      48 KB window would still paint the right picture, in a minute or two
+--      over TCP. The request log is checked rectangle by rectangle.
 --
 --   4. A CLICK AFTER PANNING lands at pan origin + cursor, in server
 --      coordinates. That is the one that reads as a regression rather than a
@@ -89,44 +91,18 @@
 --      thing on screen that says where in the desktop the window is, so a
 --      marker that does not move is a feature that is present and useless.
 --
--- NOT part of `make test`: it is a two-minute run on its own, against an app
+-- TCP makes the bulk transfer slower than the old raw stream — a 48 KB screen
+-- is ~92 segments of 536, each a link round trip — so the waits here are gated
+-- on observable progress (requests answered, DMA quiet, the server's queues
+-- empty) rather than fixed frame counts, and the global guard is sized for the
+-- slower wire.
+--
+-- NOT part of `make test`: it is a minutes-long run on its own, against an app
 -- with no other coverage. `make test-vnc`.
 local L = dofile("test/lib.lua")
+local G = dofile("test/gwip.lua")
 
-local MB = 0xE000          -- link mailbox, WRAM $7EE000
-local MAGIC = 0x4B4C       -- "LK"
-local FRAME, HDR = 128, 4
--- Derived, not literals -- see the LINK_MB_RX note in kernel/link.h.
-local TXOFF, RXOFF = 0x10, 0x10 + FRAME
-local SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
-local F_DATA = 0x01
-local CH_CTRL, CH_PAD = 0, 0xFF
-local WRAM = emu.memType.snesWorkRam
-
-local C2S_CONNECT, C2S_HELLO, C2S_CLOSE, C2S_HANGUP = 0x07, 0x04, 0x02, 0x09
-local S2C_HELLO, S2C_OPEN, S2C_EOF = 0x84, 0x81, 0x82
-
-local function rb(o) return emu.read(MB + o, WRAM) end
-local function wb(o, v) emu.write(MB + o, v & 0xFF, WRAM) end
-local function ru16(o) return emu.read16(MB + o, WRAM) end
-local function wu16(o, v) emu.write16(MB + o, v & 0xFFFF, WRAM) end
-
-local function sum_of(f)
-  local s = 0
-  for i = 0, FRAME - 1 do if i ~= SUM then s = s + f[i] end end
-  return s & 0xFF
-end
-
-local gw = {
-  tx_seq = 0, rx_next = 0, last_snes_seq = 0, out = {},
-  cmsg = { state = 0, typ = 0, len = 0, buf = {} },
-  window = {}, stall = 0, connects = {},
-}
-
-local function push(ch, s) gw.out[#gw.out + 1] = { ch = ch, data = s, pos = 1 } end
-local function push_ctrl(typ, payload)
-  push(CH_CTRL, string.char(typ, #payload) .. payload)
-end
+local gw = G.new{}
 
 -- ------------------------------------------------------------------- RFB
 -- The framebuffer the server pretends to own. p(x,y) = 5x + 11y, so no tile
@@ -155,15 +131,13 @@ local function rebuild_fb()
 end
 rebuild_fb()
 
-local function be16(v) return string.char((v >> 8) & 0xFF, v & 0xFF) end
-local function be32(v)
-  return string.char((v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
-end
+local be16, be32 = G.be16, G.be32
 
-local rfb = { ch = nil, inbuf = "", requests = 0, nonincr = 0, pointers = {},
+local rfb = { sock = nil, inbuf = "", requests = 0, nonincr = 0, pointers = {},
               reqlog = {}, lastnoninc = nil, co = nil, done_first = false }
+local connects = {}    -- { ip=, port= } per SYN the console sent us
 
-local function rfb_send(s) push(rfb.ch, s) end
+local function rfb_send(s) rfb.sock:send(s) end
 
 local function rect(x, y, w, h, data)
   return be16(x) .. be16(y) .. be16(w) .. be16(h) .. be32(0) .. data
@@ -296,139 +270,22 @@ local function rfb_feed(s)
   end
 end
 
--- ---------------------------------------------------------------- gateway
--- The link half, from test/net.lua, with the fault injection removed and
--- C2S_CONNECT — a plain TCP stream — added, since that is the one `vnc` uses.
-local function ctrl_byte(b)
-  local c = gw.cmsg
-  if c.state == 0 then
-    c.typ = b; c.state = 1
-  elseif c.state == 1 then
-    c.len = b; c.buf = {}; c.state = (b > 0) and 2 or 0
-    if c.state == 0 then c.dispatch = true end
-  else
-    c.buf[#c.buf + 1] = b
-    if #c.buf >= c.len then c.state = 0; c.dispatch = true end
-  end
-  if c.dispatch then
-    c.dispatch = false
-    if c.typ == C2S_HELLO then
-      push_ctrl(S2C_HELLO, string.char(1) .. "10.0.0.1")
-    elseif c.typ == C2S_CONNECT and #c.buf >= 1 then
-      local ch = c.buf[1]
-      local host = ""
-      for i = 2, #c.buf do host = host .. string.char(c.buf[i]) end
-      gw.connects[#gw.connects + 1] = host
-      rfb.ch = ch
-      push_ctrl(S2C_OPEN, string.char(ch, 0, 0, 0))
-      rfb_start()
-    elseif (c.typ == C2S_CLOSE or c.typ == C2S_HANGUP) and #c.buf >= 1 then
-      local ch = c.buf[1]
-      local i = 1
-      while i <= #gw.out do
-        if gw.out[i].ch == ch then table.remove(gw.out, i) else i = i + 1 end
-      end
-    end
-  end
+-- The console dials out (SYS_NET_CONNECT -> a real SYN): the RFB server
+-- answers on whatever connection arrives. Client-to-server bytes accumulate
+-- in sock.rx; the endFrame loop below drains them into the coroutine.
+gw.on_connect = function(sock, port)
+  connects[#connects + 1] = { ip = sock.peer_ip, port = port }
+  rfb.sock = sock
+  rfb_start()
 end
 
-local function deliver(f)
-  local o = HDR
-  while o + 2 <= FRAME do
-    local ch, len = f[o], f[o + 1]
-    if ch == CH_PAD then break end
-    if o + 2 + len > FRAME then break end
-    if ch == CH_CTRL then
-      for i = 0, len - 1 do ctrl_byte(f[o + 2 + i]) end
-    elseif ch == rfb.ch then
-      local t = {}
-      for i = 0, len - 1 do t[#t + 1] = string.char(f[o + 2 + i]) end
-      rfb_feed(table.concat(t))
-    end
-    o = o + 2 + len
-  end
-end
-
-local function build()
-  local f = {}
-  for i = 0, FRAME - 1 do f[i] = 0 end
-  f[SEQ] = gw.tx_seq
-  f[ACK] = (gw.rx_next - 1) & 0xFF
-  f[FLAGS] = 0
-  local o, any = HDR, false
-  while #gw.out > 0 and o + 2 < FRAME do
-    local item = gw.out[1]
-    local room = FRAME - o - 2
-    local left = #item.data - item.pos + 1
-    local n = (left < room) and left or room
-    if n <= 0 then break end
-    f[o] = item.ch; f[o + 1] = n
-    for i = 0, n - 1 do f[o + 2 + i] = item.data:byte(item.pos + i) end
-    o = o + 2 + n
-    item.pos = item.pos + n
-    if item.pos > #item.data then table.remove(gw.out, 1) end
-    any = true
-  end
-  while o < FRAME do f[o] = CH_PAD; o = o + 1 end
-  if any then f[FLAGS] = f[FLAGS] | F_DATA end
-  f[SUM] = 0
-  f[SUM] = sum_of(f)
-  return f, any
-end
-
-local function seq_le(a, b) return ((b - a) & 0xFF) < 128 end
-
-local function write_frame(f)
-  for i = 0, FRAME - 1 do wb(RXOFF + i, f[i]) end
-  wu16(0x04, ru16(0x04) + 1)
-end
-
-local function service()
-  local ss = ru16(0x02)
-  local polled = (ss ~= gw.last_snes_seq)
-  if polled then
-    gw.last_snes_seq = ss
-    local f = {}
-    for i = 0, FRAME - 1 do f[i] = rb(TXOFF + i) end
-    if f[SUM] == sum_of(f) then
-      while #gw.window > 0 and seq_le(gw.window[1].seq, f[ACK]) do
-        table.remove(gw.window, 1); gw.stall = 0
-      end
-      if (f[FLAGS] & F_DATA) ~= 0 and f[SEQ] == gw.rx_next then
-        deliver(f)
-        gw.rx_next = (gw.rx_next + 1) & 0xFF
-      end
-    end
-  end
-  if not polled then return end
-  local WIN, RESEND_AFTER = 4, 12
-  gw.stall = gw.stall + 1
-  if #gw.window > 0 and gw.stall > RESEND_AFTER then
-    gw.stall = 0
-    local head = gw.window[1]
-    head.frame[ACK] = (gw.rx_next - 1) & 0xFF
-    head.frame[SUM] = 0
-    head.frame[SUM] = sum_of(head.frame)
-    write_frame(head.frame)
-  elseif #gw.window < WIN then
-    local f, any = build()
-    if any then
-      gw.window[#gw.window + 1] = { seq = gw.tx_seq, frame = f }
-      gw.tx_seq = (gw.tx_seq + 1) & 0xFF
-    end
-    write_frame(f)
-  else
-    local f = {}
-    for i = 0, FRAME - 1 do f[i] = 0 end
-    f[SEQ] = gw.tx_seq
-    f[ACK] = (gw.rx_next - 1) & 0xFF
-    f[FLAGS] = 0
-    local o = HDR
-    while o < FRAME do f[o] = CH_PAD; o = o + 1 end
-    f[SUM] = 0
-    f[SUM] = sum_of(f)
-    write_frame(f)
-  end
+-- Is the server still holding bytes the console has not taken? Three queues
+-- now, not one: link records (gw.out), the segment in flight (sock.unacked)
+-- and the TCP send queue behind it (sock.txq).
+local function srv_busy()
+  if #gw.out > 0 then return true end
+  local s = rfb.sock
+  return s ~= nil and (#s.txq > 0 or s.unacked ~= "")
 end
 
 -- ------------------------------------------------------- instrumentation
@@ -502,7 +359,8 @@ end
 -- of it has been read, and a full-width strip is a single 8 KB rectangle — so
 -- for hundreds of frames after the request there is no DMA at all, and a
 -- quiet-counter on its own calls that "finished" and then checks a screen the
--- data has not reached yet. So the server's queue has to be empty too.
+-- data has not reached yet. So the server's queues have to be empty too — all
+-- three of them, now that TCP holds bytes the link layer never sees.
 local dma_mark, dma_since = -1, 0
 local function settled(n, frame, busy)
   if busy or dma.total ~= dma_mark then
@@ -704,8 +562,8 @@ local pad = nil
 -- 32 pixels is four tiles, so the 224 columns (or 160 rows) that stay on screen
 -- move by rewriting the tilemap and nothing else. What is left to fetch is the
 -- strip that has never been seen: 32x192 sideways, 256x32 up and down. If any
--- of these ever reads 256x192 the pan still LOOKS right and takes fourteen
--- seconds, which is the failure this line exists to catch.
+-- of these ever reads 256x192 the pan still LOOKS right and takes a minute
+-- over TCP, which is the failure this line exists to catch.
 --
 -- The click goes in after the second pan, at origin (32,32), because a pointer
 -- event that forgets the origin is exactly right at (0,0).
@@ -755,15 +613,25 @@ emu.addEventCallback(function()
   -- wipes the magic out from under us.
   if not claimed then
     if frame < 200 then return end
-    wu16(0x00, MAGIC)
+    gw:claim()
     claimed = true
     at = frame + 60
     return
   end
 
-  service()
+  gw:service()
+  -- Drain the connection into the RFB parser. sock.rx is "everything
+  -- received"; taking it and clearing is this test's consumption.
+  if rfb.sock and #rfb.sock.rx > 0 then
+    local s = rfb.sock.rx
+    rfb.sock.rx = ""
+    rfb_feed(s)
+  end
 
-  if frame > 45000 then
+  -- 45000 was the raw-stream budget; TCP spends a link round trip per 536-byte
+  -- segment, so the initial 48 KB screen alone is ~700-1200 frames and each
+  -- pan strip ~100-200 more. Triple the guard rather than trim the margin.
+  if frame > 135000 then
     print("ring: " .. L.ring_text())
     print("RESULT FAIL vnc - timed out at step " .. tostring(step))
     emu.stop(1)
@@ -793,9 +661,14 @@ emu.addEventCallback(function()
             rfb.reqlog[1].w == VIEW_W and rfb.reqlog[1].h == VIEW_H and
             rfb.reqlog[1].x == 0 and rfb.reqlog[1].y == 0,
             "the first request was not the whole window at the origin")
-    r.check(#gw.connects == 1 and gw.connects[1] == "10.0.0.2:5900",
+    r.check(#connects == 1 and connects[1].ip == "10.0.0.2" and
+            connects[1].port == 5900,
             "the app did not connect to host:5900 (" ..
-            tostring(gw.connects[1]) .. ")")
+            (connects[1] and (connects[1].ip .. ":" .. connects[1].port)
+                          or "no connection") .. ")")
+    r.check(gw.tcp_bad_csum == 0,
+            "the console sent " .. gw.tcp_bad_csum ..
+            " TCP segments with a bad checksum")
     cursor0 = oam(0)
     print(string.format("cursor at rest: OAM x=%d y=%d high=%02X",
                         cursor0, oam(1), oam(0x200)))
@@ -901,7 +774,7 @@ emu.addEventCallback(function()
     -- has landed the app goes back to waiting on the incremental request that
     -- was already outstanding, which is the whole point of the design.
     if rfb.nonincr < pan_want then return end
-    if not settled(120, frame, #gw.out > 0) then return end
+    if not settled(120, frame, srv_busy()) then return end
     do
       local p = PANS[pan_i]
       local q = rfb.lastnoninc
@@ -951,7 +824,7 @@ emu.addEventCallback(function()
   end
 
   if step == 14 then
-    if not settled(120, frame, #gw.out > 0) then return end
+    if not settled(120, frame, srv_busy()) then return end
     do
       local p = PANS[pan_i]
       local bad, first = check_picture(p.at[1], p.at[2])

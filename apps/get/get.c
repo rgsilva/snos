@@ -130,7 +130,7 @@ int main(void) {
   uint16_t http = 0;
   int to_console, to_file_open = 0, aborted = 0, full = 0;
   /* Response parsing: 0 = status line, 1 = headers, 2 = body. */
-  int phase = 0, digits = 0, nl = 0;
+  int phase = 0, digits = 0, nl = 0, seen_sp = 0;
 
   snos_getargs(args, sizeof args);
   url = args;
@@ -250,8 +250,13 @@ int main(void) {
       for (i = 0; i < n; i++) {
         uint8_t c = buf[i];
         if (phase == 0) {
-          /* "HTTP/1.x NNN ...": collect the first run of digits. */
-          if (c >= '0' && c <= '9' && digits < 3) {
+          /* "HTTP/1.x NNN ...": the code is the digits after the first
+           * space — collecting the FIRST digit run would read the 1 and 0
+           * out of "HTTP/1.0" and report status 102, which is exactly what
+           * the first run of this parser did. */
+          if (c == ' ' && digits == 0) {
+            seen_sp = 1;
+          } else if (seen_sp && c >= '0' && c <= '9' && digits < 3) {
             http = (uint16_t)(http * 10u + (c - '0'));
             digits++;
           } else if (c == '\n') {
@@ -280,7 +285,9 @@ int main(void) {
                  * volume. */
                 budget = (uint32_t)sys_fs_free() << 10;
                 if (budget < 1024ul) {
-                  say("not enough room on the SRAM volume\n");
+                  say("not enough room on the SRAM volume (");
+                  sl_putu32(budget >> 10);
+                  say(" KB free)\n");
                   sys_net_close(ch);
                   return 1;
                 }

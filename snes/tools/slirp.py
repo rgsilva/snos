@@ -67,6 +67,11 @@ ICMP_IDLE = 15.0
 # kept open, leaked a socket and a table entry permanently.
 TCP_IDLE = 300.0
 TIME_WAIT = 4.0        # keep a closed flow's 4-tuple reserved this long
+# How long an inbound client's half-close is held back from the console, so
+# the server's reply can leave first — see the comment at the FIN in
+# _pump_tcp. Long enough for an app polling at frame rate to answer, short
+# enough that a netecho-style serve-and-hangup loop still cycles briskly.
+FIN_GRACE = 0.75
 
 
 def _ip2int(s):
@@ -137,6 +142,9 @@ class _Tcp(_Flow):
         self.sock_eof = False  # real socket reached EOF
         self.fin_sent = False
         self.closed_at = 0.0
+        self.inbound = False   # a port forward: the console is the server
+        self.eof_at = 0.0      # when sock_eof was first seen
+        self.last_from_console = 0.0  # console payload most recently arrived
 
 
 class Slirp:
@@ -528,6 +536,7 @@ class Slirp:
                 if sent < len(payload):
                     t.inbuf += payload[sent:]
                 t.rcv_nxt = (t.rcv_nxt + len(payload)) & 0xFFFFFFFF
+                t.last_from_console = time.time()
                 self._tcp_out(t, ACK)
             else:
                 # A retransmission of something already taken. Re-ack: uIP is
@@ -639,10 +648,14 @@ class Slirp:
                     if data:
                         t.outbuf += data
                     else:
+                        if not t.sock_eof:
+                            t.eof_at = now
                         t.sock_eof = True
                 except (BlockingIOError, InterruptedError):
                     pass
                 except OSError:
+                    if not t.sock_eof:
+                        t.eof_at = now
                     t.sock_eof = True
 
             if t.unacked:
@@ -663,11 +676,25 @@ class Slirp:
                 t.sent_at = now
                 t.retries = 0
             elif t.sock_eof and not t.fin_sent:
-                t.fin_sent = True
-                self._tcp_out(t, FIN | ACK, seq=t.snd_nxt)
-                t.snd_nxt = (t.snd_nxt + 1) & 0xFFFFFFFF
-                t.sent_at = now
-                t.retries = 0
+                # uIP has no CLOSE_WAIT: the FIN we forward kills BOTH
+                # directions of the console's connection at once, so a client
+                # that half-closes right after its request (printf | nc) races
+                # the server's reply — whichever of the reply segment and this
+                # FIN reaches uIP first wins. For INBOUND forwards the daemon
+                # absorbs that: hold the FIN until the console's replies have
+                # gone quiet for a moment. Outbound flows (get's end-of-body
+                # IS the far server's FIN) keep prompt EOF — the console has
+                # nothing left to say on those and the grace would only add
+                # latency to every fetch.
+                if t.inbound and now - max(t.eof_at, t.last_from_console) \
+                        < FIN_GRACE:
+                    pass
+                else:
+                    t.fin_sent = True
+                    self._tcp_out(t, FIN | ACK, seq=t.snd_nxt)
+                    t.snd_nxt = (t.snd_nxt + 1) & 0xFFFFFFFF
+                    t.sent_at = now
+                    t.retries = 0
             elif t.fin_sent and now - t.sent_at > RTO:
                 t.retries += 1
                 if t.retries > MAX_RETRIES:
@@ -748,6 +775,7 @@ class Slirp:
                 self.iss = (self.iss + 0x1000) & 0xFFFFFFFF
                 t = _Tcp(conn, key, self.iss)
                 t.state = _Tcp.SYN_SENT
+                t.inbound = True
                 t.sent_at = time.time()
                 self.tcp[key] = t
                 self._tcp_out(t, SYN, seq=t.iss)
