@@ -1,11 +1,12 @@
 /* SNOS VIEW — display a .IMG picture.
  *
  * The point of this application is how little it does. It decodes nothing,
- * scales nothing and quantises nothing: the gateway did all of that before the
- * bytes were ever stored, so viewing is a copy into VRAM and a handful of
- * register writes. A 65816 cannot decode a JPEG in any tolerable time, and it
- * does not have to — the same division of labour that puts TLS on the far side
- * of the link puts image decoding there too.
+ * scales nothing and quantises nothing: whoever MADE the .IMG did all of
+ * that, so viewing is a copy into VRAM and a handful of register writes. A
+ * 65816 cannot decode a JPEG in any tolerable time, and it does not have to
+ * — since the uIP cutover the conversion is not even on the link's path: a
+ * ready-made .IMG downloads over plain HTTP like any other file (M12's
+ * render service is the eventual factory for them).
  *
  * -------------------------------------------------------------- the display
  *

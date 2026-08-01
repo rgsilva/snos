@@ -416,25 +416,53 @@ composes and parses its own IP/TCP, resolves its own names, reaches the real
 internet through the NAT, and serves `httpd` to a connection from outside
 it.** Tier 3 keeps the original sentence, unchanged, as its done-when.
 
-**Known, and left as such.** The resolver is a single slot with a one-frame
-race: between an answer arriving and the asker reading it, a second lookup can
-overwrite it. Making the answer owned-until-released was tried and reverted —
-any path that forgets to release, or gives up waiting, then locks out every
-lookup for the life of the boot, which is a far worse failure than the race.
-The fix, when something genuinely needs two lookups at once, is a request tag
-per caller. A six-second watchdog stops a lookup whose answer never arrives
-from pinning it.
+**Known, and RESOLVED at the cutover.** The resolver's one-frame race
+(between an answer arriving and the asker reading it, a second lookup could
+overwrite it) got the request-tag fix the original note predicted:
+`ip_resolve` hands back a per-lookup tag, a superseded asker reads FAIL
+rather than somebody else's address, and a stale release is a no-op instead
+of a theft — so the owned-until-released failure mode (one forgotten release
+locking the resolver for the boot) cannot come back. The six-second watchdog
+stays. Same round: a pending by-name connect whose NAME is unusable now
+fails its channel instead of wedging every later channel's connect.
 
-Also known: uIP's own listen list has no room for a channel number, so a
-second connection to a bound port is refused rather than queued — the
-gateway-backed path got serialised accepts for free from the daemon.
+Still known, still by design: uIP's listen list has no room for a channel
+number, so a second connection to a bound port is refused (RST) rather than
+queued while one is being served; the server loops back to LISTEN between
+requests, so the refusal window is one request long.
 
-**Known and deliberate.** `SYS_NET_FETCH` still goes to the gateway: FETCH's
-value IS the gateway's brain (TLS, HTTP, image conversion), and moving it is
-M12's whole subject rather than M11 scope creep. uIP is one-segment
-stop-and-wait, so throughput per connection is ~MSS a round trip — far above
-what the emulated link delivers, and a known lever if M7's cable ever makes it
-the bottleneck.
+**The cutover (2026-08-01, the milestone's coda).** The coexistence
+scaffolding was scaffolding after all: with the stack proven, the stream
+gateway protocol was deleted whole, on both sides, one review-and-regression
+pass after M11 shipped. The control channel keeps three verbs (HELLO,
+IPFWD/IPUNFWD, plus ERR for a forward that will not bind); everything else —
+FETCH, CONNECT, LISTEN, CLOSE, HANGUP, S2C_OPEN/EOF, the HTTP status and
+image flag — is retired, numbers reserved. Consequences worth naming:
+
+- **`get` became the real thing**: an HTTP/1.0 client composing its request
+  and parsing the status line on the 65816. https is refused with its reason
+  (TLS is not a goal, ever); `file://` and in-flight image conversion died
+  with the gateway brain. A ready-made .IMG downloads over plain HTTP and
+  `view` shows it — M12's shape, arrived early. `net test` rides the same
+  path. SYS_NET_FETCH retired at ABI 12.
+- **The NMI got lighter**: build_frame packs control + IP records only, and
+  the channel rings left the NMI entirely (uIP fills, the app drains, both
+  foreground) — the ch_reuse mark/flag handoff and the per-channel in-flight
+  accounting simply ceased to exist.
+- **uIP 1.0 cannot half-close** (no CLOSE_WAIT: a FIN in ESTABLISHED FINs
+  back and kills both directions), so a client that half-closes right after
+  its request races the server's reply. Found by the migrated netecho test,
+  real on the live path too. The daemon absorbs it for INBOUND forwards —
+  the external FIN is held until the console's replies go quiet for 0.75 s
+  (slirp.py FIN_GRACE) — while outbound flows keep prompt EOF, because
+  `get`'s end-of-body IS the far server's FIN.
+- **The test rig consolidated**: test/gwip.lua is one hermetic slirp box
+  (link transport + independent TCP/DNS/ICMP peer, checksums verified in
+  Lua) and net/httpd/irc/vnc/bg/telnetd/ip all ride it.
+
+uIP remains one-segment stop-and-wait, so throughput per connection is ~MSS
+a round trip — far above what the emulated link delivers, and a known lever
+if M7's cable ever makes it the bottleneck.
 
 ### Backlog — parked deliberately, with the reason *(agreed with Ricardo 2026-07-30)*
 Not "someday" items: each was considered, costed, and put down for a stated reason. The task list
@@ -877,12 +905,16 @@ Original plan, for the record:
   remote irc. The SNES never emulates a terminal; it narrates what it did and the far
   terminal draws. Post-M11 the socket becomes a listener on the console's own stack.
 
-### M12 — Services, not proxies *(follows M11)*
+### M12 — Services, not proxies *(follows M11; half-arrived with the cutover)*
 Once the console has its own address, the gateway stops being a shim everything flows through
 and becomes **an ordinary host offering a service**. The relationship inverts: today every new
 protocol is a gateway change, because the gateway is on the path for every byte. After M11, IRC,
 plain HTTP, gopher, `httpd` and `netecho` are all direct, and the only thing still worth asking a
 helper for is what the 65816 genuinely cannot do.
+
+*(Status after the M11 cutover: the "stop being a shim" half is DONE — the daemon understands no
+protocol at all and `get` speaks its own HTTP. What remains of M12 is the render service itself
+and the on-console GIF decode below.)*
 
 Which is rendering. There is no version of this machine that lays out modern HTML — Wikipedia's
 SNES article is 735 KB of markup against a 64 KB app arena — so the render service is permanent.

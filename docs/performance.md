@@ -121,8 +121,12 @@ Reverted. A correct 590 B/s beats a broken 1820.
 
 ### Measured properly, and the earlier guess about packing was wrong
 
-A repeatable benchmark now exists: `get file:///tmp/bench.bin` fetches a fixed
-8192 bytes with no network in the path, so it times the link and nothing else.
+A repeatable benchmark existed at the time: `get file:///tmp/bench.bin`
+fetched a fixed 8192 bytes with no network in the path, so it timed the link
+and nothing else. *(Historical: `file://` died with the stream gateway at the
+uIP cutover — an equivalent rig today is `get http://...` against a local
+HTTP server, which adds TCP to the measurement, or test/gwip.lua's hermetic
+peer, which does not add wall-clock network.)*
 Three runs: 799, 800, 789 frames — **615 B/s, reproducible to about 1%**.
 
 Frame accounting over that transfer, counted in the gateway:

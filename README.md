@@ -31,14 +31,19 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | VNC — `vnc`, a Super Nintendo as a live VNC thin client | ✅ |
 | M10 — Preemptive multitasking (`run &`, `jobs`, `kill`, `fg`, notify) | ✅ |
 | M11 — Real TCP/IP: uIP on the console, user-mode NAT on the host (`ping`, `resolve`) | ✅ |
+| M11.5 — Cutover: the stream gateway protocol deleted; uIP is the only backing | ✅ |
 
 (M9 was a browser; it shipped, was superseded by `vnc` — a real browser on the
 far side of a VNC session beats a screenshot pipeline — and was deleted.)
 
 Since M11 the console runs its own IPv4 stack: it composes and parses its own
 headers, resolves its own names, and `httpd` answers connections opened from
-outside. The host daemon is a slirp-style NAT rather than a proxy — it holds
-sockets, not protocols. `net status` says which mode a session is in.
+outside. Since the cutover that followed, that stack is the *only* networking
+there is: the old stream-gateway protocol is deleted on both sides, `get` is
+a real HTTP/1.0 client (https is refused, period-correctly — TLS was never
+going to run on a 3.58 MHz 65816), and the host daemon is purely a slirp-style
+NAT — it routes the console's packets and holds inbound port-forwards, and
+understands no protocol the console speaks.
 
 ## Building
 

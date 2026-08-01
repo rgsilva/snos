@@ -16,10 +16,11 @@
  * framing bug and costs nothing at these sizes. No chunked encoding, no gzip,
  * no ranges, no conditional requests.
  *
- * What to expect: the link moves ~615 B/s, so a 4 KB page takes about seven
- * seconds, and there are three channels in total. curl and a phone fetching one
- * page work fine. A desktop browser opens six connections at once and will look
- * broken — that is the channel count, not a bug in here.
+ * What to expect: the link moves ~615 B/s, so a 4 KB page takes a few
+ * seconds. curl and a phone fetching one page work fine. A desktop browser
+ * opens six connections at once and will look broken — serving is one
+ * connection at a time by design (a second SYN is refused while one is being
+ * served; the loop re-listens between requests), not a bug in here.
  */
 #include "snos_abi.h"
 #include "snoslib.h"
