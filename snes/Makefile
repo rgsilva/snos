@@ -64,7 +64,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-vnc clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-vnc test-mc clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -119,7 +119,7 @@ $(BUILD)/snos.raw: $(KERNEL_O) calypsi/linker.scm
 # Each app is a separate link into its own ROM bank, then dropped into the
 # cartridge image at the byte offset that bank maps to. HiROM makes that
 # arithmetic trivial: SNES $C0:0000+N is ROM byte N, so bank $C8 is 0x080000.
-APPS := hello pad basic edit view get netecho httpd vnc irc telnetd
+APPS := hello pad basic edit view get netecho httpd vnc irc telnetd mc
 APP_BANK_hello := c8
 APP_BANK_pad   := c9
 APP_BANK_basic := ca
@@ -131,6 +131,7 @@ APP_BANK_httpd := d0
 APP_BANK_telnetd := d1   # the slot `web` left behind
 APP_BANK_vnc   := d2
 APP_BANK_irc   := d3
+APP_BANK_mc    := d4
 APP_AT_hello   := 0x080000
 APP_AT_pad     := 0x090000
 APP_AT_basic   := 0x0A0000
@@ -142,6 +143,7 @@ APP_AT_httpd   := 0x100000
 APP_AT_telnetd := 0x110000
 APP_AT_vnc     := 0x120000
 APP_AT_irc     := 0x130000
+APP_AT_mc      := 0x140000   # bank $d4
 # The editor needs the ABI-2 full-screen calls and says so in its header, so an
 # older kernel refuses to run it rather than failing on a missing syscall.
 APP_ABI_edit   := 2
@@ -164,6 +166,7 @@ APP_ABI_telnetd := 11
 # `irc` needs the ABI-7 stream calls: it opens a plain TCP connection and both
 # talks and listens on it. Nothing it does needs ABI 8.
 APP_ABI_irc    := 7
+APP_ABI_mc     := 12
 
 # Arena slots (M10 step 4): measured need, declared placement, build-time
 # enforcement — the app's data links inside exactly this range and the link
@@ -193,6 +196,9 @@ APP_ARENA_httpd   := 7f3c00 7f3fff
 APP_ARENA_telnetd := 7f4000 7f4fff
 APP_ARENA_irc     := 7f4000 7fffff
 APP_ARENA_vnc     := 7f0000 7fffff
+# mc shares the small-server slot with netecho/httpd: same shape (a listener
+# with modest buffers - its world is ROM, not RAM), same co-run rules.
+APP_ARENA_mc      := 7f3c00 7f3fff
 
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)
@@ -200,6 +206,12 @@ APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw
 # ROMFS lives in bank $CF; apps run $C8-$CE and continue at $D0+ (the image
 # grew past 1 MB when they did).
 ROMFS_AT := 0x0F0000
+# The baked Minecraft session (M13): banks $e0.., far from the app banks.
+# MCDATA_AT is the ROM file offset; mkmc's --base is the matching 24-bit
+# cart address, and build/mcdata.h is generated against it - the two are
+# stated together here because disagreeing silently is garbage chunks.
+MCDATA_AT := 0x200000
+MCDATA_BASE := 0xE00000
 ROMFS_SRC := $(wildcard ../romfs/*)
 
 $(BUILD)/romfs.bin: $(ROMFS_SRC) tools/mkromfs.py | $(BUILD)
@@ -222,10 +234,18 @@ $(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c $(wildcard ../apps/$(1)/*.s) \
 endef
 $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 
-$(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin tools/raw2sfc.py
-	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin
+$(BUILD)/mcdata.bin $(BUILD)/mcdata.h &: tools/mkmc.py | $(BUILD)
+	python3 tools/mkmc.py --rom $(BUILD)/mcdata.bin \
+	  --header $(BUILD)/mcdata.h --base $(MCDATA_BASE)
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc
+# mc compiles against the generated index; the app rule itself is the
+# generic template, so only the extra dependency is stated here.
+$(BUILD)/apps/mc/mc.raw: $(BUILD)/mcdata.h
+
+$(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
+	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
+
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-mc
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -313,6 +333,13 @@ test-bg: $(BUILD)/snos.sfc $(BUILD)/test/bg.lua
 test-httpd: $(BUILD)/snos.sfc $(BUILD)/test/httpd.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/httpd.lua
+
+# M13: the Minecraft server, driven by a scripted protocol-754 client. The
+# 146 KB join burst rides uIP stop-and-wait, so this is a long test - the
+# vnc class, not the netecho class.
+test-mc: $(BUILD)/snos.sfc $(BUILD)/test/mc.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mc.lua
 
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)

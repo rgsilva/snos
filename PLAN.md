@@ -985,7 +985,11 @@ to: the player's name/UUID echoed into Login Success, teleport IDs, keepalive ID
    ~100-line host prober serves those exact bytes over a real socket to a real 1.16.5 client on
    the Mac. Proves every byte before the 65816 is involved — the protocol knowledge lives in
    Python, testable at desk speed. **Done when:** a real client logs into the Python-served
-   bytes and walks the baked world.
+   bytes and walks the baked world. **DONE 2026-08-01 (`6c38c56` + one fix):** Ricardo's real
+   1.16.5 client joined, walked, punched blocks that came back, chatted. One protocol gap on
+   the first attempt — the biome codec's `depth`/`scale` floats — and the client's decoder
+   NAMED the missing keys in its disconnect screen, which is the exact failure-locality the
+   step existed to buy. 146 KB, 25 chunks, structural checks in `test-host` (mkmc_test.py).
 2. **Login on the console** — the UNIVAC bar. App `mc` (netecho-shaped): VarInt framer,
    handshake/status/login states, blobs streamed from its own ROM banks, name/UUID splice.
    **Done when:** the real client sees the SNES in its server list (MOTD and all) and completes

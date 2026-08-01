@@ -53,7 +53,8 @@ MODEL="--code-model=large --data-model=large"
 # corrupts mid-computation (see the CFLAGS comment in ../Makefile and
 # docs/calypsi-interrupt-hazard.md). Apps run with NMI live, same as the
 # kernel, so they need the same soft-multiply discipline.
-CFLAGS="--core=65816 $MODEL -O0 -Ikernel -I../apps/lib"
+# -Ibuild: generated headers (mkmc's mcdata.h index for the mc app).
+CFLAGS="--core=65816 $MODEL -O0 -Ikernel -I../apps/lib -I$BUILD"
 AFLAGS="--core=65816 --target=SNES $MODEL"
 
 sed -e "s/@BANK@/$BANK/g" -e "s/@ANEAR_LO@/$ANEAR_LO/g" \
