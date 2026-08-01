@@ -45,7 +45,7 @@ MODEL := --code-model=large --data-model=large
 # exactly that instruction. Bare 65816 emits soft _Mul16/_Div16 calls whose
 # state lives in DP pseudo-registers, which the four-direct-page scheme
 # already makes interrupt-safe. See docs/calypsi-interrupt-hazard.md.
-CFLAGS = --core=65816 $(MODEL) -O0 -I$(K) \
+CFLAGS = --core=65816 $(MODEL) -O0 -I$(K) -I$(K)/uip \
          --list-file=$(@:.o=.lst)
 AFLAGS := --core=65816 --target=SNES $(MODEL)
 # Generic clib to match the bare-target C objects (the -snes variants carry a
@@ -56,7 +56,8 @@ LNFLAGS = calypsi/linker.scm --output-format=raw --rtattr exit=simplified \
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
             $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c $(K)/net.c \
-            $(K)/link.c $(K)/link_wram.c $(K)/link_serial.c $(K)/proc.c $(K)/ip.c
+            $(K)/link.c $(K)/link_wram.c $(K)/link_serial.c $(K)/proc.c $(K)/ip.c \
+            $(K)/uip/uip.c
 KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s \
             $(K)/netasm.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
@@ -87,6 +88,12 @@ $(BUILD)/test/%.lua: test/%.lua test/lib.lua tools/mktest.py | $(BUILD)
 KERNEL_H := $(wildcard $(K)/*.h)
 
 $(BUILD)/%.o: $(K)/%.c $(KERNEL_H) | $(BUILD)
+	$(CC) -o $@ $< $(CFLAGS)
+
+# Vendored uIP (kernel/uip/). Same flags as the rest of the kernel, including
+# the no---target=snes rule: uIP does 16-bit arithmetic everywhere and every
+# multiply of it would otherwise land on the interrupt-hostile hardware ALU.
+$(BUILD)/%.o: $(K)/uip/%.c $(KERNEL_H) $(wildcard $(K)/uip/*.h) | $(BUILD)
 	$(CC) -o $@ $< $(CFLAGS)
 
 $(BUILD)/%.o: $(K)/%.s | $(BUILD)

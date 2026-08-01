@@ -870,6 +870,7 @@ static void cmd_net_status(void) {
    * here is what makes `net status` the one command that answers "what do I
    * ping / point a port-forward at". */
   if (net_ipmode()) {
+    ip_uipstat_t u;
     kcon_puts("ip 10.0.2.15 via 10.0.2.2 (slirp), dns 10.0.2.3\n");
     kcon_puts("ip rx ");
     kcon_putu(ip_stat_rx);
@@ -879,6 +880,30 @@ static void cmd_net_status(void) {
     kcon_putu(ip_stat_drop);
     kcon_puts(", desync ");
     kcon_putu(ip_stat_desync);
+    kcon_putc('\n');
+    /* The stack's own view, which answers the other half of every network
+     * question: the link moved N datagrams, and uIP made THIS of them. */
+    ip_uipstat(&u);
+    kcon_puts("uip ip ");
+    kcon_putu(u.ip_recv);
+    kcon_putc('/');
+    kcon_putu(u.ip_sent);
+    kcon_puts(" drop ");
+    kcon_putu(u.ip_drop);
+    kcon_puts(", icmp ");
+    kcon_putu(u.icmp_recv);
+    kcon_putc('/');
+    kcon_putu(u.icmp_sent);
+    kcon_puts(", tcp ");
+    kcon_putu(u.tcp_recv);
+    kcon_putc('/');
+    kcon_putu(u.tcp_sent);
+    kcon_puts(" rexmit ");
+    kcon_putu(u.tcp_rexmit);
+    kcon_puts(", udp ");
+    kcon_putu(u.udp_recv);
+    kcon_putc('/');
+    kcon_putu(u.udp_sent);
     kcon_putc('\n');
   } else {
     kcon_puts("no ip (gateway v1: streams only)\n");

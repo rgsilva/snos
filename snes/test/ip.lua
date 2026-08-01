@@ -346,6 +346,20 @@ emu.addEventCallback(function()
           "some pings timed out on a perfect link")
   r.check(text:find("ip 10.0.2.15 via 10.0.2.2", 1, true) ~= nil,
           "`net status` does not report IP mode against a v2 gateway")
+  -- uIP is the thing answering, not leftover hand-written code: the stack's
+  -- OWN counters have to show the echo request arriving and a reply leaving.
+  -- A correct reply on the wire proves only that something replied.
+  local irecv = text:match("uip ip (%d+)/(%d+)")
+  local isent = select(2, text:match("uip ip (%d+)/(%d+)"))
+  r.check(irecv ~= nil, "`net status` does not report uIP's counters")
+  r.check(tonumber(irecv or "0") >= 1,
+          "uIP processed no datagrams - the stack is linked but not running")
+  r.check(tonumber(isent or "0") >= 1,
+          "uIP sent nothing - the echo reply came from somewhere else")
+  local icrecv, icsent = text:match("icmp (%d+)/(%d+)")
+  r.check(tonumber(icsent or "0") >= 1,
+          "uIP's ICMP counter says it never replied (" ..
+          tostring(icrecv) .. "/" .. tostring(icsent) .. ")")
 
   r.finish()
 end, emu.eventType.endFrame)

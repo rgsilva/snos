@@ -62,4 +62,18 @@ extern volatile uint16_t ip_stat_tx;      /* datagrams sent */
 extern volatile uint16_t ip_stat_drop;    /* not-ours / bad header / no room */
 extern volatile uint16_t ip_stat_desync;  /* framing lost; stream resynced */
 
+/* uIP's own counters, copied out so shell.c does not have to include the
+ * stack's headers. They answer a different question from the four above: those
+ * count what the LINK did, these count what the STACK made of it — "17
+ * datagrams arrived and the stack dropped every one for a bad checksum" is a
+ * sentence only these can say. Also the honest proof that uIP is the thing
+ * answering, which a reply on the wire alone does not establish. */
+typedef struct {
+  uint16_t ip_recv, ip_sent, ip_drop, ip_chkerr;
+  uint16_t icmp_recv, icmp_sent, icmp_typeerr;
+  uint16_t tcp_recv, tcp_sent, tcp_drop, tcp_chkerr, tcp_rexmit, tcp_rst;
+  uint16_t udp_recv, udp_sent, udp_drop, udp_chkerr;
+} ip_uipstat_t;
+void ip_uipstat(ip_uipstat_t *out);
+
 #endif

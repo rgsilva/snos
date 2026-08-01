@@ -1,9 +1,8 @@
-/* IPv4 on a Super Nintendo (M11 step 1: ICMP by hand, the stack follows).
+/* IPv4 on a Super Nintendo (M11): the stack, and what feeds it.
  *
- * This file owns everything between net.c's LINK_CH_IP byte stream and the
- * protocols: datagram framing, header validation, and — for now — an ICMP
- * echo responder written out longhand. Step 2 replaces the longhand with uIP;
- * the framing, the checksum discipline and the service loop stay.
+ * This file owns everything between net.c's LINK_CH_IP byte stream and uIP:
+ * datagram framing, the service loop, the timers, and the two application
+ * callbacks through which uIP and SNOS's channels exchange bytes.
  *
  * ------------------------------------------------------------ the framing
  *
@@ -15,24 +14,38 @@
  *
  * A broken prefix is unrecoverable by inspection (nothing marks a datagram
  * boundary), which is why net_ip_read reports a peer restart explicitly and
- * why a nonsense length here drops the whole buffered stream rather than
- * trying to be clever: one desync event costs at most the ring's contents,
- * and the daemon's packets after it parse cleanly again.
+ * why a nonsense length drops the whole buffered stream rather than trying to
+ * be clever: one desync costs at most the ring's contents, and the daemon's
+ * packets after it parse cleanly again.
+ *
+ * Reassembly uses its own buffer rather than uip_buf, and the copy at the end
+ * is one MVN. uIP's single buffer is also its OUTPUT buffer, so a periodic
+ * timer firing while a datagram was half-assembled would overwrite the half
+ * — and gating the timers on "no datagram in flight" makes the stack's clock
+ * depend on the peer's, which is how a stalled sender turns into a stalled
+ * retransmission timer.
  *
  * ----------------------------------------------------------- concurrency
  *
  * ip_service runs in the FOREGROUND, from kbd_idle — never in NMI. With M10
  * both processes yield through kbd_idle, so two processes can race into it;
- * a test-and-set under NMI-off makes the second one simply skip a turn. The
- * NMI's only involvement is moving link bytes, on the other side of net.c's
+ * a test-and-set under NMI-off makes the second one skip a turn. The NMI's
+ * only involvement is moving link bytes, on the other side of net.c's
  * single-writer rings.
+ *
+ * ------------------------------------------------------------------ ICMP
+ *
+ * uIP answers echo requests itself (address swap, type 0, checksum fixup), so
+ * there is no responder here. It has no way to ORIGINATE one, though, so
+ * `ping` composes its request longhand below and intercepts the replies
+ * before uip_input sees them — uIP drops an echo reply as an unsupported
+ * type, which would make the console's own ping mysteriously never answer.
  */
 #include "ip.h"
 #include "net.h"
 #include "snos.h"
-
-/* kernel/netasm.s: ones-complement sum, not complemented, n EVEN. */
-extern uint16_t ip_sum(const uint8_t *p, uint16_t n);
+#include "link.h" /* link_mb_move: one MVN within bank $7E */
+#include "uip.h"
 
 volatile uint16_t ip_ping_replies;
 volatile uint16_t ip_ping_rtt;
@@ -42,19 +55,21 @@ volatile uint16_t ip_stat_tx;
 volatile uint16_t ip_stat_drop;
 volatile uint16_t ip_stat_desync;
 
-/* Ping bookkeeping. The id is fixed and ours; the daemon's NAT echoes it
- * back, so a reply is matched by id alone and the seq/stamp ride in the
- * payload where the far end must echo them byte-for-byte (RFC 792). */
+/* Ping bookkeeping. The id is fixed and ours; the daemon's NAT restores it on
+ * the way back (Linux rewrites the field, macOS does not), so a reply is
+ * matched by id alone and the seq and timestamp ride in the payload, which
+ * RFC 792 requires the far end to echo byte-for-byte. */
 #define PING_ID_HI 0x53u /* 'S' */
 #define PING_ID_LO 0x4Eu /* 'N' */
 static uint16_t ping_next_seq;
 
-static uint8_t pkt[IP_MTU];   /* one datagram, in or out */
-static uint16_t asm_len;      /* bytes of the length prefix seen (0..2) */
-static uint16_t asm_need;     /* datagram length once the prefix is whole */
-static uint16_t asm_got;      /* payload bytes collected so far */
+static uint8_t pkt[IP_MTU]; /* datagram reassembly; see the header comment */
+static uint16_t asm_len;    /* bytes of the length prefix seen (0..2) */
+static uint16_t asm_need;   /* datagram length once the prefix is whole */
+static uint16_t asm_got;    /* payload bytes collected so far */
 
-static uint8_t ip_busy;       /* two processes may race into ip_service */
+static uint8_t ip_busy;     /* two processes may race into ip_service */
+static uint8_t ip_started;  /* uip_init has run */
 
 /* HELLO pacing. The gateway only states its version when asked, nothing on
  * this link is unsolicited, and the bridge can claim the mailbox minutes
@@ -62,27 +77,56 @@ static uint8_t ip_busy;       /* two processes may race into ip_service */
  * version. One 2-byte record every ~2 s is the cost of autoconfiguration. */
 static uint16_t hello_last;
 
+/* uIP's periodic timer. Every connection gets a tick every half second: that
+ * is uIP's retransmission clock, its connection timeout, and the only thing
+ * that ever calls the application with uip_poll(). 30 frames is that half
+ * second on NTSC, and the counter is compared with the wrapping-safe idiom
+ * used everywhere else in this kernel. */
+#define IP_TICK_FRAMES 30u
+static uint16_t tick_last;
+
 #define R8(a) (*(volatile uint8_t *)(a))
 
-void ip_init(void) {
-  asm_len = 0;
-  asm_need = 0;
-  asm_got = 0;
-  ip_busy = 0;
-  ping_next_seq = 0;
-  hello_last = 0;
+/* ------------------------------------------------------------- datagram IO */
+
+/* Queue one datagram toward the daemon: prefix, then packet. All or nothing —
+ * net_ip_write refuses partial writes by contract, so a full ring costs the
+ * datagram (IP is allowed to drop; TCP will resend) and never poisons the
+ * stream with half a length-prefixed record. */
+static void ip_output(const uint8_t *p, uint16_t n) {
+  uint8_t pre[2];
+  if (n == 0 || (int)n + 2 > net_ip_wspace()) {
+    ip_stat_drop++;
+    return;
+  }
+  pre[0] = (uint8_t)n;
+  pre[1] = (uint8_t)(n >> 8);
+  net_ip_write(pre, 2);
+  net_ip_write(p, (int)n);
+  ip_stat_tx++;
+}
+
+/* uIP left a packet in uip_buf: put it on the wire. */
+static void ip_send_uip(void) {
+  if (uip_len > 0) {
+    ip_output(uip_buf, uip_len);
+    uip_len = 0;
+  }
 }
 
 int ip_up(void) { return net_up() && net_ipmode(); }
 
-/* Fold-and-finish helpers over the asm sum. csum_add is RFC 1071 addition;
- * csum_odd is the trailing byte ip_sum's even-count contract excludes. */
+/* ------------------------------------------------------------------- ping */
+
 static uint16_t csum_add(uint16_t a, uint16_t b) {
   uint32_t t = (uint32_t)a + (uint32_t)b;
   t = (t & 0xFFFFu) + (t >> 16);
   t = (t & 0xFFFFu) + (t >> 16);
   return (uint16_t)t;
 }
+
+/* kernel/netasm.s: ones-complement sum, uncomplemented, n EVEN. */
+extern uint16_t ip_sum(const uint8_t *p, uint16_t n);
 
 static uint16_t csum_range(const uint8_t *p, uint16_t n) {
   uint16_t s = ip_sum(p, (uint16_t)(n & ~1u));
@@ -99,22 +143,6 @@ static uint16_t get16(const uint8_t *p) {
   return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
 
-/* Queue one datagram toward the daemon: prefix, then packet. All or nothing —
- * net_ip_write refuses partial writes by contract, so a full ring costs the
- * datagram (IP is allowed to drop) and never poisons the stream. */
-static void ip_output(const uint8_t *p, uint16_t n) {
-  uint8_t pre[2];
-  if ((int)n + 2 > net_ip_wspace()) {
-    ip_stat_drop++;
-    return;
-  }
-  pre[0] = (uint8_t)n;
-  pre[1] = (uint8_t)(n >> 8);
-  net_ip_write(pre, 2);
-  net_ip_write(p, (int)n);
-  ip_stat_tx++;
-}
-
 int ip_ping_send(const uint8_t dst[4]) {
   uint8_t q[36]; /* 20 IP + 8 ICMP + 8 payload */
   uint16_t s;
@@ -122,16 +150,15 @@ int ip_ping_send(const uint8_t dst[4]) {
   q[0] = 0x45; /* IPv4, 20-byte header */
   q[1] = 0;
   put16(&q[2], 36);
-  put16(&q[4], ping_next_seq); /* id: reuse the seq; uniqueness is enough */
-  put16(&q[6], 0x4000);        /* DF, no fragments — we never fragment */
+  put16(&q[4], ping_next_seq); /* datagram id: the seq is unique enough */
+  put16(&q[6], 0x4000);        /* DF: this stack never fragments */
   q[8] = 64;                   /* TTL */
   q[9] = 1;                    /* ICMP */
   q[10] = 0;
   q[11] = 0;
   q[12] = IP_SELF0; q[13] = IP_SELF1; q[14] = IP_SELF2; q[15] = IP_SELF3;
   q[16] = dst[0]; q[17] = dst[1]; q[18] = dst[2]; q[19] = dst[3];
-  s = (uint16_t)~csum_range(q, 20);
-  put16(&q[10], s);
+  put16(&q[10], (uint16_t)~csum_range(q, 20));
   q[20] = 8; /* echo request */
   q[21] = 0;
   q[22] = 0;
@@ -139,77 +166,132 @@ int ip_ping_send(const uint8_t dst[4]) {
   q[24] = PING_ID_HI;
   q[25] = PING_ID_LO;
   put16(&q[26], ping_next_seq);
-  /* Payload: the frame stamp the reply must echo, plus a signature that
-   * makes a mangled echo visible as a wrong RTT rather than a crash. */
+  /* Payload: the frame stamp the reply must echo, plus a signature, so a
+   * mangled echo shows up as a wrong RTT rather than as nothing at all. */
   put16(&q[28], snos_frames);
   q[30] = 'S'; q[31] = 'N'; q[32] = 'O'; q[33] = 'S';
   q[34] = 0;
   q[35] = 0;
-  s = (uint16_t)~csum_range(&q[20], 16);
-  put16(&q[22], s);
+  put16(&q[22], (uint16_t)~csum_range(&q[20], 16));
   ping_next_seq++;
   ip_output(q, 36);
   return 0;
 }
 
-/* One valid-looking IPv4 packet addressed to whoever it is addressed to. */
-static void ip_input(uint8_t *p, uint16_t n) {
+/* An echo REPLY to one of ours? uIP would drop it as an unsupported ICMP
+ * type, so it is taken here first. Returns 1 if this datagram was consumed. */
+static int ping_intercept(const uint8_t *p, uint16_t n) {
   uint16_t ihl, total;
-  if (n < 20) { ip_stat_drop++; return; }
-  if ((p[0] >> 4) != 4) { ip_stat_drop++; return; }
+  const uint8_t *ic;
+  uint16_t icn;
+  if (n < 20 || (p[0] >> 4) != 4 || p[9] != 1) return 0;
   ihl = (uint16_t)((p[0] & 0x0Fu) << 2);
   total = get16(&p[2]);
-  if (ihl < 20 || total < ihl || total > n) { ip_stat_drop++; return; }
-  if (csum_range(p, ihl) != 0xFFFFu) { ip_stat_drop++; return; }
-  if (p[16] != IP_SELF0 || p[17] != IP_SELF1 || p[18] != IP_SELF2 ||
-      p[19] != IP_SELF3) {
-    ip_stat_drop++; /* not ours; point-to-point has no forwarding */
-    return;
+  if (ihl < 20 || total < ihl || total > n) return 0;
+  ic = p + ihl;
+  icn = (uint16_t)(total - ihl);
+  if (icn < 10 || ic[0] != 0) return 0;
+  if (ic[4] != PING_ID_HI || ic[5] != PING_ID_LO) return 0;
+  if (csum_range(ic, icn) != 0xFFFFu) {
+    ip_stat_drop++;
+    return 1;
   }
+  ip_ping_seq = get16(&ic[6]);
+  ip_ping_rtt = (uint16_t)(snos_frames - get16(&ic[8]));
+  ip_ping_replies++;
+  return 1;
+}
+
+/* ------------------------------------------------------ uIP application ---
+ *
+ * Nothing above the kernel calls these: uIP calls them, once per event, with
+ * uip_conn naming the connection. They are the whole bridge between the
+ * stack's world (one buffer, one segment, re-supply on retransmission) and
+ * SNOS's (a channel with two rings, drained by an application whenever it
+ * gets round to it).
+ */
+void snos_tcp_appcall(void) {
+  /* Step 4 fills this in. Until a connection can be created there is nothing
+   * to be called about, and an empty body is what keeps the stack linked and
+   * exercised — ICMP and the timers run through the same uip_process. */
+}
+
+void snos_udp_appcall(void) {
+  /* Step 3 (the resolver). */
+}
+
+void ip_uipstat(ip_uipstat_t *o) {
+#if UIP_STATISTICS
+  o->ip_recv = uip_stat.ip.recv;
+  o->ip_sent = uip_stat.ip.sent;
+  o->ip_drop = uip_stat.ip.drop;
+  o->ip_chkerr = uip_stat.ip.chkerr;
+  o->icmp_recv = uip_stat.icmp.recv;
+  o->icmp_sent = uip_stat.icmp.sent;
+  o->icmp_typeerr = uip_stat.icmp.typeerr;
+  o->tcp_recv = uip_stat.tcp.recv;
+  o->tcp_sent = uip_stat.tcp.sent;
+  o->tcp_drop = uip_stat.tcp.drop;
+  o->tcp_chkerr = uip_stat.tcp.chkerr;
+  o->tcp_rexmit = uip_stat.tcp.rexmit;
+  o->tcp_rst = uip_stat.tcp.rst;
+  o->udp_recv = uip_stat.udp.recv;
+  o->udp_sent = uip_stat.udp.sent;
+  o->udp_drop = uip_stat.udp.drop;
+  o->udp_chkerr = uip_stat.udp.chkerr;
+#else
+  uint16_t *p = (uint16_t *)o;
+  int i;
+  for (i = 0; i < (int)(sizeof *o / 2); i++) p[i] = 0;
+#endif
+}
+
+/* ----------------------------------------------------------- the service */
+
+static void ip_deliver(uint16_t n) {
   ip_stat_rx++;
+  if (ping_intercept(pkt, n)) return;
+  /* One MVN into uIP's buffer: 576 bytes of C byte-loop at -O0 would be
+   * ~57,000 cycles, a whole frame, per datagram. */
+  link_mb_move(uip_buf, pkt, n);
+  uip_len = n;
+  uip_input();
+  ip_send_uip();
+}
 
-  if (p[9] == 1) { /* ICMP */
-    uint8_t *ic = p + ihl;
-    uint16_t icn = (uint16_t)(total - ihl);
-    if (icn < 8) { ip_stat_drop++; return; }
-    if (csum_range(ic, icn) != 0xFFFFu) { ip_stat_drop++; return; }
-
-    if (ic[0] == 8) { /* echo request: answer it ourselves, longhand */
-      int i;
-      /* Swap src and dst — checksum-neutral for the IP header, so only the
-       * TTL refresh below forces a recompute. */
-      for (i = 0; i < 4; i++) {
-        uint8_t t = p[12 + i];
-        p[12 + i] = p[16 + i];
-        p[16 + i] = t;
-      }
-      p[8] = 64; /* our reply, our TTL */
-      p[10] = 0;
-      p[11] = 0;
-      put16(&p[10], (uint16_t)~csum_range(p, ihl));
-      ic[0] = 0; /* echo reply */
-      ic[2] = 0;
-      ic[3] = 0;
-      put16(&ic[2], (uint16_t)~csum_range(ic, icn));
-      ip_output(p, total);
-      return;
-    }
-    if (ic[0] == 0 && ic[4] == PING_ID_HI && ic[5] == PING_ID_LO) {
-      /* An answer to ip_ping_send: RTT from the echoed stamp. */
-      if (icn >= 10) {
-        ip_ping_seq = get16(&ic[6]);
-        ip_ping_rtt = (uint16_t)(snos_frames - get16(&ic[8]));
-        ip_ping_replies++;
-      }
-      return;
-    }
-    ip_stat_drop++; /* other ICMP: nothing to do with it yet */
-    return;
+static void ip_timers(void) {
+  int i;
+  for (i = 0; i < UIP_CONNS; i++) {
+    uip_periodic(i);
+    ip_send_uip();
   }
+#if UIP_UDP
+  for (i = 0; i < UIP_UDP_CONNS; i++) {
+    uip_udp_periodic(i);
+    ip_send_uip();
+  }
+#endif
+}
 
-  /* TCP and UDP arrive with the stack (steps 2-5). Until then they are
-   * counted, not silently lost, so a too-early test says so. */
-  ip_stat_drop++;
+void ip_init(void) {
+  asm_len = 0;
+  asm_need = 0;
+  asm_got = 0;
+  ip_busy = 0;
+  ping_next_seq = 0;
+  hello_last = 0;
+  tick_last = 0;
+  if (!ip_started) {
+    uip_ipaddr_t a;
+    ip_started = 1;
+    uip_init();
+    uip_ipaddr(a, IP_SELF0, IP_SELF1, IP_SELF2, IP_SELF3);
+    uip_sethostaddr(a);
+    uip_ipaddr(a, IP_SELF0, IP_SELF1, IP_SELF2, IP_GW3);
+    uip_setdraddr(a);
+    uip_ipaddr(a, 255, 255, 255, 0);
+    uip_setnetmask(a);
+  }
 }
 
 void ip_service(void) {
@@ -217,9 +299,9 @@ void ip_service(void) {
   uint8_t take;
 
   /* Two processes may yield through kbd_idle concurrently; the state below
-   * (reassembly, pkt[]) is single-threaded. Test-and-set under NMI-off —
-   * NMI-off only because a context switch between the test and the set is
-   * exactly the race being closed. */
+   * (reassembly, pkt[], and every byte of uIP) is single-threaded. Test-and-
+   * set under NMI-off — NMI-off only because a context switch between the
+   * test and the set is exactly the race being closed. */
   R8(0x4200) = 0x01;
   take = ip_busy;
   ip_busy = 1;
@@ -231,11 +313,10 @@ void ip_service(void) {
     return;
   }
 
-  /* Ask the gateway what it is, until it answers. net_gw_version is zeroed
-   * at boot and again on a peer restart, so this also re-arms IP mode after
-   * the daemon bounces — the new process states its own capabilities. */
-  if (net_gw_version == 0 &&
-      (uint16_t)(snos_frames - hello_last) > 120u) {
+  /* Ask the gateway what it is, until it answers. net_gw_version is zeroed at
+   * boot and again on a peer restart, so this also re-arms IP mode after the
+   * daemon bounces — the new process states its own capabilities. */
+  if (net_gw_version == 0 && (uint16_t)(snos_frames - hello_last) > 120u) {
     hello_last = snos_frames;
     net_hello();
   }
@@ -262,19 +343,25 @@ void ip_service(void) {
     if (n == 0) break;
     asm_got = (uint16_t)(asm_got + (uint16_t)n);
     if (asm_got == asm_need) {
-      ip_input(pkt, asm_need);
       asm_len = 0;
+      ip_deliver(asm_need);
     }
+  }
+
+  if ((uint16_t)(snos_frames - tick_last) >= IP_TICK_FRAMES) {
+    tick_last = snos_frames;
+    ip_timers();
   }
 
   ip_busy = 0;
   return;
 
 desync:
-  /* Either the peer restarted mid-datagram (net_ip_read said so) or a length
-   * prefix made no sense. Same cure both times: drop everything buffered and
-   * start clean at the next prefix the daemon writes. Counted, because a
-   * desync that happens more than once per gateway restart is a bug. */
+  /* Either the peer restarted mid-datagram (net_ip_read says so explicitly)
+   * or a length prefix made no sense. Same cure both times: drop everything
+   * buffered and start clean at the next prefix the daemon writes. Counted,
+   * because a desync that happens more than once per gateway restart is a
+   * bug rather than a fact of life. */
   ip_stat_desync++;
   asm_len = 0;
   while (net_ip_read(pkt, IP_MTU) > 0) {
