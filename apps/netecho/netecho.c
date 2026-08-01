@@ -30,7 +30,7 @@ int main(void) {
   port = sl_parse_port(args, 7777);
 
   if (!sys_net_up()) {
-    sys_puts("no gateway attached\n");
+    sys_puts("no link attached\n");
     return 1;
   }
 

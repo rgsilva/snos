@@ -2,7 +2,8 @@
  *
  *     telnetd [PORT]        default 2323
  *
- * Run it in the background (`telnetd &`) and `telnet <gateway> 2323` from
+ * Run it in the background (`telnetd &`) and `telnet <the address net status
+ * prints> 2323` from
  * anywhere: you get the console's screen, live, and your keystrokes go into
  * the same input queue the on-screen keyboard uses. Both ends see everything
  * — remote and real console mirror each other — because this is a MIRROR,
@@ -142,7 +143,7 @@ int main(void) {
   port = sl_parse_port(args, 2323);
 
   if (!sys_net_up()) {
-    sys_puts("no gateway attached\n");
+    sys_puts("no link attached\n");
     return 1;
   }
   ch = sys_net_listen(port);

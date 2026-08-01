@@ -1638,7 +1638,7 @@ int main(void) {
     return 1;
   }
   if (!sys_net_up()) {
-    say("no gateway attached\n");
+    say("no link attached\n");
     return 1;
   }
 

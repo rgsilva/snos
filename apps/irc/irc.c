@@ -73,9 +73,11 @@
 #define USERS_MAX 48
 #define USER_LEN 16
 
-/* How long to wait for the gateway to report the connection open. Twenty
- * seconds is the gateway's own socket timeout, so anything past that is the
- * reply not crossing the link rather than the server being slow. */
+/* How long to wait for the connection to open: the console's own DNS lookup
+ * plus uIP's SYN (and its half-second retransmissions) through the NAT.
+ * Twenty-five seconds is comfortably past uIP giving up on an unreachable
+ * host, so anything longer is the reply not crossing the link rather than
+ * the server being slow. */
 #define OPEN_DEADLINE 1500u
 
 /* Keepalive. Answering the server's PINGs (below) is what keeps the SERVER
@@ -1180,7 +1182,7 @@ int main(void) {
   sl_hostport(hostport, sizeof hostport, hostarg, ":6667");
 
   if (!sys_net_up()) {
-    sys_puts("no gateway attached\n");
+    sys_puts("no link attached\n");
     return 1;
   }
 
