@@ -41,6 +41,7 @@
 #include "net.h"
 #include "link.h"
 #include "proc.h"
+#include "ip.h"
 /* proc_lock (M10 review): the txq record appends and channel scan-and-claim
  * below are run BOTH by the shell directly and by background syscalls. A
  * context switch mid-record interleaves two control records and desyncs the
@@ -108,6 +109,10 @@ static uint8_t ch_app[NET_CHANNELS];
  * come back: a connection ending returns them to LISTEN rather than freeing
  * them, so a server is a loop and the port survives between requests. */
 static uint8_t ch_listen[NET_CHANNELS];
+/* M11: this channel's bytes belong to the local stack, not to the gateway.
+ * The NMI must never pack its txring (uIP consumes it in the foreground) and
+ * the gateway is never told about it. */
+static uint8_t ch_stack[NET_CHANNELS];
 
 /* Listen-channel reuse handoff, NMI -> foreground. When the gateway reuses an
  * EOF channel for the next connection, the old connection's undrained receive
@@ -434,6 +439,81 @@ int net_ip_write(const uint8_t *src, int n) {
   return n;
 }
 
+/* ------------------------------------------------- stack-backed channels */
+
+int net_stack_is(int ch) {
+  return (ch > 0 && ch < NET_CHANNELS) ? ch_stack[ch] : 0;
+}
+
+int net_stack_claim(void) {
+  int ch;
+  proc_lock();
+  for (ch = 1; ch < NET_CHANNELS; ch++)
+    if (ch_state[ch] == NET_ST_FREE) break;
+  if (ch >= NET_CHANNELS) {
+    proc_unlock();
+    return -1;
+  }
+  /* Same NMI bracket as net_open: the indices below have the NMI as their
+   * other writer for a gateway channel, and this one is only stack-backed
+   * from the moment ch_stack is set. */
+  NET_NMI_OFF();
+  ring_head[ch] = 0;
+  ring_tail[ch] = 0;
+  txring_head[ch] = 0;
+  txring_tail[ch] = 0;
+  txframe_ch[ch] = 0;
+  ch_reuse[ch] = 0;
+  ch_flags[ch] = 0;
+  ch_http[ch] = 0;
+  ch_listen[ch] = 0;
+  ch_stack[ch] = 1;
+  ch_state[ch] = NET_ST_OPENING;
+  NET_NMI_ON();
+  proc_unlock();
+  return ch;
+}
+
+void net_stack_setstate(int ch, int st) {
+  if (ch > 0 && ch < NET_CHANNELS && ch_state[ch] != NET_ST_FREE)
+    ch_state[ch] = (uint8_t)st;
+}
+
+int net_stack_rxfree(int ch) {
+  if (ch <= 0 || ch >= NET_CHANNELS) return 0;
+  return (int)ring_free(ch);
+}
+
+int net_stack_rxput(int ch, const uint8_t *p, int n) {
+  if (ch <= 0 || ch >= NET_CHANNELS) return 0;
+  return ring_put(ch, p, n);
+}
+
+int net_stack_txused(int ch) {
+  if (ch <= 0 || ch >= NET_CHANNELS) return 0;
+  return (int)((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1));
+}
+
+int net_stack_txcopy(int ch, uint8_t *dst, int max) {
+  uint16_t t, avail, n, first;
+  if (ch <= 0 || ch >= NET_CHANNELS || max <= 0) return 0;
+  avail = (uint16_t)((txring_head[ch] - txring_tail[ch]) & (NET_TXRING - 1));
+  if (avail == 0) return 0;
+  n = ((uint16_t)max < avail) ? (uint16_t)max : avail;
+  t = txring_tail[ch];
+  first = (uint16_t)(NET_TXRING - t);
+  if (first > n) first = n;
+  ring_move(dst, &txring[ch][t], first);
+  if (first < n) ring_move(dst + first, &txring[ch][0], (uint16_t)(n - first));
+  return (int)n;
+}
+
+void net_stack_txdrop(int ch, int n) {
+  if (ch <= 0 || ch >= NET_CHANNELS || n <= 0) return;
+  txring_tail[ch] =
+      (uint16_t)((txring_tail[ch] + (uint16_t)n) & (NET_TXRING - 1));
+}
+
 int net_read(int ch, uint8_t __far *dst, int max) {
   uint16_t t, avail, n, first;
   if (ch < 0 || ch >= NET_CHANNELS) return 0;
@@ -613,7 +693,21 @@ int net_write(int ch, const uint8_t *src, int n) {
 /* A plain TCP stream, as opposed to net_fetch's "do an HTTP request for me".
  * The gateway still owns DNS and the socket; what is new is that the bytes in
  * both directions are ours. */
-int net_connect(const char *hostport) { return net_open(hostport, C2S_CONNECT); }
+int net_connect(const char *hostport) {
+  /* THE SWITCH. Same call, same return value, same state machine above it —
+   * but when the gateway is a slirp box, the socket is uIP's and the bytes
+   * never become a control record. An application cannot tell, which is what
+   * makes M11 a re-backing rather than a new ABI. */
+  if (ip_up()) {
+    int ch = ip_connect(hostport);
+    if (ch >= 0) return ch;
+    /* Falling back to the gateway on failure would be worse than failing:
+     * half the app's connections would silently take a different path with
+     * different semantics, and the one that broke would be unreproducible. */
+    return -1;
+  }
+  return net_open(hostport, C2S_CONNECT);
+}
 
 /* End the current connection but keep the port.
  *
@@ -695,6 +789,27 @@ int net_hello(void) {
 void net_close(int ch) {
   if (ch < 1 || ch >= NET_CHANNELS) return;
   proc_lock();
+  /* A stack channel has no counterpart at the gateway to tell: the socket
+   * that matters is uIP's, and it is torn down here. Done BEFORE the state
+   * goes FREE so ip_close can still find the connection by channel. */
+  if (ch_stack[ch]) {
+    ip_close(ch);
+    ch_stack[ch] = 0;
+    NET_NMI_OFF();
+    ch_state[ch] = NET_ST_FREE;
+    ring_head[ch] = 0;
+    ring_tail[ch] = 0;
+    ch_reuse[ch] = 0;
+    ch_flags[ch] = 0;
+    ch_app[ch] = 0;
+    ch_listen[ch] = 0;
+    txring_head[ch] = 0;
+    txring_tail[ch] = 0;
+    txframe_ch[ch] = 0;
+    NET_NMI_ON();
+    proc_unlock();
+    return;
+  }
   if (ch_state[ch] != NET_ST_FREE && txq_space() >= 3) {
     txq_put(C2S_CLOSE);
     txq_put(1);
@@ -923,6 +1038,10 @@ static void build_frame(void) {
        * head==tail there anyway; this is the guarantee that stale ring
        * content cannot reach the wire even if that ever regresses. */
       if (ch_state[ch] == NET_ST_FREE) continue;
+      /* ...nor a stack-backed one. Those bytes are for uIP to put in a TCP
+       * segment; sending them raw as well would deliver every byte twice,
+       * once as a stream record the gateway forwards to nothing. */
+      if (ch_stack[ch]) continue;
       if (have <= 0 || room <= 0) continue;
       if (have > room) have = room;
       if (have > 255) have = 255;

@@ -93,6 +93,32 @@ extern volatile uint16_t net_stat_refused;
  * gateway claims IP support with its HELLO version (>= 2), and until it does
  * the kernel never puts a LINK_CH_IP record on the wire. */
 int net_ipmode(void); /* gateway speaks IP (slirp): HELLO version >= 2 */
+
+/* ---- channels backed by the STACK rather than by the gateway -------------
+ *
+ * A channel is a pair of rings and a state; who fills them is a detail an
+ * application never sees. Before M11 the gateway held the socket and the NMI
+ * moved the bytes; a stack-backed channel has uIP on this side of the wire
+ * and the FOREGROUND (ip_service) moving them instead. SYS_NET_CONNECT and
+ * everything above it are unchanged, which is the point — `irc` runs over
+ * the console's own TCP without a line of its own changing.
+ *
+ * The ring contracts hold either way. For a stack channel BOTH indices of
+ * each ring are written by the foreground, which is strictly safer than the
+ * NMI/foreground split it replaces; the one thing that must not happen is
+ * the NMI also packing such a channel's txring, and build_frame skips them
+ * for exactly that reason. */
+int net_stack_claim(void);   /* a free channel, marked stack-backed, or -1 */
+int net_stack_is(int ch);
+void net_stack_setstate(int ch, int st);
+int net_stack_rxfree(int ch);
+int net_stack_rxput(int ch, const uint8_t *p, int n); /* 1 ok, 0 = no room */
+int net_stack_txused(int ch);
+/* Copy up to `max` unsent bytes out WITHOUT consuming them: uIP needs the
+ * same bytes again on a retransmission, and only an acknowledgement is
+ * permission to forget them. */
+int net_stack_txcopy(int ch, uint8_t *dst, int max);
+void net_stack_txdrop(int ch, int n);
 /* Drain received IP-stream bytes. Returns bytes moved, 0 for none — and -1
  * exactly ONCE after a peer restart: the length-prefixed datagram framing
  * broke mid-stream when the peer died, so the caller must reset its

@@ -65,6 +65,20 @@ int ip_resolve(const char *name); /* start a lookup: 0 ok, -1 busy/not up */
 int ip_resolve_state(void);
 void ip_resolve_addr(uint8_t out[4]); /* valid while state == IP_RES_OK */
 
+/* ---- TCP, behind the existing ABI ----------------------------------------
+ *
+ * net_connect() calls ip_connect() when the gateway is a slirp box, and the
+ * channel it returns behaves exactly as a gateway-backed one does: OPENING
+ * until the handshake completes, then OPEN, then EOF or ERROR. Applications
+ * are not aware any of this happened.
+ *
+ * `hostport` is "host:port", the same string SYS_NET_CONNECT already takes;
+ * a name is resolved by the console (asynchronously — the channel simply
+ * stays OPENING while that happens). */
+int ip_connect(const char *hostport); /* -> channel, or -1 */
+void ip_close(int ch);                /* abort/close whatever holds it */
+int ip_listen(int ch, uint16_t port); /* bind a port to a channel (step 5) */
+
 /* ---- ping, for the shell -------------------------------------------------
  * The console composes a real ICMP echo request and parses the real reply;
  * the RTT rides in the echoed payload as a frame-counter stamp. (The long-

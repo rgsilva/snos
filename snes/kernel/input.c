@@ -314,7 +314,6 @@ void kbd_idle(void) {
    * cycles whenever anything waits — which is most of every second. It
    * guards itself against the two processes arriving at once, and it is NOT
    * foreground-gated: a background server's packets matter exactly as much. */
-  ip_service();
   /* Display work belongs to the FOREGROUND process only. A background
    * process yielding through here used to run con_flush concurrently with
    * the shell's own printing — two writers in the console's row buffers and
@@ -324,6 +323,7 @@ void kbd_idle(void) {
     osk_redraw();
     con_flush();
   }
+  ip_service();
 }
 
 int kbd_getchar(void) {

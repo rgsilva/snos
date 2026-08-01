@@ -45,7 +45,15 @@
 #include "net.h"
 #include "snos.h"
 #include "link.h" /* link_mb_move: one MVN within bank $7E */
+#include "proc.h"
 #include "uip.h"
+
+/* uIP's own send buffer, inside uip_buf. It is a global with external
+ * linkage that uip.h happens not to declare, and uip_send() is written to
+ * support exactly this use — `if (data != uip_sappdata) memcpy(...)` — so
+ * assembling a segment directly here skips a 536-byte copy that would cost
+ * ~50,000 cycles at -O0 on every single segment. */
+extern void *uip_sappdata;
 
 volatile uint16_t ip_ping_replies;
 volatile uint16_t ip_ping_rtt;
@@ -210,10 +218,103 @@ static int ping_intercept(const uint8_t *p, uint16_t n) {
  * SNOS's (a channel with two rings, drained by an application whenever it
  * gets round to it).
  */
+/* Move as much of the channel's send queue into this segment as uIP will
+ * take. The bytes go STRAIGHT into uIP's own send buffer: uip_send memcpys
+ * unless the pointer it is given is already uip_sappdata, so writing there
+ * turns a 536-byte copy at ~100 cycles a byte into one MVN at ~7.
+ *
+ * The queue is NOT consumed. uIP asks for the same bytes again on a
+ * retransmission, and an acknowledgement is the only thing that makes them
+ * safe to forget. */
+static void tcp_fill(uint8_t ch, uip_tcp_appstate_t *s, int max) {
+  int n;
+  if (max > UIP_TCP_MSS) max = UIP_TCP_MSS;
+  if (max <= 0) return;
+  n = net_stack_txcopy(ch, (uint8_t *)uip_sappdata, max);
+  if (n > 0) {
+    s->sent = (uint16_t)n;
+    uip_send(uip_sappdata, n);
+  }
+}
+
 void snos_tcp_appcall(void) {
-  /* Step 4 fills this in. Until a connection can be created there is nothing
-   * to be called about, and an empty body is what keeps the stack linked and
-   * exercised — ICMP and the timers run through the same uip_process. */
+  uip_tcp_appstate_t *s = &uip_conn->appstate;
+  uint8_t ch = s->ch;
+
+  /* An orphan: the application closed its channel while the connection was
+   * still live, so there is nowhere to put anything. Abort rather than let
+   * uIP keep a connection nobody can read. */
+  if (ch == 0xFFu) {
+    uip_abort();
+    return;
+  }
+
+  if (uip_connected()) {
+    net_stack_setstate(ch, NET_ST_OPEN);
+    s->sent = 0;
+  }
+
+  /* Death, in the three shapes uIP reports it. The channel keeps its state
+   * for the application to read; only the binding is dropped, so a later
+   * event on this connection cannot reach a channel that has since been
+   * reused by somebody else. */
+  if (uip_aborted() || uip_timedout()) {
+    net_stack_setstate(ch, NET_ST_ERROR);
+    s->ch = 0xFFu;
+    return;
+  }
+  if (uip_closed()) {
+    net_stack_setstate(ch, NET_ST_EOF);
+    s->ch = 0xFFu;
+    return;
+  }
+
+  /* Inbound first, and before anything writes to uip_sappdata: on a data
+   * segment the received bytes and the send buffer are the same memory. */
+  if (uip_newdata() && uip_datalen() > 0) {
+    if (!net_stack_rxput(ch, (const uint8_t *)uip_appdata, (int)uip_datalen())) {
+      /* The application is not draining. Close the receive window instead of
+       * dropping: uIP will advertise zero and the peer stops, which is
+       * backpressure all the way through to the far side's TCP — the same
+       * discipline the stream rings already use. */
+      uip_stop();
+    }
+  }
+
+  if (uip_acked()) {
+    net_stack_txdrop(ch, (int)s->sent);
+    s->sent = 0;
+  }
+
+  /* A retransmission must carry EXACTLY the bytes the lost segment did. They
+   * are still at the tail of the ring precisely because nothing acknowledged
+   * them. */
+  if (uip_rexmit()) {
+    if (s->sent > 0) {
+      int n = net_stack_txcopy(ch, (uint8_t *)uip_sappdata, (int)s->sent);
+      if (n > 0) uip_send(uip_sappdata, n);
+    }
+    return;
+  }
+
+  if (uip_connected() || uip_newdata() || uip_acked() || uip_poll()) {
+    if (s->sent == 0) {
+      int have = net_stack_txused(ch);
+      if (have > 0) {
+        tcp_fill(ch, s, have);
+      } else if (s->closing) {
+        /* Everything queued has been acknowledged, so the FIN cannot
+         * overtake data the far end still needs. */
+        uip_close();
+      }
+    }
+  }
+
+  /* Reopen the window once the application has read enough for a whole
+   * segment. Without this the connection stays stopped forever and looks
+   * exactly like a hung server. */
+  if (uip_stopped(uip_conn) && net_stack_rxfree(ch) >= UIP_TCP_MSS)
+    uip_restart();
 }
 
 /* ------------------------------------------------------------------- DNS */
@@ -390,6 +491,166 @@ void ip_uipstat(ip_uipstat_t *o) {
 #endif
 }
 
+/* ------------------------------------------------------- connect / close */
+
+/* A connection that cannot be made until a name is resolved. One slot per
+ * channel rather than one queue: the resolver serialises the lookups anyway,
+ * and a per-channel slot means a slow lookup for one application cannot lose
+ * another application's request. */
+#define PEND_HOST_MAX 48
+static struct {
+  char host[PEND_HOST_MAX + 1];
+  uint16_t port;
+  uint8_t busy;     /* a connect is waiting on this channel */
+  uint8_t resolving; /* ...and its name is with the resolver right now */
+} pend[NET_CHANNELS];
+
+static struct uip_conn *conn_for(int ch) {
+  int i;
+  for (i = 0; i < UIP_CONNS; i++)
+    if (uip_conns[i].tcpstateflags != UIP_CLOSED &&
+        uip_conns[i].appstate.ch == (uint8_t)ch)
+      return &uip_conns[i];
+  return 0;
+}
+
+static int start_connect(int ch, const uint8_t a[4], uint16_t port) {
+  uip_ipaddr_t ip;
+  struct uip_conn *c;
+  uip_ipaddr(ip, a[0], a[1], a[2], a[3]);
+  c = uip_connect(&ip, HTONS(port));
+  if (c == 0) return -1;
+  c->appstate.ch = (uint8_t)ch;
+  c->appstate.sent = 0;
+  c->appstate.closing = 0;
+  /* Send the SYN NOW. uip_connect only creates the connection: the segment
+   * itself goes out of the SYN_SENT arm of the periodic timer, so without
+   * this every connection on this machine would begin with up to half a
+   * second of nothing — and uIP would count its own first SYN as a
+   * retransmission, which is how this was noticed. */
+  uip_periodic_conn(c);
+  ip_send_uip();
+  return 0;
+}
+
+/* Split "host:port". Returns the port, or 0 when there is none — every
+ * caller of this ABI has always been required to give one. */
+static uint16_t split_hostport(const char *s, char *host, int cap) {
+  int i = 0;
+  uint16_t port = 0;
+  int any = 0;
+  while (s[i] && s[i] != ':' && i < cap - 1) {
+    host[i] = s[i];
+    i++;
+  }
+  host[i] = 0;
+  if (s[i] != ':') return 0;
+  i++;
+  while (s[i] >= '0' && s[i] <= '9') {
+    port = (uint16_t)(port * 10u + (uint16_t)(s[i] - '0'));
+    i++;
+    any = 1;
+  }
+  return any ? port : 0;
+}
+
+static int parse_dotted(const char *s, uint8_t out[4]) {
+  int i, k = 0;
+  for (i = 0; i < 4; i++) {
+    uint16_t v = 0;
+    int any = 0;
+    while (s[k] >= '0' && s[k] <= '9') {
+      v = (uint16_t)(v * 10u + (uint16_t)(s[k] - '0'));
+      if (v > 255) return -1;
+      k++;
+      any = 1;
+    }
+    if (!any) return -1;
+    out[i] = (uint8_t)v;
+    if (i < 3) {
+      if (s[k] != '.') return -1;
+      k++;
+    }
+  }
+  return s[k] == 0 ? 0 : -1;
+}
+
+int ip_connect(const char *hostport) {
+  char host[PEND_HOST_MAX + 1];
+  uint8_t a[4];
+  uint16_t port;
+  int ch, i;
+  if (!ip_up()) return -1;
+  port = split_hostport(hostport, host, (int)sizeof host);
+  if (port == 0) return -1;
+  ch = net_stack_claim();
+  if (ch < 0) return -1;
+
+  if (parse_dotted(host, a) == 0) {
+    if (start_connect(ch, a, port) < 0) {
+      net_close(ch);
+      return -1;
+    }
+    return ch;
+  }
+  /* A name. The channel stays OPENING while the resolver works, which is a
+   * state the application already knows how to wait in. */
+  for (i = 0; i < PEND_HOST_MAX && host[i]; i++) pend[ch].host[i] = host[i];
+  pend[ch].host[i] = 0;
+  pend[ch].port = port;
+  pend[ch].resolving = 0;
+  pend[ch].busy = 1;
+  return ch;
+}
+
+void ip_close(int ch) {
+  struct uip_conn *c = conn_for(ch);
+  pend[ch & (NET_CHANNELS - 1)].busy = 0;
+  if (c == 0) return;
+  /* Unbind FIRST: uip_abort runs the appcall, and an appcall that still
+   * believed in this channel would write into rings net_close is clearing. */
+  c->appstate.ch = 0xFFu;
+  uip_conn = c;
+  uip_abort();
+  ip_send_uip();
+}
+
+/* Advance whatever is waiting on a name. Called once per service pass. */
+static void pend_service(void) {
+  int i;
+  for (i = 1; i < NET_CHANNELS; i++) {
+    if (!pend[i].busy) continue;
+    if (pend[i].resolving) {
+      int st = ip_resolve_state();
+      if (st == IP_RES_BUSY) return; /* still working; nobody else may start */
+      pend[i].resolving = 0;
+      pend[i].busy = 0;
+      if (st == IP_RES_OK) {
+        uint8_t a[4];
+        ip_resolve_addr(a);
+        if (start_connect(i, a, pend[i].port) < 0)
+          net_stack_setstate(i, NET_ST_ERROR);
+      } else {
+        net_stack_setstate(i, NET_ST_ERROR);
+      }
+      continue;
+    }
+    if (ip_resolve(pend[i].host) == 0) {
+      pend[i].resolving = 1;
+      return; /* one lookup at a time */
+    }
+    /* The resolver is busy with somebody else's name: try again next pass. */
+    return;
+  }
+}
+
+int ip_listen(int ch, uint16_t port) {
+  /* Step 5. */
+  (void)ch;
+  (void)port;
+  return -1;
+}
+
 /* ----------------------------------------------------------- the service */
 
 static void ip_deliver(uint16_t n) {
@@ -492,9 +753,29 @@ void ip_service(void) {
     }
   }
 
+  pend_service();
+
   if ((uint16_t)(snos_frames - tick_last) >= IP_TICK_FRAMES) {
     tick_last = snos_frames;
     ip_timers();
+  }
+
+  /* Poll every live connection every pass, not only on the half-second
+   * timer. uip_poll is the ONLY event that lets a connection send data the
+   * application queued while nothing was arriving — waiting for the periodic
+   * would put half a second between `sys_net_write` and the segment leaving,
+   * on every request an application makes. */
+  {
+    int i;
+    for (i = 0; i < UIP_CONNS; i++) {
+      if (uip_conns[i].tcpstateflags == UIP_CLOSED) continue;
+      if (uip_conns[i].appstate.ch == 0xFFu) continue;
+      if (net_stack_txused(uip_conns[i].appstate.ch) == 0 &&
+          !uip_conns[i].appstate.closing)
+        continue; /* nothing to say; do not spend a uip_process on it */
+      uip_poll_conn(&uip_conns[i]);
+      ip_send_uip();
+    }
   }
 
   ip_busy = 0;

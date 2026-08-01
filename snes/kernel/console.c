@@ -19,6 +19,7 @@
  */
 #include <stdint.h>
 #include "console.h"
+#include "proc.h" /* proc_lock: the vblank window below is not preemptible */
 /* font8x8_basic.h is consumed by tools/mkfont.py at build time, not here. */
 
 #define R8(a) (*(volatile uint8_t *)(a))
@@ -288,6 +289,22 @@ void con_flush(void) {
     }
 
     con_publish();
+    /* FROM HERE TO THE UNLOCK, NO CONTEXT SWITCH.
+     *
+     * NMI fires at the top of vblank — which is precisely the window this
+     * loop waits for — and since M10 the NMI shim may switch processes on its
+     * way out. A switch landing here suspends the flush mid-window; by the
+     * time this process is scheduled again vblank is long gone, the check
+     * inside the loop breaks out, and the rows stay dirty. That alone would
+     * only cost a frame, except that NMI defers net_service while any row is
+     * dirty (traps.c): the console never goes clean, so the link never gets
+     * serviced again. A background process starting was enough to make it
+     * permanent — 100% of flushes missed the window, the link stopped dead,
+     * and the shell went on looking perfectly healthy.
+     *
+     * proc_lock pins the SCHEDULER without masking NMI, which is exactly the
+     * distinction needed: the vblank timing this loop depends on IS NMI. */
+    proc_lock();
     while (R8(0x4212) & 0x80) ;
     while (!(R8(0x4212) & 0x80)) ;                    /* into vblank */
     if (vofs_dirty) { set_vofs(); vofs_dirty = 0; }
@@ -315,6 +332,7 @@ void con_flush(void) {
         if (!(R8(0x4212) & 0x80)) break;
         dirty[rows[i]] = 0;
     }
+    proc_unlock();
     /* A notify that arrived after this flush built row 0's buffer would have
      * its dirty bit consumed just above and nothing else may ever repaint an
      * idle row 0 — re-arm so the NEXT flush draws the cell. */

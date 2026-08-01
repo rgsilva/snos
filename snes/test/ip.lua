@@ -185,6 +185,12 @@ local function service()
   end
 end
 
+-- Declared HERE, before the packet handlers, because Lua closes over locals
+-- only if they already exist: with `local frame` further down, every handler
+-- below silently read a nil global instead and any frame-number assertion
+-- measured nothing.
+local frame = 0
+
 -- ------------------------------------------------------------- IP helpers
 -- Packets are Lua strings of raw bytes; offsets below are 1-based.
 
@@ -294,6 +300,116 @@ local function handle_udp(p, ihl, src, dst)
   send_dgram(ip .. udp)
 end
 
+-- ------------------------------------------------------------------- TCP
+-- A peer for the console's OWN TCP: three-way handshake, sequence
+-- arithmetic, an HTTP-shaped answer and a close. Written here rather than
+-- reusing tools/slirp.py on purpose -- the console's stack and the daemon
+-- must not be able to share a misunderstanding about the wire format.
+local BODY = "HELLO FROM REAL TCP\n"
+local RESPONSE = "HTTP/1.0 200 OK\r\nContent-Length: " .. #BODY ..
+                 "\r\nConnection: close\r\n\r\n" .. BODY
+local tcp = {}                 -- keyed by the console's source port
+local tcp_requests = 0         -- complete requests received
+local tcp_syns = 0
+local syn_frame = nil          -- when the first SYN arrived
+local connect_typed = nil      -- when `debug send` was typed
+
+local function be32(v)
+  return string.char((v >> 24) & 0xFF, (v >> 16) & 0xFF,
+                     (v >> 8) & 0xFF, v & 0xFF)
+end
+
+local function quad(s)
+  local a, b, c, d = s:match("(%d+)%.(%d+)%.(%d+)%.(%d+)")
+  return string.char(tonumber(a), tonumber(b), tonumber(c), tonumber(d))
+end
+
+local function tcp_out(t, flags, payload)
+  payload = payload or ""
+  local hdr = be16(t.peer_port) .. be16(t.snes_port) .. be32(t.snd) ..
+              be32(t.rcv) .. string.char(0x50, flags) .. be16(2048) ..
+              "\0\0" .. "\0\0"
+  local pseudo = quad(t.peer_ip) .. quad("10.0.2.15") .. "\0\6" ..
+                 be16(#hdr + #payload)
+  local c = 0xFFFF - csum(pseudo .. hdr .. payload, 1,
+                          #pseudo + #hdr + #payload)
+  if c == 0 then c = 0xFFFF end
+  local seg = hdr:sub(1, 16) .. be16(c) .. hdr:sub(19) .. payload
+  local tot = 20 + #seg
+  local ip = string.char(0x45, 0) .. be16(tot) .. be16(0x9999) ..
+             be16(0x4000) .. string.char(64, 6) .. "\0\0" ..
+             quad(t.peer_ip) .. quad("10.0.2.15")
+  local ips = 0xFFFF - csum(ip, 1, #ip)
+  ip = ip:sub(1, 10) .. be16(ips) .. ip:sub(13)
+  send_dgram(ip .. seg)
+end
+
+local function handle_tcp(p, ihl, dst)
+  local o = ihl + 1
+  local sport = p:byte(o) * 256 + p:byte(o + 1)
+  local dport = p:byte(o + 2) * 256 + p:byte(o + 3)
+  local seq = 0
+  for i = 0, 3 do seq = seq * 256 + p:byte(o + 4 + i) end
+  local ack = 0
+  for i = 0, 3 do ack = ack * 256 + p:byte(o + 8 + i) end
+  local doff = (p:byte(o + 12) >> 4) * 4
+  local flags = p:byte(o + 13)
+  local data = p:sub(o + doff)
+  -- Verify the console's checksum the way a real peer does: a stack that
+  -- computes it wrongly must fail here, not be quietly accepted.
+  local pseudo = quad("10.0.2.15") .. quad(dst) .. "\0\6" .. be16(#p - ihl)
+  if csum(pseudo .. p:sub(ihl + 1), 1, #pseudo + #p - ihl) ~= 0xFFFF then
+    tcp_bad_csum = (tcp_bad_csum or 0) + 1
+    return
+  end
+
+  local t = tcp[sport]
+  if (flags & 0x02) ~= 0 and t == nil then          -- SYN
+    tcp_syns = tcp_syns + 1
+    if syn_frame == nil then syn_frame = frame end
+    t = { snes_port = sport, peer_port = dport, peer_ip = dst,
+          snd = 0x5000, rcv = (seq + 1) & 0xFFFFFFFF, req = "", done = false }
+    tcp[sport] = t
+    tcp_out(t, 0x12)                                 -- SYN|ACK
+    t.snd = (t.snd + 1) & 0xFFFFFFFF
+    return
+  end
+  if t == nil then return end
+
+  if #data > 0 then
+    if seq == t.rcv then
+      t.rcv = (t.rcv + #data) & 0xFFFFFFFF
+      t.req = t.req .. data
+      tcp_out(t, 0x10)                               -- ACK
+      if not t.done and t.req:find("\r\n\r\n", 1, true) then
+        t.done = true
+        tcp_requests = tcp_requests + 1
+        tcp_out(t, 0x18, RESPONSE)                   -- PSH|ACK
+        t.snd = (t.snd + #RESPONSE) & 0xFFFFFFFF
+        t.fin_after = t.snd
+      end
+    else
+      tcp_out(t, 0x10)                               -- retransmission: re-ack
+    end
+  end
+
+  -- Our data is acknowledged: close, the way an HTTP/1.0 server does.
+  if (flags & 0x10) ~= 0 and t.fin_after and not t.finned and
+     ack == t.fin_after then
+    t.finned = true
+    tcp_out(t, 0x11)                                 -- FIN|ACK
+    t.snd = (t.snd + 1) & 0xFFFFFFFF
+  end
+
+  if (flags & 0x01) ~= 0 then                        -- FIN from the console
+    local fin_seq = (seq + #data) & 0xFFFFFFFF
+    if fin_seq == t.rcv then
+      t.rcv = (t.rcv + 1) & 0xFFFFFFFF
+      tcp_out(t, 0x10)
+    end
+  end
+end
+
 local function handle_dgram(p)
   if #p < 20 then return end
   local ihl = (p:byte(1) & 0x0F) * 4
@@ -301,6 +417,7 @@ local function handle_dgram(p)
   local src = table.concat({ p:byte(13, 16) }, ".")
   local dst = table.concat({ p:byte(17, 20) }, ".")
   if proto == 17 then handle_udp(p, ihl, src, dst); return end
+  if proto == 6 then handle_tcp(p, ihl, dst); return end
   if proto ~= 1 then return end
   local t = p:byte(ihl + 1)
   if t == 8 then
@@ -349,7 +466,7 @@ local function ip_pump()
 end
 
 -- -------------------------------------------------------------------- test
-local frame, step, at = 0, 1, nil
+local step, at = 1, nil
 local claimed = false
 
 local function send(cmd, settle)
@@ -403,7 +520,15 @@ emu.addEventCallback(function()
   if step == 4.5 then send("resolve nope.test\n", 400); step = 4.7; return end
   -- ...and a NAME as a ping target, which is both features at once.
   if step == 4.7 then send("ping snos.test\n", 700); step = 5; return end
-  if step == 5 then send("net status\n", 400); step = 6; return end
+  -- The console's OWN TCP: `debug send` connects, sends a request and
+  -- prints the answer. Not one line of that command changed for M11 - the
+  -- socket underneath it did.
+  if step == 5 then
+    connect_typed = frame
+    send("debug send 10.0.2.99:80\n", 900); step = 5.5; return
+  end
+  if step == 5.5 then send("mem\n", 400); step = 5.7; return end
+  if step == 5.7 then send("net status\n", 400); step = 6; return end
 
   local r = L.new_report("ip")
   local text = L.ring_text()
@@ -433,6 +558,29 @@ emu.addEventCallback(function()
           "NXDOMAIN was not reported as a failure")
   r.check(text:find("reply from 93.184.216.34", 1, true) ~= nil,
           "`ping NAME` did not resolve-then-ping")
+  -- TCP, entirely on the console: handshake, request, response, close
+  r.check(tcp_syns >= 1, "the console never sent a SYN - SYS_NET_CONNECT is " ..
+          "not reaching the stack")
+  -- uip_connect only CREATES a connection; the SYN goes out of the periodic
+  -- timer's SYN_SENT arm, so without an immediate poke every connection on
+  -- this machine starts with up to half a second of silence. 40 frames is
+  -- two-thirds of a second: comfortably past the tick, so this fails if the
+  -- poke is ever removed.
+  local lag = (syn_frame or 99999) - (connect_typed or 0)
+  r.check(lag < 40,
+          "the SYN took " .. lag .. " frames to leave after the command - " ..
+          "uip_connect is waiting for the 30-frame periodic instead of " ..
+          "sending immediately")
+  r.check((tcp_bad_csum or 0) == 0,
+          "the console sent " .. tostring(tcp_bad_csum) ..
+          " TCP segments with a bad checksum")
+  r.check(tcp_requests >= 1,
+          "the request never arrived complete - the handshake finished but " ..
+          "data did not cross")
+  r.check(text:find("HELLO FROM REAL TCP", 1, true) ~= nil,
+          "the response never reached the console")
+  r.check(text:find("uip tcp rx 0 ", 1, true) == nil,
+          "uIP says it received no TCP at all")
   -- uIP is the thing answering, not leftover hand-written code: the stack's
   -- OWN counters have to show the echo request arriving and a reply leaving.
   -- A correct reply on the wire proves only that something replied.

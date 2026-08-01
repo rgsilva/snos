@@ -73,8 +73,12 @@ void snos_udp_appcall(void);
  * a connection, not a channel — find the rings to move bytes through. */
 typedef struct snos_tcp_state {
   uint8_t ch;      /* SNOS channel, or 0xFF while unbound */
-  uint8_t sent;    /* bytes handed to uip_send and not yet acknowledged */
   uint8_t closing; /* the app asked to close; send FIN once the queue drains */
+  /* Bytes handed to uip_send and not yet acknowledged. SIXTEEN bits: the MSS
+   * here is 536, and a byte-wide count would silently take that modulo 256 —
+   * the connection would then advance its ring by the wrong amount on every
+   * acknowledgement and corrupt the stream rather than fail. */
+  uint16_t sent;
 } uip_tcp_appstate_t;
 
 typedef struct snos_udp_state {
