@@ -30,9 +30,15 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M8 — IRC client (`irc`, windows/tabs/user list) | ✅ |
 | VNC — `vnc`, a Super Nintendo as a live VNC thin client | ✅ |
 | M10 — Preemptive multitasking (`run &`, `jobs`, `kill`, `fg`, notify) | ✅ |
+| M11 — Real TCP/IP: uIP on the console, user-mode NAT on the host (`ping`, `resolve`) | ✅ |
 
 (M9 was a browser; it shipped, was superseded by `vnc` — a real browser on the
 far side of a VNC session beats a screenshot pipeline — and was deleted.)
+
+Since M11 the console runs its own IPv4 stack: it composes and parses its own
+headers, resolves its own names, and `httpd` answers connections opened from
+outside. The host daemon is a slirp-style NAT rather than a proxy — it holds
+sockets, not protocols. `net status` says which mode a session is in.
 
 ## Building
 

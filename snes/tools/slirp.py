@@ -187,8 +187,21 @@ class Slirp:
                 with open("/etc/resolv.conf") as f:
                     for line in f:
                         parts = line.split()
-                        if len(parts) >= 2 and parts[0] == "nameserver":
-                            out.append(parts[1])
+                        if len(parts) < 2 or parts[0] != "nameserver":
+                            continue
+                        # IPv4 ONLY. This Mac lists two IPv6 link-local
+                        # resolvers (fe80::...%en0) ahead of its IPv4 ones,
+                        # and taking the first entry blindly aimed the
+                        # console's queries at an address its IPv4-only stack
+                        # can neither reach nor be answered from — it crashed
+                        # the daemon outright, which took the whole link with
+                        # it. Nothing here can use an IPv6 resolver, so skip
+                        # them rather than fail on them.
+                        try:
+                            socket.inet_aton(parts[1])
+                        except OSError:
+                            continue
+                        out.append(parts[1])
             except OSError:
                 pass
             self._resolvers = out or ["1.1.1.1", "8.8.8.8"]

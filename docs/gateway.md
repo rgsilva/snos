@@ -472,3 +472,47 @@ time something on screen scrolls, and `make test-vnc` does not cover it either.
 The transpose costs **1.3 frames per tile at -O0**, so a full screen is 17
 seconds of CPU against 80 seconds of wire. Fine now; at M7's cable speed it
 becomes the bottleneck, and it is the obvious candidate for hand-written 65816.
+
+
+## The NAT half (M11)
+
+Since M11 the daemon does two unrelated jobs, and it is worth being precise
+about which is which.
+
+**The stream half** (everything above) answers questions: fetch this URL,
+connect me to this host. It holds the socket AND understands the protocol —
+TLS, HTTP, redirects, image conversion. `SYS_NET_FETCH` still uses it, and
+that is deliberate: what FETCH buys is exactly the gateway's brain.
+
+**The NAT half** (`tools/slirp.py`) understands nothing. It takes IPv4
+datagrams the console composed and moves them onto real sockets:
+
+```
+    10.0.2.15   the SNES        (constants, no DHCP -- there are two nodes)
+    10.0.2.2    us: default route and NAT
+    10.0.2.3    us: the resolver the console sends real DNS queries to
+```
+
+Traffic leaves wearing this host's address, exactly as a QEMU guest's does.
+Inbound connections need a real socket on the console's behalf, which is what
+`C2S_IPFWD` asks for — the console is behind the NAT and cannot be dialled
+from the LAN.
+
+Capability is negotiated with the HELLO version: **2 means "I do NAT"**. A
+console talking to an older daemon never sends a packet; an older console
+talking to this one never receives one.
+
+### Things that bit, and are now defended
+
+- **`/etc/resolv.conf` can list IPv6 nameservers first.** This Mac does
+  (`fe80::...%en0`). Handing one to an IPv4-only console is meaningless, and
+  handing it to `inet_aton` raised — which killed the daemon's frame loop and
+  took the whole link down. Non-IPv4 entries are skipped now.
+- **Nothing the console sends may kill this process.** The link is the
+  console's only voice; a daemon that dies on a surprising datagram removes
+  the very channel that would have reported it. Both NAT entry points are
+  wrapped, and log rather than exit.
+- **macOS grants unprivileged ICMP datagram sockets** and returns the whole IP
+  datagram on receive, where Linux returns the ICMP message alone and rewrites
+  the identifier. Both shapes are handled; that is why `ping 8.8.8.8` works
+  from a Super Nintendo without root.

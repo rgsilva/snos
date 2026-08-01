@@ -842,12 +842,17 @@ void ip_service(void) {
 desync:
   /* Either the peer restarted mid-datagram (net_ip_read says so explicitly)
    * or a length prefix made no sense. Same cure both times: drop everything
-   * buffered and start clean at the next prefix the daemon writes. Counted,
-   * because a desync that happens more than once per gateway restart is a
-   * bug rather than a fact of life. */
-  ip_stat_desync++;
+   * buffered and start clean at the next prefix the daemon writes.
+   *
+   * Counted only when something was actually LOST. A gateway announcing its
+   * restart with no datagram in flight is the ordinary start of a session —
+   * the first real run reported "desync 1" before a single packet had been
+   * exchanged, which makes the counter useless for the thing it is for. */
+  if (asm_len != 0) ip_stat_desync++;
   asm_len = 0;
   while (net_ip_read(pkt, IP_MTU) > 0) {
+    ip_stat_desync++;
+    break;
   }
   ip_busy = 0;
 }

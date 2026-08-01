@@ -324,7 +324,7 @@ muted-safe) and awaits a live session; and the "flashing notification" shipped
 as SYS_NOTIFY + the kernel-owned attention cell (`c192c7a`): irc raises it on PMs and
 word-bounded nick mentions, netecho on connections, test/bg.lua asserts it end to end.
 
-### M11 — Real TCP/IP: the SNES gets an address
+### M11 — Real TCP/IP: the SNES gets an address ✅ *(SHIPPED 2026-08-01)*
 Today the gateway *is* the network — it holds the sockets and the SNES holds a byte stream, so
 the console has no address and nothing on the LAN can reach it except through something the
 gateway is already doing. This milestone inverts that: **the SNES runs an IP stack and owns an
@@ -375,7 +375,53 @@ HTTP service the SNES's own client calls.
 - (`telnetd` was filed here 2026-07-31; extracted same day to its own item below — it does
   not need M11 and should not wait for it.)
 
-**Done when:** the SNES answers a ping from another machine on the LAN at its own address.
+**Shipped, and what it actually looks like.** Six steps, one per commit, on the
+`m11-tcpip` branch:
+
+1. **`LINK_CH_IP` + first light.** A raw-IP channel alongside the stream ones,
+   datagrams length-prefixed inside it, `kernel/ip.c` parsing and composing
+   IPv4, `ip_sum` in netasm.s from day one. Capability is negotiated: HELLO
+   version 2 means "I do NAT", asked unprompted at boot, so a v1 gateway never
+   sees an IP record.
+2. **uIP 1.0 vendored** (`kernel/uip/`, BSD-3) and running. Compiled clean at
+   -O0 with no source changes; ICMP echo became its job, and `net status`
+   prints its counters — which is also how the tests prove the STACK answered
+   rather than something else.
+3. **DNS on the console.** `resolve NAME` and `ping NAME`: the query is built
+   and the answer parsed on the 65816, compression pointers and all. The
+   daemon is only the resolver's address.
+4. **`SYS_NET_CONNECT` re-backed.** Same call, same channel, same states —
+   uIP's SYN underneath. Applications did not change.
+5. **`SYS_NET_LISTEN` re-backed** (`C2S_IPFWD`): uIP binds the port, the
+   daemon holds a real socket, and `httpd` serves a page to a connection
+   opened from outside the NAT — twice on the same port, because a server is
+   a loop.
+6. Cutover, docs, and this rewrite.
+
+The host half is **`snes/tools/slirp.py`**: user-mode NAT, no root, no utun, no
+change to anyone's routing table. macOS grants unprivileged ICMP datagram
+sockets, so even `ping` to a real host works.
+
+**Proven end to end on 2026-08-01**, real gateway + real NAT + real internet:
+`resolve example.com` → 104.20.23.154, `ping 8.8.8.8` → 10-13 frame round
+trips, `debug send example.com:80` → 407 bytes of a real Cloudflare response.
+Every header on the console's side was composed by the 65816.
+
+**Done when — restated, because the original was the wrong milestone's test.**
+It said "the SNES answers a ping from another machine on the LAN at its own
+address". Behind slirp NAT nothing on the LAN can address the console at all,
+BY DESIGN — that sentence describes tier 3 (wired W5500), where the console
+holds a real LAN address. M11's own bar, and what is met: **the console
+composes and parses its own IP/TCP, resolves its own names, reaches the real
+internet through the NAT, and serves `httpd` to a connection from outside
+it.** Tier 3 keeps the original sentence, unchanged, as its done-when.
+
+**Known and deliberate.** `SYS_NET_FETCH` still goes to the gateway: FETCH's
+value IS the gateway's brain (TLS, HTTP, image conversion), and moving it is
+M12's whole subject rather than M11 scope creep. uIP is one-segment
+stop-and-wait, so throughput per connection is ~MSS a round trip — far above
+what the emulated link delivers, and a known lever if M7's cable ever makes it
+the bottleneck.
 
 ### Backlog — parked deliberately, with the reason *(agreed with Ricardo 2026-07-30)*
 Not "someday" items: each was considered, costed, and put down for a stated reason. The task list

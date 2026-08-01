@@ -874,7 +874,16 @@ class Gateway:
                 return
             if len(self.ipbuf) < 2 + ln:
                 return
-            self.slirp.input(bytes(self.ipbuf[2:2 + ln]))
+            # NOTHING the console sends may take this process down. The link
+            # is the console's only way to say anything, so a daemon that
+            # dies on a surprising datagram takes away the very channel that
+            # would report it — the failure looks like "the gateway stopped
+            # answering", miles from the cause. (An IPv6 resolver address in
+            # /etc/resolv.conf did exactly this, once.)
+            try:
+                self.slirp.input(bytes(self.ipbuf[2:2 + ln]))
+            except Exception:
+                traceback.print_exc()
             del self.ipbuf[:2 + ln]
 
     def deliver(self, f):
@@ -1095,7 +1104,10 @@ def main():
             # a socket becomes readable when it becomes readable. Ticked on
             # BOTH paths for that reason -- ticking only when a frame arrived
             # would make every reply wait for the console to ask again.
-            gw.slirp.tick()
+            try:
+                gw.slirp.tick()
+            except Exception:
+                traceback.print_exc()
 
             if moved:
                 down.write(bytes(gw.next_out()))
