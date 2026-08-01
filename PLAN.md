@@ -793,8 +793,19 @@ SYS_CONROW (read a console row) and SYS_KBDPUSH (inject a keystroke), neither
 foreground-gated. 4 KB arena at `7f4000`, bank `$D1`. `test/telnetd.lua` asserts the mirror
 carries the screen as it STANDS on connect (banner printed before the connection existed —
 only a state diff can do that), that socket keystrokes reach the shell and their output
-reaches both screens, and that it all survives a foreground app. Original plan, for the
-record:
+reaches both screens, and that it all survives a foreground app.
+
+**Follow-up, same day (`44987cf`): SYS_CONDIRTY, ABI 11.** The kernel already tracks
+changed rows for its own VRAM flush, so telnetd asks for that mask instead of re-reading
+28 rows to discover none changed. It polls every frame now: an idle screen costs one trap
+returning an empty mask, a keystroke echo reads one row, and mirror latency drops from
+up-to-100ms to next-frame. The mask is read-and-clear (one consumer — the exclusive arena
+slot already forbids a second telnetd) and a scroll honestly reports every row, since every
+row's content moved. The test additionally asserts an idle screen sends exactly zero bytes,
+the regression a broken read-and-clear would produce. Building this shook loose the
+hardware-ALU hazard (`7832cdd`, see §5 and docs/calypsi-interrupt-hazard.md).
+
+Original plan, for the record:
 - **v1, stream mirror (~150 lines, netecho-shaped):** a background app bridging a listening
   socket to the EXISTING mailbox rings — input's third backend is a byte ring, console output
   already tees into one. Remote and real console mirror both ways. Limitation understood:
@@ -858,6 +869,14 @@ With the kernel owning NMI: the network stack polls in VBlank *while an app runs
 oblivious, and M10 is a scheduler drop-in rather than a rewrite. The cost is that apps may never
 `SEI` for long or write `$4200` directly — which is exactly the kind of rule an app ABI exists
 to impose.
+
+The same ownership imposes a rule on our own build, found 2026-07-31: **no C code on this
+machine may use the S-CPU hardware ALU (`$4202-$4217`)**. NMI is unmaskable, the vblank
+auto-joypad poll destroys the result registers in hardware, and a handler cannot save them —
+operands are write-only, results read-only. Calypsi's `--target=snes` inlined every C multiply
+on exactly those registers behind a useless `SEI`, so the whole tree (kernel and apps) compiles
+bare 65816 with soft `_Mul16`/`_Div16` instead (`7832cdd`). The full forensic story is in
+docs/calypsi-interrupt-hazard.md.
 
 ---
 
