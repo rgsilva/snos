@@ -216,8 +216,154 @@ void snos_tcp_appcall(void) {
    * exercised — ICMP and the timers run through the same uip_process. */
 }
 
+/* ------------------------------------------------------------------- DNS */
+
+#define RES_NAME_MAX 64
+static char res_name[RES_NAME_MAX + 1];
+static uint8_t res_query[RES_NAME_MAX + 24];
+static uint16_t res_qlen;
+static uint16_t res_id;
+static uint8_t res_state;
+static uint8_t res_addr[4];
+static uint8_t res_tries;
+static struct uip_udp_conn *res_conn;
+
+/* Encode "www.example.com" as 3www7example3com0, then QTYPE=A, QCLASS=IN.
+ * Returns 0 on success. */
+static int res_build(const char *name) {
+  uint16_t o = 12, lab, i = 0;
+  res_query[0] = (uint8_t)(res_id >> 8);
+  res_query[1] = (uint8_t)res_id;
+  res_query[2] = 0x01; /* recursion desired — the daemon's resolver does the
+                        * walking; a 65816 chasing referrals is not a fight
+                        * worth having */
+  res_query[3] = 0x00;
+  res_query[4] = 0; res_query[5] = 1;  /* one question */
+  res_query[6] = 0; res_query[7] = 0;
+  res_query[8] = 0; res_query[9] = 0;
+  res_query[10] = 0; res_query[11] = 0;
+  for (;;) {
+    lab = o++;
+    res_query[lab] = 0;
+    while (name[i] && name[i] != '.') {
+      if (res_query[lab] >= 63 || o >= sizeof res_query - 6) return -1;
+      res_query[o++] = (uint8_t)name[i++];
+      res_query[lab]++;
+    }
+    if (res_query[lab] == 0) return -1; /* empty label: ".." or a trailing dot */
+    if (name[i] == 0) break;
+    i++; /* the dot */
+  }
+  res_query[o++] = 0;      /* root label */
+  res_query[o++] = 0; res_query[o++] = 1; /* QTYPE A */
+  res_query[o++] = 0; res_query[o++] = 1; /* QCLASS IN */
+  res_qlen = o;
+  return 0;
+}
+
+/* Walk a DNS name at `o`, returning the offset just past it. Compression
+ * pointers end a name, so this never follows one — the only names we skip
+ * over are in records we are not reading. */
+static uint16_t res_skip_name(const uint8_t *p, uint16_t o, uint16_t n) {
+  while (o < n) {
+    uint8_t len = p[o];
+    if (len == 0) return (uint16_t)(o + 1);
+    if ((len & 0xC0u) == 0xC0u) return (uint16_t)(o + 2);
+    o = (uint16_t)(o + 1u + len);
+  }
+  return n;
+}
+
+static void res_parse(const uint8_t *p, uint16_t n) {
+  uint16_t qd, an, o, i;
+  if (n < 12) return;
+  if (((uint16_t)p[0] << 8 | p[1]) != res_id) return; /* not our question */
+  if ((p[3] & 0x0Fu) != 0) {                          /* RCODE: NXDOMAIN etc */
+    res_state = IP_RES_FAIL;
+    return;
+  }
+  qd = (uint16_t)((uint16_t)p[4] << 8 | p[5]);
+  an = (uint16_t)((uint16_t)p[6] << 8 | p[7]);
+  o = 12;
+  for (i = 0; i < qd; i++) {
+    o = res_skip_name(p, o, n);
+    o = (uint16_t)(o + 4); /* QTYPE + QCLASS */
+  }
+  for (i = 0; i < an && o + 10 <= n; i++) {
+    uint16_t type, rdlen;
+    o = res_skip_name(p, o, n);
+    if (o + 10 > n) break;
+    type = (uint16_t)((uint16_t)p[o] << 8 | p[o + 1]);
+    rdlen = (uint16_t)((uint16_t)p[o + 8] << 8 | p[o + 9]);
+    o = (uint16_t)(o + 10);
+    if (o + rdlen > n) break;
+    /* The first A record wins, and everything else is stepped over — which
+     * is how a CNAME chain resolves without any chain-following code: the
+     * server that followed it already put the A record in the same answer. */
+    if (type == 1 && rdlen == 4) {
+      res_addr[0] = p[o];
+      res_addr[1] = p[o + 1];
+      res_addr[2] = p[o + 2];
+      res_addr[3] = p[o + 3];
+      res_state = IP_RES_OK;
+      return;
+    }
+    o = (uint16_t)(o + rdlen);
+  }
+  res_state = IP_RES_FAIL; /* answered, but with no address in it */
+}
+
 void snos_udp_appcall(void) {
-  /* Step 3 (the resolver). */
+  if (uip_udp_conn->appstate.kind != 1) return;
+  if (uip_newdata()) {
+    res_parse((const uint8_t *)uip_appdata, uip_datalen());
+    return;
+  }
+  /* Poll: (re)send the question. uIP has no UDP retransmission of its own —
+   * the datagram is sent when the application says so and forgotten — so the
+   * retry count lives here, and this is also the ONLY path by which the
+   * first query goes out. */
+  if (uip_poll() && res_state == IP_RES_BUSY) {
+    if (res_tries == 0) {
+      res_state = IP_RES_FAIL;
+      return;
+    }
+    res_tries--;
+    uip_send(res_query, (int)res_qlen);
+  }
+}
+
+int ip_resolve(const char *name) {
+  uip_ipaddr_t a;
+  int i;
+  if (!ip_up()) return -1;
+  if (res_state == IP_RES_BUSY) return -1;
+  for (i = 0; i < RES_NAME_MAX && name[i]; i++) res_name[i] = name[i];
+  if (i == 0 || (i == RES_NAME_MAX && name[i])) return -1;
+  res_name[i] = 0;
+  res_id++;
+  if (res_build(res_name) < 0) return -1;
+  if (res_conn == 0) {
+    uip_ipaddr(a, IP_SELF0, IP_SELF1, IP_SELF2, IP_DNS3);
+    res_conn = uip_udp_new(&a, HTONS(53));
+    if (res_conn == 0) return -1;
+    res_conn->appstate.kind = 1;
+  }
+  res_state = IP_RES_BUSY;
+  res_tries = 4; /* ~2 s of patience, at one try per periodic tick */
+  /* Send the first query NOW rather than waiting for the next 0.5 s tick.
+   * uip_udp_periodic_conn runs the appcall with uip_poll() set, which is the
+   * only event a UDP connection ever gets. */
+  uip_udp_periodic_conn(res_conn);
+  ip_send_uip();
+  return 0;
+}
+
+int ip_resolve_state(void) { return res_state; }
+
+void ip_resolve_addr(uint8_t out[4]) {
+  int i;
+  for (i = 0; i < 4; i++) out[i] = res_addr[i];
 }
 
 void ip_uipstat(ip_uipstat_t *o) {
@@ -230,13 +376,11 @@ void ip_uipstat(ip_uipstat_t *o) {
   o->icmp_sent = uip_stat.icmp.sent;
   o->icmp_typeerr = uip_stat.icmp.typeerr;
   o->tcp_recv = uip_stat.tcp.recv;
-  o->tcp_sent = uip_stat.tcp.sent;
   o->tcp_drop = uip_stat.tcp.drop;
   o->tcp_chkerr = uip_stat.tcp.chkerr;
   o->tcp_rexmit = uip_stat.tcp.rexmit;
   o->tcp_rst = uip_stat.tcp.rst;
-  o->udp_recv = uip_stat.udp.recv;
-  o->udp_sent = uip_stat.udp.sent;
+  o->tcp_syndrop = uip_stat.tcp.syndrop;
   o->udp_drop = uip_stat.udp.drop;
   o->udp_chkerr = uip_stat.udp.chkerr;
 #else

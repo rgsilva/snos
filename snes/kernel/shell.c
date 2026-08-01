@@ -88,7 +88,8 @@ static void cmd_help(void) {
   kcon_puts("rm NAME       delete a file (instant; bytes stay spent)\n");
   kcon_puts("compact       recopy files, reclaim deleted space (slow)\n");
   kcon_puts("net           gateway diagnostics\n");
-  kcon_puts("ping A.B.C.D  ICMP echo, composed on this machine (M11)\n");
+  kcon_puts("ping HOST     ICMP echo, composed on this machine (M11)\n");
+  kcon_puts("resolve NAME  DNS, asked and parsed by this machine (M11)\n");
   kcon_puts("debug         other diagnostics\n");
 }
 
@@ -894,16 +895,16 @@ static void cmd_net_status(void) {
     kcon_putu(u.icmp_recv);
     kcon_putc('/');
     kcon_putu(u.icmp_sent);
-    kcon_puts(", tcp ");
+    kcon_puts("\nuip tcp rx ");
     kcon_putu(u.tcp_recv);
-    kcon_putc('/');
-    kcon_putu(u.tcp_sent);
+    kcon_puts(" drop ");
+    kcon_putu(u.tcp_drop);
     kcon_puts(" rexmit ");
     kcon_putu(u.tcp_rexmit);
-    kcon_puts(", udp ");
-    kcon_putu(u.udp_recv);
-    kcon_putc('/');
-    kcon_putu(u.udp_sent);
+    kcon_puts(" rst ");
+    kcon_putu(u.tcp_rst);
+    kcon_puts(", udp drop ");
+    kcon_putu(u.udp_drop);
     kcon_putc('\n');
   } else {
     kcon_puts("no ip (gateway v1: streams only)\n");
@@ -936,11 +937,62 @@ static int parse_quad(const char *s, uint8_t out[4]) {
   return (*s == 0 || *s == ' ') ? 0 : -1;
 }
 
+/* A dotted quad, or a name the console resolves itself. Returns 0 on
+ * success and prints its own diagnosis on failure. */
+static int host_addr(const char *s, uint8_t out[4]) {
+  uint16_t deadline;
+  if (parse_quad(s, out) == 0) return 0;
+  if (!ip_up()) {
+    kcon_puts("no ip: names need the console's own resolver\n");
+    return -1;
+  }
+  if (ip_resolve(s) < 0) {
+    kcon_puts("resolver busy or the name is unusable\n");
+    return -1;
+  }
+  deadline = (uint16_t)(snos_frames + 300u); /* 5 s: four tries, half a second
+                                              * apart, plus the round trips */
+  while (ip_resolve_state() == IP_RES_BUSY) {
+    if ((int16_t)(snos_frames - deadline) >= 0) break;
+    if (snos_break_taken()) return -1;
+    kbd_idle();
+  }
+  if (ip_resolve_state() != IP_RES_OK) {
+    kcon_puts("cannot resolve ");
+    kcon_puts(s);
+    kcon_putc('\n');
+    return -1;
+  }
+  ip_resolve_addr(out);
+  return 0;
+}
+
+static void put_quad(const uint8_t a[4]) {
+  int i;
+  for (i = 0; i < 4; i++) {
+    kcon_putu(a[i]);
+    if (i < 3) kcon_putc('.');
+  }
+}
+
+static void cmd_resolve(const char *rest) {
+  uint8_t a[4];
+  if (rest[0] == 0) {
+    kcon_puts("usage: resolve NAME\n");
+    return;
+  }
+  if (host_addr(rest, a) < 0) return;
+  kcon_puts(rest);
+  kcon_puts(" is ");
+  put_quad(a);
+  kcon_putc('\n');
+}
+
 static void cmd_ping(const char *rest) {
   uint8_t dst[4];
   int i;
-  if (parse_quad(rest, dst) < 0) {
-    kcon_puts("usage: ping A.B.C.D   (10.0.2.2 is the gateway)\n");
+  if (rest[0] == 0) {
+    kcon_puts("usage: ping HOST   (10.0.2.2 is the gateway)\n");
     return;
   }
   if (!ip_up()) {
@@ -948,6 +1000,7 @@ static void cmd_ping(const char *rest) {
                        : "no link (the bridge script is not running)\n");
     return;
   }
+  if (host_addr(rest, dst) < 0) return;
   for (i = 0; i < 4; i++) {
     uint16_t got = ip_ping_replies;
     uint16_t deadline;
@@ -965,7 +1018,7 @@ static void cmd_ping(const char *rest) {
     }
     if (ip_ping_replies != got) {
       kcon_puts("reply from ");
-      kcon_puts(rest);
+      put_quad(dst);
       kcon_puts(": seq=");
       kcon_putu(ip_ping_seq);
       kcon_puts(" time=");
@@ -1197,6 +1250,7 @@ void shell_run(void) {
     else if (streq(line, "compact")) cmd_compact();
     else if (streq(line, "net")) cmd_net(rest);
     else if (streq(line, "ping")) cmd_ping(rest);
+    else if (streq(line, "resolve")) cmd_resolve(rest);
     else if (streq(line, "debug")) cmd_debug(rest);
     else {
       /* Not a builtin? Try an application of that name — this is what lets

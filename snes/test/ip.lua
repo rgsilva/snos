@@ -228,16 +228,86 @@ local reply_err = "no reply seen"
 local snes_pings = 0          -- echo requests the console sent US
 local ODD_PAYLOAD = "SNOSPING!"     -- 9 bytes: exercises the odd-byte path
 
+-- A resolver, so the console's DNS is tested against a parser that does not
+-- share its code. It answers exactly one name and NXDOMAINs everything else,
+-- which is what makes "cannot resolve" testable too.
+local DNS_NAME, DNS_ADDR = "snos.test", { 93, 184, 216, 34 }
+local dns_queries = 0
+
+local function dns_answer(q)
+  if #q < 12 then return nil end
+  local qd = q:byte(5) * 256 + q:byte(6)
+  if qd < 1 then return nil end
+  -- Walk the question's name, both to find its end and to read it back.
+  local o, labels = 13, {}
+  while o <= #q do
+    local n = q:byte(o)
+    if n == 0 then o = o + 1; break end
+    if n >= 0xC0 then return nil end       -- no compression in a question
+    labels[#labels + 1] = q:sub(o + 1, o + n)
+    o = o + 1 + n
+  end
+  local qname_end = o + 4                  -- QTYPE + QCLASS
+  if qname_end - 1 > #q then return nil end
+  local name = table.concat(labels, ".")
+  dns_queries = dns_queries + 1
+
+  local hdr = q:sub(1, 2)                  -- the id, echoed
+  local question = q:sub(13, qname_end - 1)
+  if name ~= DNS_NAME then
+    -- NXDOMAIN: flags QR|RD|RA|rcode3, no answers.
+    return hdr .. string.char(0x81, 0x83) .. be16(1) .. be16(0) ..
+           be16(0) .. be16(0) .. question
+  end
+  local rr = string.char(0xC0, 0x0C) ..    -- a compression pointer at the
+             be16(1) .. be16(1) ..         -- question's name: the console must
+             string.char(0, 0, 0, 60) ..   -- step over it without following it
+             be16(4) .. string.char(table.unpack(DNS_ADDR))
+  return hdr .. string.char(0x81, 0x80) .. be16(1) .. be16(1) ..
+         be16(0) .. be16(0) .. question .. rr
+end
+
+local function handle_udp(p, ihl, src, dst)
+  local u = p:sub(ihl + 1)
+  if #u < 8 then return end
+  local sport = u:byte(1) * 256 + u:byte(2)
+  local dport = u:byte(3) * 256 + u:byte(4)
+  local ulen = u:byte(5) * 256 + u:byte(6)
+  if dport ~= 53 or dst ~= "10.0.2.3" then return end
+  local reply = dns_answer(u:sub(9, ulen))
+  if reply == nil then return end
+  local ln = 8 + #reply
+  local uh = be16(53) .. be16(sport) .. be16(ln) .. "\0\0"
+  -- The pseudo-header is part of the UDP checksum; getting it wrong here
+  -- would look exactly like the console mis-parsing the answer.
+  local pseudo = string.char(10, 0, 2, 3) .. string.char(10, 0, 2, 15) ..
+                 string.char(0, 17) .. be16(ln)
+  local c = 0xFFFF - csum(pseudo .. uh .. reply, 1, #pseudo + #uh + #reply)
+  if c == 0 then c = 0xFFFF end
+  local udp = uh:sub(1, 6) .. be16(c) .. reply
+  local tot = 20 + #udp
+  local ip = string.char(0x45, 0) .. be16(tot) .. be16(0x7777) ..
+             be16(0x4000) .. string.char(64, 17) .. "\0\0" ..
+             string.char(10, 0, 2, 3) .. string.char(10, 0, 2, 15)
+  local ips = 0xFFFF - csum(ip, 1, #ip)
+  ip = ip:sub(1, 10) .. be16(ips) .. ip:sub(13)
+  send_dgram(ip .. udp)
+end
+
 local function handle_dgram(p)
   if #p < 20 then return end
   local ihl = (p:byte(1) & 0x0F) * 4
   local proto = p:byte(10)
   local src = table.concat({ p:byte(13, 16) }, ".")
   local dst = table.concat({ p:byte(17, 20) }, ".")
+  if proto == 17 then handle_udp(p, ihl, src, dst); return end
   if proto ~= 1 then return end
   local t = p:byte(ihl + 1)
-  if t == 8 and dst == "10.0.2.2" then
-    -- The console is pinging us: answer like slirp would.
+  if t == 8 then
+    -- Answer echo requests to ANY address, not just our own: a slirp box
+    -- proxies a ping onward through a real ICMP socket and the reply comes
+    -- back wearing the address that was pinged. Answering only 10.0.2.2 made
+    -- `ping <a name>` look broken when the console was doing it right.
     snes_pings = snes_pings + 1
     local icmp = p:sub(ihl + 1)
     local rep = string.char(0, 0) .. "\0\0" .. icmp:sub(5)
@@ -246,7 +316,7 @@ local function handle_dgram(p)
     local tot = 20 + #rep
     local ip = string.char(0x45, 0) .. be16(tot) .. be16(0x4321) ..
                be16(0x4000) .. string.char(64, 1) .. "\0\0" ..
-               string.char(10, 0, 2, 2) .. string.char(10, 0, 2, 15)
+               string.char(p:byte(17, 20)) .. string.char(10, 0, 2, 15)
     local ips = 0xFFFF - csum(ip, 1, #ip)
     ip = ip:sub(1, 10) .. be16(ips) .. ip:sub(13)
     send_dgram(ip .. rep)
@@ -326,7 +396,14 @@ emu.addEventCallback(function()
     return
   end
   if step == 3 then send("ping 10.0.2.2\n", 700); step = 4; return end
-  if step == 4 then send("net status\n", 400); step = 5; return end
+  -- The console's OWN resolver: a real query it composed, an answer it
+  -- parsed -- including stepping over a compression pointer without
+  -- following it, which is what the answer above deliberately contains.
+  if step == 4 then send("resolve snos.test\n", 400); step = 4.5; return end
+  if step == 4.5 then send("resolve nope.test\n", 400); step = 4.7; return end
+  -- ...and a NAME as a ping target, which is both features at once.
+  if step == 4.7 then send("ping snos.test\n", 700); step = 5; return end
+  if step == 5 then send("net status\n", 400); step = 6; return end
 
   local r = L.new_report("ip")
   local text = L.ring_text()
@@ -338,14 +415,24 @@ emu.addEventCallback(function()
           "nobody types `net status` before using the network")
   r.check(reply_ok ~= nil, "no echo reply from the console: " .. reply_err)
   r.check(reply_ok == true, "echo reply wrong: " .. reply_err)
-  r.check(snes_pings >= 4,
-          "`ping` sent " .. snes_pings .. " echo requests, expected 4")
+  r.check(snes_pings >= 8,
+          "`ping` sent " .. snes_pings .. " echo requests, expected 8 (two runs of four)")
   r.check(text:find("reply from 10.0.2.2: seq=", 1, true) ~= nil,
           "the shell never printed a ping reply")
   r.check(text:find("timeout", 1, true) == nil,
           "some pings timed out on a perfect link")
   r.check(text:find("ip 10.0.2.15 via 10.0.2.2", 1, true) ~= nil,
           "`net status` does not report IP mode against a v2 gateway")
+  -- DNS, composed and parsed on the console
+  r.check(dns_queries >= 2,
+          "the console sent " .. dns_queries .. " DNS queries, expected 2+")
+  r.check(text:find("snos.test is 93.184.216.34", 1, true) ~= nil,
+          "the console did not resolve snos.test - a real query it built " ..
+          "and an answer it parsed, compression pointer and all")
+  r.check(text:find("cannot resolve nope.test", 1, true) ~= nil,
+          "NXDOMAIN was not reported as a failure")
+  r.check(text:find("reply from 93.184.216.34", 1, true) ~= nil,
+          "`ping NAME` did not resolve-then-ping")
   -- uIP is the thing answering, not leftover hand-written code: the stack's
   -- OWN counters have to show the echo request arriving and a reply leaving.
   -- A correct reply on the wire proves only that something replied.
@@ -360,6 +447,13 @@ emu.addEventCallback(function()
   r.check(tonumber(icsent or "0") >= 1,
           "uIP's ICMP counter says it never replied (" ..
           tostring(icrecv) .. "/" .. tostring(icsent) .. ")")
+  -- uIP's tcp.sent sits on the shared IP output path and counts UDP as TCP;
+  -- net status must not report it (three DNS queries once read "tcp 0/3").
+  r.check(text:find("uip tcp rx ", 1, true) ~= nil,
+          "the uIP TCP line is missing")
+  r.check(text:match("uip tcp rx %d+/") == nil,
+          "net status is reporting uIP's tcp.sent, which counts UDP output " ..
+          "as TCP - the number is a library quirk, not a measurement")
 
   r.finish()
 end, emu.eventType.endFrame)

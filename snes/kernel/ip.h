@@ -45,6 +45,26 @@ void ip_init(void);
 void ip_service(void);
 int ip_up(void); /* link up AND the gateway claimed IP support */
 
+/* ---- DNS: the console resolves names ITSELF ------------------------------
+ *
+ * Real UDP queries to 10.0.2.3, parsed on the 65816. The daemon is only the
+ * recursive resolver's address — it forwards the query to whatever this
+ * machine resolves with and hands the answer back untouched. That is the
+ * difference between having a stack and having a gateway that has one: the
+ * old (deleted) `net resolve` asked the gateway to resolve a name and print
+ * it, which measured the gateway.
+ *
+ * ONE query at a time, deliberately. A resolver cache and parallel queries
+ * are what you build when name lookup is on a critical path; here it happens
+ * once per connection, on a machine whose link moves 600 bytes a second. */
+#define IP_RES_IDLE 0
+#define IP_RES_BUSY 1
+#define IP_RES_OK 2
+#define IP_RES_FAIL 3
+int ip_resolve(const char *name); /* start a lookup: 0 ok, -1 busy/not up */
+int ip_resolve_state(void);
+void ip_resolve_addr(uint8_t out[4]); /* valid while state == IP_RES_OK */
+
 /* ---- ping, for the shell -------------------------------------------------
  * The console composes a real ICMP echo request and parses the real reply;
  * the RTT rides in the echoed payload as a frame-counter stamp. (The long-
@@ -68,11 +88,16 @@ extern volatile uint16_t ip_stat_desync;  /* framing lost; stream resynced */
  * datagrams arrived and the stack dropped every one for a bad checksum" is a
  * sentence only these can say. Also the honest proof that uIP is the thing
  * answering, which a reply on the wire alone does not establish. */
+/* Only the counters uIP actually maintains. Two of its fields are traps and
+ * are deliberately absent: `tcp.sent` sits on the shared ip_send tail, so it
+ * counts UDP output as TCP (three DNS queries read as "tcp 0/3", which is a
+ * lie told confidently), and `udp.recv`/`udp.sent` are never incremented at
+ * all. ip.sent is the honest count of everything the stack emitted. */
 typedef struct {
   uint16_t ip_recv, ip_sent, ip_drop, ip_chkerr;
   uint16_t icmp_recv, icmp_sent, icmp_typeerr;
-  uint16_t tcp_recv, tcp_sent, tcp_drop, tcp_chkerr, tcp_rexmit, tcp_rst;
-  uint16_t udp_recv, udp_sent, udp_drop, udp_chkerr;
+  uint16_t tcp_recv, tcp_drop, tcp_chkerr, tcp_rexmit, tcp_rst, tcp_syndrop;
+  uint16_t udp_drop, udp_chkerr;
 } ip_uipstat_t;
 void ip_uipstat(ip_uipstat_t *out);
 

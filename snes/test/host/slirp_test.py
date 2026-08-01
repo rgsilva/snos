@@ -234,6 +234,37 @@ def t_udp(c):
         srv.close()
 
 
+def t_dns_front(c):
+    """10.0.2.3 is not a machine: it is a name for "whatever this host
+    resolves with".
+
+    The daemon must rewrite the DESTINATION to the real resolver on the way
+    out and restore 10.0.2.3 as the SOURCE on the way back — the console
+    addressed a fixed constant and would drop a reply from anywhere else.
+    Port 5353 rather than 53 keeps this hermetic: binding 53 needs root, and
+    the redirect logic under test does not care which port it carries."""
+    srv, port = udp_server()
+    try:
+        c.nat._resolvers = ["127.0.0.1"]     # our fake, instead of the host's
+        payload = b"\xAB\xCD-a-dns-query"
+        ln = 8 + len(payload)
+        hdr = struct.pack("!HHHH", 4500, port, ln, 0)
+        cs = slirp.csum16(
+            slirp._pseudo(slirp._ip2int(SNES), slirp._ip2int(slirp.DNS_IP),
+                          slirp.PROTO_UDP, ln) + hdr + payload)
+        c.send(slirp.DNS_IP, slirp.PROTO_UDP,
+               hdr[:6] + struct.pack("!H", cs or 0xFFFF) + payload)
+        assert c.wait_rx(2.0), "the DNS front forwarded nothing back"
+        src, _p, body = c.take(slirp.PROTO_UDP)[0]
+        assert src == slirp.DNS_IP, \
+            f"the answer came from {src}; the console only accepts " \
+            f"{slirp.DNS_IP} and would drop this"
+        assert body[8:] == b"pong:" + payload, "the query was altered in flight"
+    finally:
+        c.nat._resolvers = None
+        srv.close()
+
+
 def t_tcp(c):
     srv, port = echo_server()
     try:
@@ -375,7 +406,8 @@ def t_garbage(c):
 
 def main():
     c = Console()
-    tests = [("icmp", t_icmp), ("udp", t_udp), ("tcp", t_tcp),
+    tests = [("icmp", t_icmp), ("udp", t_udp), ("dns", t_dns_front),
+             ("tcp", t_tcp),
              ("tcp-data-fin", t_tcp_data_fin), ("stray", t_stray),
              ("refused", t_refused), ("forward", t_forward),
              ("garbage", t_garbage)]
@@ -383,8 +415,8 @@ def main():
         for name, fn in tests:
             c.rx.clear()
             fn(c)
-        print("RESULT PASS slirp -- icmp, udp, tcp both ways, data+fin, "
-              "rst x2, forward")
+        print("RESULT PASS slirp -- icmp, udp, dns front, tcp both ways, "
+              "data+fin, rst x2, forward")
         return 0
     except AssertionError as e:
         print(f"RESULT FAIL slirp -- {e}")
