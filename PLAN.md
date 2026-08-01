@@ -1020,6 +1020,25 @@ to: the player's name/UUID echoed into Login Success, teleport IDs, keepalive ID
 5. **Docs**: gateway.md gets a "join it from your Mac" section (add server → the address `net
    status` prints, port 25565 forwarded via IPFWD like any listener); README status row.
 
+**Reviewed 2026-08-01, after it worked.** Three clean-room reviewers (kernel
+net path, mc/baker/get, host daemons) read the code with no prior context and
+found fourteen things worth fixing, all landed with tests: two ways `mc` could
+be wedged forever by a client that died at the wrong moment or spoke garbage;
+post-hangup TCP events leaking a dead connection's bytes into the next
+client's stream; a peer restart delivering one frame of the dead session into
+the fresh one; parsers that trusted declared lengths over what arrived (and so
+echoed stale bytes — a previous connection's — back onto the wire); the
+daemon acking console data into an unbounded buffer while promising
+backpressure in the comment above it; an uncapped accept loop on a
+LAN-reachable forwarded port; and `build_frame` copying every payload byte
+into the frame ONE AT A TIME inside NMI — the ~230-cycles/byte address
+rebuild this codebase has now removed three times, and since the cutover
+every byte on the wire went through it. `mc`'s join burst also stopped
+staging ROM in RAM before the syscall that already took a far pointer
+(4910 → 4610 frames). The reviewers' own "checked and cleared" lists are
+worth as much as the findings: the ring disciplines, uIP's API contract, the
+TCP sequence arithmetic and every byte of mkmc's packet encoding survived.
+
 **Known risks, named in advance:** the join burst vs client patience is the one empirical
 unknown — ~27 KB of spawn chunks is ~45 s at the emulated link's ~600 B/s, brushing client
 timeouts (mitigations: spawn-chunk-first order, keepalives from the first second, view distance
