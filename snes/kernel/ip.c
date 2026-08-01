@@ -639,9 +639,11 @@ int ip_connect(const char *hostport) {
 }
 
 void ip_close(int ch) {
-  struct uip_conn *c = conn_for(ch);
-  pend[ch & (NET_CHANNELS - 1)].busy = 0;
-  if (ch > 0 && ch < NET_CHANNELS && lport[ch] != 0) {
+  struct uip_conn *c;
+  if (ch <= 0 || ch >= NET_CHANNELS) return;
+  c = conn_for(ch);
+  pend[ch].busy = 0;
+  if (lport[ch] != 0) {
     uip_unlisten(HTONS(lport[ch]));
     lport[ch] = 0;
   }

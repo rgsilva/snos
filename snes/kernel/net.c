@@ -297,6 +297,8 @@ void net_init(void) {
     txring_head[i] = 0;
     txring_tail[i] = 0;
     txframe_ch[i] = 0;
+    ch_stack[i] = 0;
+    ch_lport[i] = 0;
   }
   txq_head = 0;
   txq_tail = 0;
