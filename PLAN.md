@@ -416,6 +416,19 @@ composes and parses its own IP/TCP, resolves its own names, reaches the real
 internet through the NAT, and serves `httpd` to a connection from outside
 it.** Tier 3 keeps the original sentence, unchanged, as its done-when.
 
+**Known, and left as such.** The resolver is a single slot with a one-frame
+race: between an answer arriving and the asker reading it, a second lookup can
+overwrite it. Making the answer owned-until-released was tried and reverted —
+any path that forgets to release, or gives up waiting, then locks out every
+lookup for the life of the boot, which is a far worse failure than the race.
+The fix, when something genuinely needs two lookups at once, is a request tag
+per caller. A six-second watchdog stops a lookup whose answer never arrives
+from pinning it.
+
+Also known: uIP's own listen list has no room for a channel number, so a
+second connection to a bound port is refused rather than queued — the
+gateway-backed path got serialised accepts for free from the daemon.
+
 **Known and deliberate.** `SYS_NET_FETCH` still goes to the gateway: FETCH's
 value IS the gateway's brain (TLS, HTTP, image conversion), and moving it is
 M12's whole subject rather than M11 scope creep. uIP is one-segment
