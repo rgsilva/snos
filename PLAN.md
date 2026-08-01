@@ -990,7 +990,11 @@ to: the player's name/UUID echoed into Login Success, teleport IDs, keepalive ID
    the first attempt — the biome codec's `depth`/`scale` floats — and the client's decoder
    NAMED the missing keys in its disconnect screen, which is the exact failure-locality the
    step existed to buy. 146 KB, 25 chunks, structural checks in `test-host` (mkmc_test.py).
-2. **Login on the console** — the UNIVAC bar. App `mc` (netecho-shaped): VarInt framer,
+2. *(DONE 2026-08-01, `8edd2ef`, folded together with step 3 — the streamer is the same
+   machine for one blob or 27. test/mc.lua's scripted client walks the whole 146 KB burst as
+   framed packets over the console's own TCP: ~5000 emulated frames, keepalives between blobs,
+   dig-revert and chat echo live. Await: the real client against the console via the GUI
+   bridge.)* **Login on the console** — the UNIVAC bar. App `mc` (netecho-shaped): VarInt framer,
    handshake/status/login states, blobs streamed from its own ROM banks, name/UUID splice.
    **Done when:** the real client sees the SNES in its server list (MOTD and all) and completes
    login to "Loading terrain"; a gwip canned-client transcript asserts the status JSON and the
