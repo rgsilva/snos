@@ -1,0 +1,158 @@
+# Build the SNOS ROM (snes/build/snos.sfc) on every push and PR.
+#
+# Scope: BUILD ONLY, plus the host-side Python tests (test-host), which need no
+# emulator. The Mesen 2 suite (`make test`) is deliberately NOT run here: it
+# drives a GUI emulator via Lua --testrunner scripts, mutates Mesen's own
+# settings.json/saves under ~/Library (macOS paths hardcoded in the Makefile
+# and tools/checkenv.py), and the tests are serial-only. Porting that to a
+# headless Linux runner is a separate project.
+#
+# Toolchain: Calypsi 65816 v5.17 — the same version the Makefile pins locally
+# (CALDIR default, snes/Makefile:11). Do not bump casually: the -O0 baseline
+# and several workarounds are calibrated against 5.17's known miscompiles
+# (see the Makefile header and docs/). Official Linux x64 .deb from the
+# author's GitHub releases:
+#   https://github.com/hth313/Calypsi-tool-chains/releases/tag/5.17
+# License note: Calypsi is closed-source, free of charge for hobby use only
+# (https://www.calypsi.cc/). This is a hobby project, so CI use is within
+# the license; the toolchain is cached, not redistributed.
+name: build
+
+on:
+  push:
+  pull_request:
+
+# A superseded run on the same branch is just wasted minutes.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Bumping this is the ONLY change needed to move to a newer toolchain
+  # (5.18 is out and ships the same .deb layout) — but read the note above
+  # about miscompile calibration first.
+  CALYPSI_VERSION: "5.17"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------ toolchain
+      # The .deb is extracted (not installed) into ~/calypsi so the whole tree
+      # can be cached without sudo and without touching the runner's dpkg
+      # state. Layout inside the deb: usr/local/lib/calypsi-65816-<ver>/{bin,lib}
+      # which matches exactly what the Makefile expects of CALDIR.
+      - name: Cache Calypsi toolchain
+        id: calypsi-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/calypsi
+          key: calypsi-65816-${{ env.CALYPSI_VERSION }}-linux-x64
+
+      - name: Download Calypsi 65816 toolchain
+        if: steps.calypsi-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o /tmp/calypsi.deb \
+            "https://github.com/hth313/Calypsi-tool-chains/releases/download/${CALYPSI_VERSION}/calypsi-65816-${CALYPSI_VERSION}.deb"
+          mkdir -p ~/calypsi
+          dpkg-deb -x /tmp/calypsi.deb ~/calypsi
+          test -x ~/calypsi/usr/local/lib/calypsi-65816-${CALYPSI_VERSION}/bin/cc65816
+
+      # Shared-library deps of the Calypsi binaries (from the deb's Depends:).
+      # Most are present on ubuntu-latest already; libnuma1 sometimes is not.
+      - name: Install toolchain runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgmp10 libtinfo6 libnuma1 zlib1g
+
+      # ---------------------------------------------------------------- python
+      # The build tools (mkfont/mkromfs/mkappinfo/mkmc/raw2sfc/mktest/mkbridge)
+      # are stdlib-only — no pip install needed. Pinned for reproducibility.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ----------------------------------------------------------------- build
+      # `all` = kernel ROM + the combined Mesen bridge script. GNU make >= 4.3
+      # is required (grouped target `&:` at snes/Makefile:238); ubuntu-latest
+      # ships 4.3+. CALDIR overrides the Makefile default, which points at a
+      # sibling repo on the developer's machine and does not exist here.
+      - name: Build ROM
+        run: |
+          make -C snes all \
+            CALDIR="$HOME/calypsi/usr/local/lib/calypsi-65816-${CALYPSI_VERSION}"
+
+      - name: Sanity-check ROM
+        run: |
+          ls -l snes/build/snos.sfc
+          # HiROM + apps + romfs + baked MC data: the image is > 2 MB by
+          # construction (MCDATA_AT = 0x200000). A truncated link would
+          # produce something smaller.
+          test "$(wc -c < snes/build/snos.sfc)" -gt 2097152
+
+      # ------------------------------------------------------------ host tests
+      # Pure-Python, no emulator: the gateway file-relay discipline, the slirp
+      # NAT, and the mkmc baker. Verified stdlib-only and passing on Linux.
+      - name: Host-side tests
+        run: make -C snes test-host
+
+      # ------------------------------------------------------------- artifacts
+      - name: Upload ROM and build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: snos-rom
+          path: |
+            snes/build/snos.sfc
+            snes/build/snos.map
+            snes/build/snosbridge.lua
+            snes/build/apps/*/*.map
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------- release
+  # Every push to main refreshes a rolling "latest" prerelease whose asset is
+  # the freshly built snos.sfc; pushing a v* tag publishes a proper versioned
+  # release from that tag's build. PRs and other branches stop at the artifact.
+  release:
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: snos-rom
+          path: dist
+
+      # Artifact paths are rooted at snes/build, so the ROM lands at
+      # dist/snos.sfc.
+      - name: Publish versioned release (v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/snos.sfc \
+            --title "SNOS ${GITHUB_REF_NAME}" \
+            --notes "SNOS ROM built from ${GITHUB_SHA}."
+
+      - name: Refresh rolling latest release (main)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Recreate rather than edit: --cleanup-tag moves the tag so "latest"
+          # always points at the commit that produced the attached ROM.
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/snos.sfc \
+            --prerelease \
+            --title "SNOS latest (main)" \
+            --notes "Rolling build of main. Commit: ${GITHUB_SHA}."
