@@ -62,8 +62,13 @@ static const uint8_t LAKE_FLOOR[MC_LAKE_D2MAX] = MC_LAKE_FLOOR;
 /* Serverbound ids this file reacts to; everything else is skipped. */
 #define S_CHAT 0x03
 #define S_CLIENT_STATUS 0x04   /* action 0 = "respawn me" */
-#define S_POSITION 0x11
-#define S_POSITION_ROT 0x12
+/* 1.16.5 numbering, anchored on the two ids a live client has already
+ * proven: Chat 0x03 and Player Digging 0x1B. Counting between them lands
+ * Player Position on 0x12 — 0x11 is Lock Difficulty, and reading THAT as a
+ * position meant the console only ever saw the updates where the player's
+ * aim had not changed. Look around while you fall and it saw nothing. */
+#define S_POSITION 0x12
+#define S_POSITION_ROT 0x13     /* ...and rotation: the common one, missed */
 #define S_DIGGING 0x1B
 
 /* Session states. */
@@ -178,9 +183,13 @@ static void send_chat(const char *a, const char *b) {
   buf[o++] = '{'; buf[o++] = '"'; buf[o++] = 't'; buf[o++] = 'e';
   buf[o++] = 'x'; buf[o++] = 't'; buf[o++] = '"'; buf[o++] = ':';
   buf[o++] = '"';
+  /* 104 leaves room for the closing quote and brace, the position byte and
+   * the 16-byte UUID inside a body that still fits a one-byte frame length
+   * (< 128). The old cap of 55 left only 43 characters of text and cut the
+   * welcome message off mid-sentence. */
   for (p = 0; p < 2; p++) {
     const char *s = parts[p];
-    while (*s && o < 55) {
+    while (*s && o < 104) {
       char c = *s++;
       if (c >= 32 && c < 127 && c != '"' && c != '\\') buf[o++] = (uint8_t)c;
     }
@@ -454,7 +463,8 @@ static void handle_packet(void) {
     if (!send_blob(&BLOB_PRE)) return;
     if (!send_world()) return;
     if (!send_blob(&BLOB_POST)) return;
-    send_chat("Welcome to a Super Nintendo. ", "The world is read-only.");
+    send_chat("Welcome to a Super Nintendo Minecraft Server. It's slow.",
+              "");
     say(cur->pname);
     say(" joined the world\n");
     sys_notify(); /* run in the background, and a join still gets eyes */
@@ -470,7 +480,10 @@ static void handle_packet(void) {
        * chunks, because a same-dimension respawn leaves the client's
        * terrain alone (see mkmc.respawn_blob for why, and what to change
        * if a client ever lands in a void). */
-      if (rd_varint(&off) == 0 && cur->dead) {
+      if (rd_varint(&off) == 0) {
+        /* Not gated on cur->dead: the client only shows the button when it
+         * believes the player is dead, and if the two of us ever disagree
+         * the player is the one stuck looking at a screen with no way out. */
         cur->dead = 0;
         if (!send_blob(&BLOB_RESPAWN)) return;
         if (!send_blob(&BLOB_POST)) return;

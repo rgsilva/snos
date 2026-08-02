@@ -188,8 +188,10 @@ emu.addEventCallback(function()
   -- it has no FPU to read the rest with -- so this is X=0.0, Y=-100.0,
   -- Z=0.0, not on the ground.
   if step == 6.3 then
-    play_sock:send(pkt(0x11, string.rep("\0", 8) ..
-                       string.char(0xC0, 0x59, 0, 0, 0, 0, 0, 0) ..
+    -- 0x12 is Player Position in 1.16.5 (0x11 is Lock Difficulty), and
+    -- Y = -2048.0 is past the kill depth of -1024.
+    play_sock:send(pkt(0x12, string.rep("\0", 8) ..
+                       string.char(0xC0, 0xA0, 0, 0, 0, 0, 0, 0) ..
                        string.rep("\0", 8) .. string.char(0)))
     at = frame + 400
     step = 6.6
@@ -255,6 +257,14 @@ emu.addEventCallback(function()
   -- Status connection: the baked JSON, served whole.
   r.check(status_sock.rx:find('"protocol":754', 1, true) ~= nil,
           "status JSON did not carry the protocol version")
+  r.check(status_sock.rx:find("On a Super Nintendo. Yes, really.", 1, true)
+          ~= nil, "the server description is not the one that was written")
+
+  -- The welcome line arrives WHOLE. It is composed at runtime into a buffer
+  -- whose cap once cut it off mid-sentence, and a truncated greeting is the
+  -- kind of thing only a person notices.
+  r.check(play_sock.rx:find("It's slow.", 1, true) ~= nil,
+          "the welcome message was truncated before its end")
 
   -- Login: success packet first, name echoed, then the baked burst intact.
   local pkts = walk(play_sock.rx, 1)

@@ -222,6 +222,10 @@ VIEW_DISTANCE = 2            # server-dictated; 5x5 chunks around spawn
 # answer "what was here?" without a square root.
 MOUNT_CX, MOUNT_CZ, MOUNT_R, MOUNT_H = -22, 4, 9, 10
 LAKE_CX, LAKE_CZ, LAKE_R = 22, 16, 7
+# How far you fall before the world gives up on you. A power of two, because
+# the console decides from the EXPONENT of the client's Y alone — it has no
+# floating point to compare with. Deep enough that the fall reads as a fall.
+VOID_DEPTH = 1024
 SHORE_R = LAKE_R + 2
 
 
@@ -574,7 +578,7 @@ def status_json():
     return json.dumps({
         "version": {"name": VERSION_NAME, "protocol": PROTOCOL},
         "players": {"max": 1, "online": 0, "sample": []},
-        "description": {"text": "A Super Nintendo. Really."},
+        "description": {"text": "On a Super Nintendo. Yes, really."},
     }, separators=(",", ":"))
 
 
@@ -730,8 +734,9 @@ def emit_header(path, blobs, manifest, placed, order):
         w(f"#define MC_B_WATER {B_WATER}\n#define MC_B_SAND {B_SAND}\n")
         w("/* Below this, the world has ended. The console only ever tests\n")
         w(" * the SIGN and EXPONENT of the client's 64-bit Y, so the depth is\n")
-        w(" * a power of two by construction: exponent >= 1028 means |Y| >= 32. */\n")
-        w("#define MC_VOID_EXPONENT 1028\n")
+        w(" * a power of two by construction. */\n")
+        w(f"/* kill below Y = -{VOID_DEPTH} */\n")
+        w(f"#define MC_VOID_EXPONENT {1023 + VOID_DEPTH.bit_length() - 1}\n")
         xs = [x for (x, _, _) in SCULPTURE]
         x0, x1 = min(xs), max(xs)
         w(f"#define MC_SCULPT_X0 ({x0})\n#define MC_SCULPT_X1 ({x1})\n")
