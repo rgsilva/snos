@@ -41,7 +41,7 @@ import slirp
 UP = os.environ.get("SNOS_UP", "/tmp/snos-up.bin")
 DOWN = os.environ.get("SNOS_DOWN", "/tmp/snos-down.bin")
 
-FRAME = 128
+FRAME = 256
 HDR = 4
 SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 F_DATA = 0x01
@@ -69,11 +69,10 @@ GW_VERSION = 2
 
 
 def checksum(f):
-    s = 0
-    for i, b in enumerate(f):
-        if i != SUM:
-            s += b
-    return s & 0xFF
+    # sum() runs at C speed; the per-byte Python loop this replaces was paid
+    # twice per exchange and scales with the console's poll rate now that the
+    # bridge answers every poll rather than one per video frame.
+    return (sum(f) - f[SUM]) & 0xFF
 
 
 def local_ip():
@@ -426,6 +425,7 @@ def main():
     gw = Gateway()
     up_off = os.path.getsize(UP) // FRAME * FRAME
     down = open(DOWN, "ab", buffering=0)
+    last_moved = 0.0
 
     print(f"gateway: reading {UP}, writing {DOWN}")
     print("gateway: load tools/netbridge.lua in Mesen's Script Window")
@@ -490,8 +490,17 @@ def main():
 
             if moved:
                 down.write(bytes(gw.next_out()))
+                last_moved = time.time()
             else:
-                time.sleep(0.004)       # ~1/4 of a video frame
+                # Adaptive, not fixed: at the console's old 60 Hz poll rate a
+                # 4 ms nap was <7% of the round trip, but the console can now
+                # poll many times per video frame and a fixed nap becomes the
+                # wall. Stay snappy while a transfer is live, back off to the
+                # old rate once the link has been quiet for a second.
+                if time.time() - last_moved < 1.0:
+                    time.sleep(0.0005)
+                else:
+                    time.sleep(0.004)
     except KeyboardInterrupt:
         # Daemon threads die with the process, but sockets and bound ports do
         # not deserve to be left to the OS's timing.

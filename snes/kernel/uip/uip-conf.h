@@ -35,11 +35,14 @@ typedef unsigned short uip_stats_t;
  * why uip_arp.c is not part of the build. */
 #define UIP_CONF_LLH_LEN 0
 
-/* One datagram. 576 is the IPv4 "must accept" minimum (RFC 791) and leaves
- * TCP an MSS of 536 — the classic floor, which is what the far side of the
- * NAT advertises too. Bigger buys little: the link underneath moves 128-byte
- * frames, so a large datagram is many frames whatever this says. */
-#define UIP_CONF_BUFFER_SIZE 576
+/* One datagram. Was 576 (the RFC 791 "must accept" floor, MSS 536) until the
+ * perf/netbridge round: uIP is one-segment stop-and-wait, so every per-segment
+ * fixed cost — an ip_service pass, the ack turnaround, the daemon's own
+ * turnaround — is paid per MSS of payload, and 1500 amortises those over 2.7x
+ * the bytes. The memory is three statics (this buffer, ip.c's pkt, net.c's
+ * iprx ring) in far WRAM, where the room exists. slirp.py's MTU/MSS advertise
+ * the same numbers; keep them in step. */
+#define UIP_CONF_BUFFER_SIZE 1500
 
 /* Eight, to match NET_CHANNELS: every SNOS channel can be a live connection
  * and none of them can find the stack full when the channel layer says there

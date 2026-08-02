@@ -34,15 +34,17 @@
  * the refusal window is only as long as a request takes to serve. */
 #define NET_CHANNELS 8
 
-/* 1 KB per channel out of HiRAM's 52 KB.
+/* 2 KB per channel out of HiRAM's 52 KB.
  *
- * Deliberately small. When a ring fills, the receiver simply stops acking, so
- * the sender retransmits and stops making progress — which is backpressure, and
- * it propagates through the gateway into TCP's own window without a single line
- * of flow control on either side. Large buffers would only delay that, and
- * delay is exactly what you do not want between a slow consumer and a fast
- * server. At the current throughput 1 KB is over half a second of slack. */
-#define NET_RING 1024
+ * Deliberately small — when a ring fills, TCP's window closes and the sender
+ * stops, which is backpressure with no flow-control code on either side. But
+ * it has a hard floor: ip.c only reopens the window when a FULL segment fits
+ * (rxfree >= UIP_TCP_MSS, and it must — uIP acks before the appcall, so a
+ * segment that does not fit is LOST, not retried). The ring therefore has to
+ * be comfortably larger than the MSS, and the MSS went 536 -> 1460 with the
+ * MTU (uip-conf.h). At 1024 the window could never open at all: every TCP
+ * connection wedged on arrival, found the hard way when the MTU was raised. */
+#define NET_RING 2048
 
 /* The NET_ST_* values live in snos_abi.h, because an application receives them
  * from SYS_NET_STATE and cannot interpret the result without them. Defining
@@ -52,6 +54,13 @@
 
 void net_init(void);
 void net_service(void); /* one link poll; called from the NMI handler */
+/* Extra polls from the foreground, over and above the NMI's one per frame.
+ * net_service_fg() masks NMI for the span, so to every shared index a
+ * foreground poll is indistinguishable from an NMI poll; net_fg_wanted()
+ * says whether one would do any good — the link is mid-transfer or has
+ * something queued — so an idle session never spins the bridge. */
+int net_fg_wanted(void);
+void net_service_fg(void);
 int net_up(void);       /* is a gateway attached at all */
 
 int net_read(int ch, uint8_t __far *dst, int max); /* bytes moved, 0 = none yet */

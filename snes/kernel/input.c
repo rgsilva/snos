@@ -20,6 +20,7 @@
 #include "snos.h"
 #include "proc.h"
 #include "ip.h"
+#include "net.h"
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -300,6 +301,56 @@ int kbd_getchar_nonblock(void) {
   return osk_poll();
 }
 
+/* May a foreground link poll run on the CURRENT stack? The spin below runs
+ * on whatever stack the blocking caller owns — a process slot's 1536 bytes,
+ * more often than not — and those were sized against a high-water that did
+ * not include a foreground net_service chain on top of the blocker. So the
+ * poll pays its way only where there is headroom: current depth against the
+ * containing stack's floor, with room for the whole poll chain AND the NMI
+ * that lands on its residue at unmask. Shallow blockers — a shell at its
+ * prompt, an app pumping a download — poll; anything deep just spins as it
+ * always did and the NMI's 60 Hz poll carries the link. */
+#define NET_FG_STACK_NEED 640u
+static int fg_poll_room(void) {
+  uint8_t probe;
+  uint16_t sp = (uint16_t)(uint32_t)&probe;
+  uint16_t floor;
+  if (sp >= (uint16_t)SNOS_PSTACK_LO(1)) floor = (uint16_t)SNOS_PSTACK_LO(1);
+  else if (sp >= (uint16_t)SNOS_PSTACK_LO(0)) floor = (uint16_t)SNOS_PSTACK_LO(0);
+  else floor = SNOS_KSTACK_LO;
+  return (uint16_t)(sp - floor) >= NET_FG_STACK_NEED;
+}
+
+/* May a poll START RIGHT NOW? A poll masks NMI for its whole span — ~14k
+ * cycles at LINK_FRAME 256, seventy-odd scanlines — and the ONE thing it
+ * must never do is still be masked when vblank begins. A delayed NMI does
+ * not merely jitter: pad_latch's wait-for-start spin cannot tell "finished
+ * long ago" from "not started", so a late NMI burns its full guard budget —
+ * the better part of a frame INSIDE the handler — and the handler then
+ * spans the NEXT vblank start, where the 65816 happily takes a nested NMI
+ * (the I flag does not mask it). Each nested handler is also late, also
+ * burns, and the cascade eats the stack down to the paint; it surfaced as a
+ * scheduler resume from never-written stack, A5A5 in every register. The
+ * $4212 vblank-flag check this replaces only refused to START in vblank —
+ * it happily started a 70-line poll on line 220.
+ *
+ * So: latch the V counter and require the poll to FIT. Lines 0..POLL_LAST
+ * leave 90+ lines before vblank at 225; lines 227+ are safe for the
+ * opposite reason — this frame's NMI has already fired and the next is a
+ * full frame away. Only the closing window [POLL_LAST+1, 226] is refused,
+ * and the spin just re-asks a few lines later. The 9-bit V counter's high
+ * bit is deliberately ignored: lines 256..261 alias to 0..5, which the
+ * early zone allows — correctly, they are deep in the post-NMI region. */
+#define POLL_LAST 134u
+static int fg_poll_fits(void) {
+  uint8_t v;
+  (void)R8(0x213F); /* reset the OPVCT read toggle to the low half */
+  (void)R8(0x2137); /* latch H/V */
+  v = R8(0x213D);   /* OPVCT low eight bits */
+  (void)R8(0x213F); /* leave the toggle reset for the next caller */
+  return v <= POLL_LAST || v >= 227u;
+}
+
 void kbd_idle(void) {
   uint16_t f = snos_frames;
   /* Every blocking loop in the kernel funnels through here, so this is THE
@@ -307,7 +358,19 @@ void kbd_idle(void) {
    * shell at its prompt, most of the time) is mid-syscall at every NMI, the
    * deferral always says no, and background processes starve forever. */
   proc_switch_now();
-  while (snos_frames == f) {
+  if (net_fg_wanted() && fg_poll_room()) {
+    /* This spin used to be dead time, and it is most of every second. Spend
+     * it polling the link — but only while a transfer is live (net_fg_wanted,
+     * so an idle prompt does not spin the bridge), only with stack headroom
+     * (fg_poll_room), and only when the poll FITS before the next vblank
+     * (fg_poll_fits — the NMI must never be masked across line 225, see
+     * above). The spin re-checks all three before every poll. */
+    while (snos_frames == f) {
+      if (net_fg_wanted() && fg_poll_fits()) net_service_fg();
+    }
+  } else {
+    while (snos_frames == f) {
+    }
   }
   /* The IP layer's foreground pump (M11). Here for the same reason the OSK
    * is serviced here: every blocking loop funnels through, so the stack gets

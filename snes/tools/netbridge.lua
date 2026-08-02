@@ -78,7 +78,7 @@ local DOWN = "/tmp/snos-down.bin" -- gateway -> SNES
 
 local MB = 0xE000                 -- link mailbox, WRAM $7EE000
 local MAGIC = 0x4B4C              -- "LK"
-local FRAME = 128
+local FRAME = 256
 -- Mailbox buffer offsets are DERIVED, never literals: they used to be 0x10 and
 -- 0x50, which is exactly FRAME apart at 64, so a bigger frame overlapped them
 -- silently. See the note on LINK_MB_RX in kernel/link.h.
@@ -117,8 +117,6 @@ if not downf then
   return
 end
 
-local function rb(o) return emu.read(MB + o, WRAM) end
-local function wb(o, v) emu.write(MB + o, v & 0xFF, WRAM) end
 local function ru16(o) return emu.read16(MB + o, WRAM) end
 local function wu16(o, v) emu.write16(MB + o, v & 0xFFFF, WRAM) end
 
@@ -237,7 +235,12 @@ local function deliver()
   if not (chunk and #chunk == FRAME) then return end
 
   down_off = down_off + FRAME
-  for i = 0, FRAME - 1 do wb(RXOFF + i, chunk:byte(i + 1)) end
+  -- 16-bit units, not bytes: each emu.read/write is a Lua<->core API crossing,
+  -- and the exchange runs at the console's poll rate now, not at 60 Hz. FRAME
+  -- is even by the checksum's multiple-of-16 rule (kernel/net.c), so no tail.
+  for i = 0, FRAME - 2, 2 do
+    wu16(RXOFF + i, chunk:byte(i + 1) | (chunk:byte(i + 2) << 8))
+  end
   wu16(0x04, ru16(0x04) + 1)
   rx_pending = true
   received = received + 1
@@ -261,7 +264,10 @@ local function exchange()
   -- LINK_MB_TX and only THEN bumps the sequence counter, so a callback on the
   -- counter cannot see a half-written frame.
   local bytes = {}
-  for i = 0, FRAME - 1 do bytes[#bytes + 1] = string.char(rb(TXOFF + i)) end
+  for i = 0, FRAME - 2, 2 do
+    local v = ru16(TXOFF + i)
+    bytes[#bytes + 1] = string.char(v & 0xFF, v >> 8)
+  end
   up:write(table.concat(bytes))
   up:flush()
   sent = sent + 1

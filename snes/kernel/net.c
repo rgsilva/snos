@@ -53,6 +53,7 @@
 #include "link.h"
 #include "proc.h"
 #include "ip.h"
+#include "snos.h" /* snos_frames, for the foreground-poll hot window */
 /* proc_lock (M10 review): the txq record appends and channel scan-and-claim
  * below are run BOTH by the shell directly and by background syscalls. A
  * context switch mid-record interleaves two control records and desyncs the
@@ -174,11 +175,18 @@ static uint16_t txq_tail; /* NMI writes */
  *
  * RX is larger than TX for the same reason NET_RING beats NET_TXRING: what
  * arrives must be buffered against a consumer that runs when it runs, while
- * what we send we can simply generate less of. 2 KB holds three MTU-sized
- * datagrams; when it fills, frame_fits refuses the frame and the link's own
- * backpressure does the rest — no datagram is ever half-delivered. */
-#define IP_RXRING 2048
-#define IP_TXRING 1024
+ * what we send we can simply generate less of. 4 KB holds two MTU-sized
+ * datagrams with room to spare (the MTU went 576 -> 1500 with the ring, see
+ * uip-conf.h); when it fills, frame_fits refuses the frame and the link's
+ * own backpressure does the rest — no datagram is ever half-delivered. */
+#define IP_RXRING 4096
+/* TX must hold ONE full-MTU datagram plus its 2-byte prefix, or a big
+ * outbound segment can never be queued at all: net_ip_write is all-or-
+ * nothing, so a ring smaller than the largest record does not backpressure
+ * a writer, it wedges it — uIP would retry the same too-big segment forever.
+ * One datagram is also all there ever is in flight (uIP is one-segment
+ * stop-and-wait), so 2 KB is the fit, not a guess. */
+#define IP_TXRING 2048
 typedef char ip_rings_must_be_power_of_two[((IP_RXRING & (IP_RXRING - 1)) == 0 &&
                                             (IP_TXRING & (IP_TXRING - 1)) == 0)
                                                ? 1
@@ -236,6 +244,17 @@ static uint16_t txframe_bytes;
  * exactly the class of bug that cost this project a day in M3. Kernel statics
  * are zeroed by the C startup, so this is false until net_init says otherwise. */
 static uint8_t net_ready;
+
+/* Foreground-poll hot window: the frame count until which extra polls are
+ * worth running. Stamped by net_service() whenever a received frame carries
+ * data — one write, in the poll itself, so it needs no locking: the NMI is
+ * the only writer, and the foreground only compares it against snos_frames.
+ * Three frames of slack keeps the window open across the gaps inside a bulk
+ * transfer (peer turnaround, an ip_service pass) without keeping an idle
+ * session polling: once nothing has arrived for three frames, the spin goes
+ * back to the NMI's 60 Hz and the bridge files stop growing any faster. */
+#define NET_HOT_FRAMES 3u
+static volatile uint16_t net_hot_until;
 
 static void build_frame(void);
 
@@ -1039,6 +1058,10 @@ void net_service(void) {
         awaiting_ack = 0;
         tx_seq++;
         syn_out = 0; /* it acked us, so it has our sequence base */
+        /* The peer just acknowledged us: it is alive and mid-conversation,
+         * so keep the foreground polling — the next frame we build (more of
+         * this transfer, usually) should not wait for an NMI. */
+        net_hot_until = (uint16_t)(snos_frames + NET_HOT_FRAMES);
       }
       /* The peer restarted. Adopt its sequence base, once, and fail every
        * channel: whatever sockets those represented died with it, so an app
@@ -1077,6 +1100,11 @@ void net_service(void) {
       }
 
       if ((rxframe[LINK_FLAGS] & LINK_F_DATA) != 0) {
+        /* Data is moving (a fresh frame OR a retransmission — either means
+         * the peer has more to say), so invite foreground polls for a few
+         * frames. Refused frames count too: the faster the retransmit is
+         * answered once the ring drains, the shorter the stall. */
+        net_hot_until = (uint16_t)(snos_frames + NET_HOT_FRAMES);
         if (rxframe[LINK_SEQ] == rx_next) {
           if (frame_fits(rxframe)) {
             frame_deliver(rxframe);
@@ -1099,6 +1127,15 @@ void net_service(void) {
     build_frame();
     if ((txframe[LINK_FLAGS] & LINK_F_DATA) != 0) {
       awaiting_ack = 1;
+      /* We just put fresh data on the wire; poll for the ack rather than
+       * waiting a frame for it. Deliberately NOT stamped on the resend path
+       * below: against a dead peer the resends would otherwise keep the
+       * window open forever, and the foreground would spin the bridge (and
+       * grow its files) at full rate until someone restarted the gateway.
+       * This way a dead peer stops stamping, the window closes in
+       * NET_HOT_FRAMES, and retransmission falls back to the NMI's 60 Hz —
+       * exactly the rate it has always run at. */
+      net_hot_until = (uint16_t)(snos_frames + NET_HOT_FRAMES);
     }
   } else {
     /* Still unacknowledged: resend the identical frame, but refresh the ack
@@ -1111,4 +1148,46 @@ void net_service(void) {
 
   /* Last, and only now: the frame above carries this poll's ack. */
   link_send(txframe);
+}
+
+/* ------------------------------------------------- foreground extra polls
+ *
+ * The NMI's one poll per frame pinned the whole link to 60 polls/s, and a
+ * 536-byte TCP segment is several link frames plus ack turnarounds — which
+ * is why bulk transfers crawled (PLAN.md: the moving `mc` client outran the
+ * emulated link). The bridge was rebuilt around memory callbacks precisely
+ * so it answers whenever the console asks, at whatever rate it asks
+ * (tools/netbridge.lua); the console just never asked more than 60 times a
+ * second. These two let every blocking loop (kbd_idle's frame-boundary spin)
+ * ask as often as it likes while a transfer is live.
+ *
+ * On real hardware this is MORE faithful, not less: the cable is
+ * SNES-clocked and a real peer answers in microseconds, so many exchanges
+ * per video frame is what M7 will actually do. */
+
+/* Would an extra poll do any good right now? Cheap enough for a spin loop:
+ * two 16-bit reads and a compare, no mailbox access, no masking. The hot
+ * window is the ONLY trigger, deliberately: every state that means "poll
+ * more" (data arriving, our data acked, fresh data sent) stamps the window
+ * from inside net_service, and every state that must NOT poll forever — a
+ * dead gateway leaving a frame permanently unacked, queued datagrams that
+ * can never drain — stops stamping it, so the polls always decay back to
+ * the NMI's 60 Hz on their own. Reading these without masking is fine: a
+ * stale read mis-answers one iteration of a loop that asks again. */
+int net_fg_wanted(void) {
+  if (!net_ready) return 0;
+  return (int16_t)(net_hot_until - snos_frames) > 0;
+}
+
+/* One poll, from the foreground. Masking NMI for the span is the entire
+ * safety argument: net_service() was written to be the NMI's and assumes it
+ * cannot be preempted, so a foreground call must buy the same guarantee —
+ * the same idiom as pad_pressed() and the lifecycle mutations above. The
+ * caller is responsible for not doing this during vblank (input.c checks
+ * $4212), because an NMI deferred past the top of vblank makes pad_latch
+ * burn its guard spin — the exact hazard traps.c documents. */
+void net_service_fg(void) {
+  NET_NMI_OFF();
+  net_service();
+  NET_NMI_ON();
 }

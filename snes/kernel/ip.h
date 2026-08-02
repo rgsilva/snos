@@ -30,12 +30,12 @@
 #define IP_GW3 2   /* 10.0.2.2 — the daemon itself (NAT + default route) */
 #define IP_DNS3 3  /* 10.0.2.3 — the daemon's resolver front */
 
-/* One datagram, one buffer. 576 is the classic "must accept" IP datagram
- * (RFC 791) and what uIP calls a sensible UIP_BUFSIZE; it fits three deep in
- * net.c's receive ring and leaves TCP an MSS of 536. The link's 128-byte
+/* One datagram, one buffer. Matches UIP_CONF_BUFFER_SIZE (uip-conf.h, where
+ * the 576 -> 1500 change is explained) and slirp.py's MTU; the receive ring
+ * (net.c IP_RXRING) is sized to hold more than one of these. The link's
  * frames are irrelevant here — datagrams ride a length-prefixed byte stream,
  * so the MTU never has to know the frame size. */
-#define IP_MTU 576
+#define IP_MTU 1500
 
 void ip_init(void);
 /* The foreground pump: datagram reassembly, the stack, timers, and the

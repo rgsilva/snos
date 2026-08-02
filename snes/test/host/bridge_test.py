@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 
-FRAME = 128
+FRAME = 256
 HDR = 4
 SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
 F_DATA, F_SYN = 0x01, 0x02

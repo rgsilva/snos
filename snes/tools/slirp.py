@@ -42,8 +42,8 @@ SNES_IP = "10.0.2.15"
 GW_IP = "10.0.2.2"
 DNS_IP = "10.0.2.3"
 
-MTU = 576
-MSS = 536              # MTU - 20 IP - 20 TCP: the classic floor
+MTU = 1500             # matches the console's UIP_CONF_BUFFER_SIZE/IP_MTU
+MSS = 1460             # MTU - 20 IP - 20 TCP
 TCP_WINDOW = 2048      # what we advertise; we still send one segment at a time
 
 PROTO_ICMP, PROTO_TCP, PROTO_UDP = 1, 6, 17
