@@ -549,7 +549,7 @@ open browser, listen/accept, and now a plain TCP path for VNC — and the seams 
   landed with the review fixes (`963853f`). What remains of the "one channel model" idea is
   taste, not a known bug.
 
-### Performance — link throughput *(queued 2026-07-29; items 1 and 2 done)*
+### Performance — link throughput *(queued 2026-07-29; items 1-3 done, see the 2026-08-02 round)*
 The `vnc` client made the link's speed the headline problem. **Progress so far, all measured:**
 
 | | 48 KB `vnc` screen | 8192 B via `file://` |
@@ -665,7 +665,9 @@ Ordered by risk-adjusted value against the iteration-speed goal:
    8–32 KB/s range — i.e. **in the neighbourhood of the real cable's ~20 KB/s**, which is exactly
    the goal — but see the poll-rate cap above: without item 1 the console cannot ask often
    enough to collect it.
-3. **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
+3. ~~**`LINK_FRAME` 64 → 256.**~~ **DONE 2026-08-02** (`perf/netbridge`), together with the
+   foreground polls that make it collectible — see the 2026-08-02 round below. *(original text
+   follows)* **`LINK_FRAME` 64 → 256.** 4× on paper, one constant on each of four sides, no protocol change.
    **The reason it panicked may now be gone:** the handler no longer overruns its own frame (worst
    116.8 of 262 scanlines), so NMI no longer re-enters itself, which was the suspected mechanism.
    Retry it before assuming the old failure still applies — but re-measure with `tools/nmiprof.lua`
@@ -883,6 +885,49 @@ synchronous, console-clocked, and has no file bridge, no 1-deep mailbox and no 6
 ~20 KB/s is the documented ballpark, about **33× what the test rig gets**. So M7 on real silicon
 is faster than any of this, and items 3 and 4 are worth doing on their own merits rather than
 because the demo depends on them.
+
+**Round of 2026-08-02 — the console finally asks faster than 60 Hz (`perf/netbridge`).** Four
+coordinated changes, one branch, full serial suite green (22/22). Measured on the hermetic
+`test-vnc` harness, same machine, same day, both builds:
+
+| | hermetic `test-vnc`, first 48 KB screen |
+|---|---|
+| main before the round | 3148 frames |
+| **after the round** | **1064 frames — 2.96×** |
+
+- **`LINK_FRAME` 128 → 256** (item 3, retried as the item instructed after the MVN work made it
+  affordable). One constant and its four derived copies; the suite had already proven 256 safe on
+  2026-07-31, and it held.
+- **Foreground link polls.** `net_service()` had only ever run from NMI, so the *console* was the
+  60 Hz ceiling the bridge rebuild had been waiting on. `kbd_idle`'s frame-boundary spin now polls
+  while a transfer is live, behind three gates: a **hot window** stamped only by productive link
+  events (a dead gateway stops stamping and decays back to 60 Hz instead of spinning the bridge's
+  files to megabytes), a **stack-headroom check** (the 1536-byte process slots were sized without
+  this chain on top of a blocked app), and a **V-counter check** so a poll never masks NMI across
+  the top of vblank. That last gate is the round's blood-bought lesson: a poll is ~70 scanlines of
+  masked NMI, and an NMI that enters late burns `pad_latch`'s whole guard budget (it cannot tell
+  "auto-read finished long ago" from "not started"), runs the handler into the *next* vblank, where
+  the 65816 takes a **nested NMI** — which is also late, also burns, and the cascade eats the stack
+  to the paint. It surfaced as a scheduler resume from never-written stack, `A5A5` in every
+  register, only when a second process existed to resume. The `$4212` in-vblank flag is NOT the
+  right guard — it refuses to start a poll *in* vblank while happily starting a 70-line poll on
+  line 220.
+- **MTU 576 → 1500** end to end (uip-conf, `IP_MTU`, slirp), amortising uIP's per-segment
+  stop-and-wait costs over 2.7× the bytes. The ring floor lesson came free: `ip.c` only reopens
+  TCP's window when a **full MSS** fits (uIP acks before the appcall, so a segment that does not
+  fit is lost, not retried), so `NET_RING` had to go 1024 → 2048 — at 1024 the window never opened
+  and every connection wedged on arrival. Same shape on the send side: `net_ip_write` is
+  all-or-nothing, so `IP_TXRING` must hold one full datagram + prefix or a big segment wedges
+  forever rather than backpressures. `IP_RXRING` 2048 → 4096.
+- **Host side:** `gateway.py`'s idle sleep is adaptive (0.5 ms while frames move, 4 ms after a
+  quiet second — at the old 60 Hz the fixed 4 ms was <7% of the round trip; at foreground poll
+  rates it would have been the wall), its checksum is one C-speed `sum()`, and the bridge moves
+  frames through Mesen's API in 16-bit units, halving the Lua↔core crossings per exchange.
+
+**Bring-up note:** the hermetic suite exercises everything except `netbridge.lua` + `gateway.py`
+live against Mesen's GUI (they cannot run headless; `bridge_test.py` covers the gateway's frame
+logic and `slirp_test.py` the NAT at MTU 1500). First live session: load the bridge, run
+`get file:///tmp/bench.bin` and `vnc`, and compare against the table above before trusting it.
 
 ### telnetd — remote shell into the console *(SHIPPED 2026-07-31, `3ac26d0`, v2 direct)*
 Built straight to v2; v1 was skipped because the clear question answered itself. ABI 10 adds
