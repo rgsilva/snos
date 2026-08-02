@@ -924,10 +924,22 @@ coordinated changes, one branch, full serial suite green (22/22). Measured on th
   rates it would have been the wall), its checksum is one C-speed `sum()`, and the bridge moves
   frames through Mesen's API in 16-bit units, halving the Lua↔core crossings per exchange.
 
-**Bring-up note:** the hermetic suite exercises everything except `netbridge.lua` + `gateway.py`
-live against Mesen's GUI (they cannot run headless; `bridge_test.py` covers the gateway's frame
-logic and `slirp_test.py` the NAT at MTU 1500). First live session: load the bridge, run
-`get file:///tmp/bench.bin` and `vnc`, and compare against the table above before trusting it.
+**Bring-up (2026-08-02, same day): the live path found the one bug the suite could not.** `mc`
+worked first try (bulk outbound); `vnc` showed a black screen with a healthy-looking gateway —
+bulk INBOUND, the one shape mc never sends. Decoded from a `--debug` gateway log: uIP acks an
+accepted segment with **window 0** (stopped), `slirp.py` never tracked the console's advertised
+window and fired the next 1460-byte segment straight into it, uIP destroyed it without an ack —
+and the retransmit clock never fired, because `link_busy` resets it whenever the console's own
+chatter (vnc's update requests) keeps the queue non-empty. On the old 60 Hz link the next segment
+took ~170 ms to arrive and the window had always reopened: **the slow link was the flow control**,
+and this round removed it. `gwip.lua`, the hermetic twin, has tracked the window from day one —
+which is why every test passed while the live path was black. Fix: slirp records `peer_wnd` from
+every console segment and refuses to send data into a closed window (`tools/slirp.py`).
+Reproduced and verified headlessly — Mesen `--testrunner` + the REAL `netbridge.lua` +
+`gateway.py` (private UP/DOWN files) + the chromium vncbox: picture tiles first nonzero at frame
+**24,285** unfixed vs **1,766** fixed. That rig (scratchpad `e2e-vnc.lua`) is also the proof the
+"cannot be exercised headlessly" claim above was stale: with `AllowIoOsAccess` on, the real
+bridge runs fine under `--testrunner` (budget ~29k frames before the runner's own timeout).
 
 ### telnetd — remote shell into the console *(SHIPPED 2026-07-31, `3ac26d0`, v2 direct)*
 Built straight to v2; v1 was skipped because the clear question answered itself. ABI 10 adds

@@ -162,6 +162,21 @@ class _Tcp(_Flow):
         self.inbound = False   # a port forward: the console is the server
         self.eof_at = 0.0      # when sock_eof was first seen
         self.last_from_console = 0.0  # console payload most recently arrived
+        # The console's advertised receive window, from its most recent
+        # segment. 0 until a segment has been seen; uIP only ever advertises
+        # its full buffer or zero. IGNORING THIS USED TO BE SURVIVABLE and is
+        # not any more: uIP acks an accepted segment with window 0 (stopped),
+        # and a segment sent into that window is dropped WITHOUT an ack. On
+        # the old 60 Hz link the next segment took ~170 ms to arrive and the
+        # window had always reopened by then — the slow link was the flow
+        # control. The 2026-08-02 link is fast enough that the next segment
+        # lands before the app drains, the drop becomes the common case, and
+        # the retransmit clock (reset by link_busy whenever the console's own
+        # chatter keeps the queue non-empty) never fires: a black vnc screen
+        # with a gateway full of healthy-looking traffic. gwip.lua, the
+        # hermetic twin, tracked the window from day one — which is exactly
+        # why no test ever saw this.
+        self.peer_wnd = 0
 
 
 class Slirp:
@@ -506,6 +521,7 @@ class Slirp:
             self.stat_drop += 1
             return
         payload = body[off:]
+        wnd = struct.unpack("!H", body[14:16])[0]
         key = (sport, dst, dport)
         t = self.tcp.get(key)
 
@@ -533,6 +549,11 @@ class Slirp:
             return
 
         t.touch()
+        # Every console segment restates its window, including the pure-ack
+        # window update uIP sends when the application drains its ring. That
+        # update is the ONLY "go" signal there is, so record it on every
+        # segment, not just data-bearing ones.
+        t.peer_wnd = wnd
         if flags & RST:
             t.close()
             self.tcp.pop(key, None)
@@ -745,7 +766,13 @@ class Slirp:
                         continue
                     t.sent_at = now
                     self._tcp_out(t, PSH | ACK, t.last_seg, seq=t.snd_una)
-            elif t.outbuf:
+            elif t.outbuf and t.peer_wnd >= min(len(t.outbuf), MSS):
+                # Gated on the console's advertised window (see peer_wnd in
+                # _Tcp): a segment sent into a closed window is not queued by
+                # uIP, it is silently destroyed, and only wall-clock luck ever
+                # retransmits it. Waiting costs nothing — the window update
+                # that reopens it arrives through _in_tcp within a poll or
+                # two of the app draining, and the very next pump sends.
                 t.touch()
                 n = min(len(t.outbuf), MSS)
                 t.last_seg = t.outbuf[:n]
@@ -754,7 +781,7 @@ class Slirp:
                 t.snd_nxt = (t.snd_una + n) & 0xFFFFFFFF
                 t.sent_at = now
                 t.retries = 0
-            elif t.sock_eof and not t.fin_sent:
+            elif t.sock_eof and not t.fin_sent and not t.outbuf:
                 # uIP has no CLOSE_WAIT: the FIN we forward kills BOTH
                 # directions of the console's connection at once, so a client
                 # that half-closes right after its request (printf | nc) races
