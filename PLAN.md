@@ -1059,6 +1059,21 @@ staging ROM in RAM before the syscall that already took a far pointer
 worth as much as the findings: the ring disciplines, uIP's API contract, the
 TCP sequence arithmetic and every byte of mkmc's packet encoding survived.
 
+**A MOVING CLIENT OUTRUNS THE EMULATED LINK, and it is worth knowing before
+blaming the code.** A Minecraft client sends a position packet every tick
+while the player is moving — ~20/s of ~33 bytes, ~660 B/s before TCP headers
+— against a link that carries roughly 600 B/s through uIP's one-segment
+stop-and-wait. So a player who keeps walking accumulates a backlog that never
+drains, and everything they do reaches the console late: a punched block comes
+back late, a chat line echoes late, a disconnect is noticed late. Standing
+still drops the client to ~33 B/s and the backlog drains. Nothing above the
+link can fix this — TCP is ordered, so the console cannot skip to the newest
+position — and it is a property of the EMULATED link only: M7's cable makes
+660 B/s about 3% of capacity. The lever that would help here, if the demo ever
+needs it, is `LINK_FRAME` 128 → 256 (proven safe 2026-07-31, one constant plus
+its derived copies), because this workload is bandwidth-bound rather than
+round-trip-bound — unlike the vnc transfer that measurement was taken on.
+
 **Known risks, named in advance:** the join burst vs client patience is the one empirical
 unknown — ~27 KB of spawn chunks is ~45 s at the emulated link's ~600 B/s, brushing client
 timeouts (mitigations: spawn-chunk-first order, keepalives from the first second, view distance
