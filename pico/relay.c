@@ -1,5 +1,6 @@
 #include "relay.h"
 #include "ctrl.h"
+#include "log.h"
 #include "pico/cyw43_arch.h"
 #include "lwip/tcp.h"
 #include "lwip/dns.h"
@@ -77,9 +78,9 @@ void relay_ip_bytes(const uint8_t *data, size_t len) {
         ipbuf[ip_used++] = data[i];
         if (ip_used < 2) continue;
         size_t n = ipbuf[0] | ((size_t)ipbuf[1] << 8);
-        if (!n || n > LINK_MTU) { puts("relay: IP stream desync"); ip_used = 0; return; }
+        if (!n || n > LINK_MTU) { log_puts("relay: IP stream desync"); ip_used = 0; return; }
         if (ip_used == n + 2) {
-            if (!relay_send(1, ipbuf + 2, n)) puts("relay: IP output queue full");
+            if (!relay_send(1, ipbuf + 2, n)) log_puts("relay: IP output queue full");
             ip_used = 0;
         }
     }

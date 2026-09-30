@@ -1,5 +1,6 @@
 #include "ctrl.h"
 #include "relay.h"
+#include "log.h"
 #include <stdio.h>
 static uint8_t state, type, length, used, payload[255];
 static uint8_t address[4];
@@ -26,7 +27,7 @@ static void dispatch(void) {
     else if ((type == 0x0b || type == 0x0c) && length >= 3) {
         uint8_t p[] = {payload[1], payload[2], payload[0]};
         if (!relay_send(type == 0x0b ? 2 : 3, p, sizeof(p)) && !ctrl_error(p))
-            puts("ctrl: error queue full");
+            log_puts("ctrl: error queue full");
     }
 }
 void ctrl_bytes(const uint8_t *data, size_t len) {

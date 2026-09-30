@@ -396,10 +396,12 @@ power question, and a BT keyboard is what is lying around. The console side
 needs nothing: keystrokes are already `LINK_CH_KBD` records feeding the same
 input ring the OSK and telnetd feed.
 
-**7. `log off` / `log on` on the Pico's USB console.** The 2-second stats
-line scrolls over whatever you are typing. Default the periodic logging off,
-keep `stats` for a one-shot, and let `log on` bring the stream back when
-debugging.
+**7. `log off` / `log on` on the Pico's USB console. ✅** The 2-second stats
+line and every asynchronous event line scrolled over whatever was being typed.
+All unsolicited output now goes through one helper (`pico/log.c`); `log off`
+silences it, `log on` restores it, `log` reports the state. Default ON at every
+boot, not saved to flash. Command replies, the typed echo and `stats` on demand
+always print.
 
 ### M8 — IRC client
 Port Contiki's IRC app onto uIP + the SNOS console.

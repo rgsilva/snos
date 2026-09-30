@@ -32,6 +32,9 @@ wifi My WiFi|my password|192.168.1.100
 wifi?
 wifi clear
 stats
+log off
+log on
+log
 ```
 
 `wifi SSID|PASSWORD|HOST` saves settings and starts an asynchronous join.
@@ -52,6 +55,10 @@ Port, link, and keyboard service starts without waiting for WiFi. Failed joins
 retry after 10 seconds; a join has a 30-second deadline. Without an SSID the
 firmware waits for configuration. WiFi state changes are logged, and stats
 include WiFi state and relay host every two seconds. `stats` prints immediately.
+`log on|off` enables or silences all unsolicited stats, events, and warnings on
+USB CDC and UART0; `log` reports the current setting. Logging is on at every
+boot and the setting is not saved to flash. Command replies, input echo, and
+help remain visible with logging off, and `stats` still prints once on demand.
 
 From the repository root on the relay host:
 

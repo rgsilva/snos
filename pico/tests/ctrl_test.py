@@ -8,6 +8,7 @@ BUILD = ROOT / "pico/build"
 BUILD.mkdir(exist_ok=True)
 subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC",
                 str(ROOT / "pico/link.c"), str(ROOT / "pico/ctrl.c"),
+                str(ROOT / "pico/log.c"),
                 str(ROOT / "pico/tests/ctrl_stub.c"), "-o", str(BUILD / "ctrl_test.so")], check=True)
 lib = C.CDLL(str(BUILD / "ctrl_test.so"))
 Byte = C.c_uint8

@@ -9,15 +9,16 @@
 #include "ctrl.h"
 #include "kbd.h"
 #include "relay.h"
+#include "log.h"
 static config_t settings;
 static bool wifi_ready, wifi_attempt;
 static int wifi_status = 99;
 static uint32_t wifi_retry_at, wifi_join_at;
 static const char *wifi_state = "starting";
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
-static void print_stats(void) {
+static void print_stats(bool reply) {
     port_stats_t p = port_stats(); link_stats_t l = link_stats();
-    printf("gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
+    (reply ? printf : log_printf)("gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
            " overrun=%"PRIu32" badsum=%"PRIu32" seq=%u ack=%u resends=%"PRIu32
            " kbd=%u relay=%s wifi=%s host=%s\n", p.gaps, p.complete, p.short_frames,
            p.clocks, p.overruns, l.bad_sum, l.seq, l.ack, l.resends,
@@ -41,7 +42,7 @@ static void wifi_poll(void) {
         wifi_retry_at = now + 10000;
         int e = cyw43_arch_init();
         if (e) {
-            if (wifi_status != e) printf("wifi: init failed (%d)\n", e);
+            if (wifi_status != e) log_printf("wifi: init failed (%d)\n", e);
             wifi_status = e; wifi_state = "init-failed"; return;
         }
         wifi_ready = true;
@@ -49,7 +50,7 @@ static void wifi_poll(void) {
         wifi_status = 99; wifi_retry_at = now;
     }
     if (!settings.ssid[0]) {
-        if (wifi_status != 98) puts("wifi: not configured, type: wifi SSID|PASSWORD|HOST");
+        if (wifi_status != 98) log_puts("wifi: not configured, type: wifi SSID|PASSWORD|HOST");
         wifi_status = 98; wifi_state = "unconfigured";
         relay_configure(settings.host, false);
         wifi_retry_at = now + 10000;
@@ -64,16 +65,16 @@ static void wifi_poll(void) {
         if (status != wifi_status) {
             if (status == CYW43_LINK_UP) {
                 cyw43_arch_lwip_begin();
-                printf("wifi: joined %s\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
+                log_printf("wifi: joined %s\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
                 cyw43_arch_lwip_end();
                 wifi_state = "up";
             } else if (status < 0 || status == CYW43_LINK_DOWN) {
-                printf("wifi: join failed (%d)\n", status);
+                log_printf("wifi: join failed (%d)\n", status);
                 wifi_state = "failed";
                 wifi_attempt = false; wifi_retry_at = now + 10000;
             } else {
                 wifi_state = status == CYW43_LINK_NOIP ? "dhcp" : "joining";
-                printf("wifi: %s\n", wifi_state);
+                log_printf("wifi: %s\n", wifi_state);
             }
             wifi_status = status;
         }
@@ -84,15 +85,20 @@ static void wifi_poll(void) {
                     settings.pass[0] ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN);
         wifi_retry_at = now + 10000;
         if (e) {
-            printf("wifi: join failed (%d)\n", e); wifi_state = "failed";
+            log_printf("wifi: join failed (%d)\n", e); wifi_state = "failed";
         } else {
             wifi_attempt = true; wifi_join_at = now; wifi_status = CYW43_LINK_JOIN;
-            wifi_state = "joining"; puts("wifi: joining");
+            wifi_state = "joining"; log_puts("wifi: joining");
         }
     }
 }
 static void console_command(char *line) {
-    if (!strcmp(line, "stats")) { print_stats(); return; }
+    if (!strcmp(line, "stats")) { print_stats(true); return; }
+    if (!strcmp(line, "log") || !strcmp(line, "log on") || !strcmp(line, "log off")) {
+        if (!strcmp(line, "log on")) log_set_enabled(true);
+        else if (!strcmp(line, "log off")) log_set_enabled(false);
+        puts(log_enabled() ? "log: on" : "log: off"); return;
+    }
     if (!strncmp(line, "type ", 5)) {
         puts(kbd_type(line + 5) ? "kbd: sent" : "kbd: queue full");
         return;
@@ -123,7 +129,7 @@ static void console_command(char *line) {
             }
         }
     }
-    puts("commands: wifi SSID|PASSWORD|HOST (max 32|64|63 bytes), wifi?, wifi clear, stats, type <text> (send keystrokes + Enter), kbd test on|off");
+    puts("commands: wifi SSID|PASSWORD|HOST (max 32|64|63 bytes), wifi?, wifi clear, stats, log, log on|off, type <text> (send keystrokes + Enter), kbd test on|off");
 }
 static void console_poll(void) {
     static char line[168];
@@ -162,7 +168,7 @@ int main(void) {
         if (moved) {
             link_rx_t result = link_on_rx(rx);
             if (result.valid) { last_valid_at = to_ms_since_boot(get_absolute_time()); port_set_idle(false); }
-            if (result.reset) { ctrl_reset(); relay_reset(); puts("link: SNES restarted"); }
+            if (result.reset) { ctrl_reset(); relay_reset(); log_puts("link: SNES restarted"); }
             for (size_t i = 0; i < result.count; ++i) {
                 link_record_t *r = &result.records[i];
                 if (r->ch == CH_CTRL) ctrl_bytes(r->data, r->len);
@@ -175,7 +181,7 @@ int main(void) {
         if (last_valid_at && (int32_t)(now - last_valid_at) > 2000) { last_valid_at = 0; port_set_idle(true); }
         if ((int32_t)(now - stats_at) >= 0) {
             stats_at = now + 2000;
-            print_stats();
+            print_stats(false);
         }
         tight_loop_contents();
     }
