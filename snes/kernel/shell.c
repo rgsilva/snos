@@ -22,6 +22,8 @@
 #include "proc.h"
 
 static char line[128];
+static char speed_args[SNOS_ARGV_MAX];
+static const app_entry_t *volatile speed_app;
 
 /* Hand-rolled rather than <string.h>: the kernel stack is 2816 bytes and the
  * point of never linking the C library here is to keep it that way.
@@ -1210,15 +1212,40 @@ static void cmd_send(char *hostport) {
   kcon_puts(" bytes]\n");
 }
 
-static void cmd_net(char *rest) {
+/* Return a launch request; the lookup and launch must stay in shell_run
+ * to avoid Calypsi corrupting the app pointer through an extra call frame. */
+static int cmd_net(char *rest) {
   char *what = rest;
-  (void)split_word(rest);
+  char *args = split_word(rest);
   if (streq(what, "status")) cmd_net_status();
   else if (streq(what, "test")) cmd_net_test();
+  else if (streq(what, "speedtest")) {
+    uint16_t i = 0, j = 0;
+    if (!net_ipmode()) {
+      kcon_puts("no ip - check net status\n");
+      return 0;
+    }
+    /* Only the shell knows HELLO's address. Pass it as an ordinary launch
+     * argument so the transfer buffers and protocol stay in the app arena. */
+    if (!*args || (args[0] == '-' && (!args[1] || args[1] == ' '))) {
+      if (!net_text[0]) {
+        kcon_puts("no gateway address - use host:port\n");
+        return 0;
+      }
+      while (net_text[j]) speed_args[i++] = net_text[j++];
+      speed_args[i++] = ' ';
+      if (*args) args++;
+    }
+    while (*args && i + 1 < sizeof speed_args) speed_args[i++] = *args++;
+    speed_args[i] = 0;
+    return 1;
+  }
   else {
     kcon_puts("net status         the daemon, its address and counters\n");
     kcon_puts("net test           reach a known host to prove the path works\n");
+    kcon_puts("net speedtest [host:port|-] [seconds 1..120]\n");
   }
+  return 0;
 }
 
 /* ---------------------------------------------------------------- shell */
@@ -1278,7 +1305,25 @@ void shell_run(void) {
     else if (streq(line, "write")) cmd_write(rest);
     else if (streq(line, "rm")) cmd_rm(rest);
     else if (streq(line, "compact")) cmd_compact();
-    else if (streq(line, "net")) cmd_net(rest);
+    else if (streq(line, "net")) {
+      if (cmd_net(rest)) {
+        /* Force a stored pointer: Calypsi otherwise ORs its halves in A
+         * for the null test and passes the modified low word to the launch. */
+        speed_app = app_find("speedtest");
+        if (speed_app != 0) {
+          run_app_entry(speed_app, speed_args);
+        }
+        kcon_puts("refused ");
+        kcon_putu(net_stat_refused);
+        kcon_puts(", hello ");
+        kcon_putu(net_stat_hello);
+        kcon_puts(", ip drop ");
+        kcon_putu(ip_stat_drop);
+        kcon_puts(", desync ");
+        kcon_putu(ip_stat_desync);
+        kcon_putc('\n');
+      }
+    }
     else if (streq(line, "ping")) cmd_ping(rest);
     else if (streq(line, "resolve")) cmd_resolve(rest);
     else if (streq(line, "debug")) cmd_debug(rest);

@@ -68,6 +68,13 @@ Override `CALDIR` if the toolchain lives elsewhere:
 make CALDIR=/path/to/calypsi-65816-5.17
 ```
 
+## Measuring the network
+
+Run `python3 snes/tools/speedtest.py` on the gateway host, then
+`net speedtest` on the console for download, upload and simultaneous B/s.
+`net speedtest [host:port|-] [seconds]` overrides the destination or duration;
+see [the measurement and protocol notes](docs/net-speedtest.md).
+
 ## Typing into it
 
 On a stock SNES the on-screen keyboard is the only way in, which is fine for a

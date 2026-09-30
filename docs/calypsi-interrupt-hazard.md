@@ -197,3 +197,18 @@ correct, an exec trace caught the NMI entering between `sta $4203` and the
 `rep`, and the resumed code read `$4216` as `0x0000` where 483 had been. The
 lesson from the first hazard held: the single wrong byte was concurrency, not
 logic — it just took an instruction-level trace to catch the CPU in the act.
+
+## Far-pointer null tests can also corrupt a launch (2026-09-30)
+
+The `net speedtest` launch reproduced the `$00:0005` BRK above even with the
+lookup directly in `shell_run`. Its listing isolates another cause: after
+`app_find` returns the pointer in A/X, the null test emits `STX _Dp; ORA _Dp`.
+The call then stores that **modified A** as the pointer's low word. Neither an
+explicit `app != 0` comparison nor a volatile automatic pointer changed this
+code generation at `-O0`.
+
+A file-scope volatile pointer forces a store of A/X before the comparison and
+a reload of both halves before the call; the listing confirms both. The new
+shell launch uses that workaround. This is independent of interrupt timing:
+when a far pointer breaks, inspect the value after its null test as well as
+its lifetime across calls. Moving a lookup up a frame alone is not sufficient.
