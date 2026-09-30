@@ -53,6 +53,7 @@
 #include "snos_abi.h"
 
 void net_init(void);
+int net_reset(void); /* shell only; returns the number of failed channels */
 void net_service(void); /* one link poll; called from the NMI handler */
 /* Extra polls from the foreground, over and above the NMI's one per frame.
  * net_service_fg() masks NMI for the span, so to every shared index a

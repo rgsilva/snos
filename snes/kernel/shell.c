@@ -803,61 +803,7 @@ static void cmd_mtest(void) {
                              : " STALLED - preemption is broken\n");
 }
 
-/* Ask the far end to prove it is there, rather than reporting the mailbox.
- *
- * net_up() only tests whether the *bridge* claimed the link. The daemon behind
- * it can be stopped, crashed or wedged and this still said "gateway up" — which
- * it cheerfully did during a session where every fetch was timing out. A status
- * line that is right only when nothing is wrong is worse than none, because it
- * is consulted precisely when something is. */
-static void cmd_net_status(void) {
-  uint16_t before, start, deadline, waited, rx0;
-
-  if (!net_up()) {
-    kcon_puts("no link (the bridge script is not running)\n");
-    kcon_puts("(emulator: run build/snosbridge.lua; hardware: M7)\n");
-    return;
-  }
-
-  before = net_stat_hello;
-  rx0 = net_stat_rx_frames;
-  if (net_hello() < 0) {
-    kcon_puts("link up, but the send queue is full\n");
-    return;
-  }
-
-  /* Three seconds, not one.
-   *
-   * A HELLO answers in about 7 frames on an idle link. After a 49 KB transfer
-   * — a page in `web` — it was measured at 21 to 30, with the resend counter up
-   * from 3 to 80: the reply queues behind whatever the link is still carrying.
-   * One second was close enough to that to report "the gateway is NOT
-   * answering" about a gateway that was working perfectly, which is a lie told
-   * by the one command whose entire job is to be trusted about this. */
-  start = snos_frames;
-  deadline = (uint16_t)(start + 180u);
-  while (net_stat_hello == before) {
-    if ((int16_t)(snos_frames - deadline) >= 0) {
-      /* Say what the link did while we waited. Frames arriving means the far
-       * end is alive and merely slow or busy; none at all means nothing is
-       * coming back, and those want different things done about them. */
-      uint16_t moved = (uint16_t)(net_stat_rx_frames - rx0);
-      kcon_puts("no answer in 3s. ");
-      kcon_putu(moved);
-      kcon_puts(" frames in, ");
-      kcon_putu(net_stat_resent);
-      kcon_puts(" resends\n");
-      kcon_puts(moved ? "(the link is alive - the gateway is busy or wedged)\n"
-                      : "(nothing is coming back - is tools/gateway.py running?)\n");
-      return;
-    }
-    kbd_idle();
-  }
-  /* Against the recorded start, not deadline-minus-a-constant: the constant
-   * was still 60 after the timeout above became 180, and every normal reply
-   * printed as a ~65000-frame underflow. */
-  waited = (uint16_t)(snos_frames - start);
-
+static void cmd_net_report(uint16_t waited) {
   kcon_puts("gateway alive");
   if (net_text[0]) {
     /* The SNES has no address of its own, so anything it serves is reached at
@@ -935,6 +881,64 @@ static void cmd_net_status(void) {
     kcon_putu(net_gw_version);
     kcon_puts("); nothing will connect\n");
   }
+}
+
+/* Ask the far end to prove it is there, rather than reporting the mailbox.
+ *
+ * net_up() only tests whether the *bridge* claimed the link. The daemon behind
+ * it can be stopped, crashed or wedged and this still said "gateway up" — which
+ * it cheerfully did during a session where every fetch was timing out. A status
+ * line that is right only when nothing is wrong is worse than none, because it
+ * is consulted precisely when something is. */
+static void cmd_net_status(void) {
+  uint16_t before, start, deadline, waited, rx0;
+
+  if (!net_up()) {
+    kcon_puts("no link (the bridge script is not running)\n");
+    kcon_puts("(emulator: run build/snosbridge.lua; hardware: M7)\n");
+    return;
+  }
+
+  before = net_stat_hello;
+  rx0 = net_stat_rx_frames;
+  if (net_hello() < 0) {
+    kcon_puts("link up, but the send queue is full\n");
+    return;
+  }
+
+  /* Three seconds, not one.
+   *
+   * A HELLO answers in about 7 frames on an idle link. After a 49 KB transfer
+   * — a page in `web` — it was measured at 21 to 30, with the resend counter up
+   * from 3 to 80: the reply queues behind whatever the link is still carrying.
+   * One second was close enough to that to report "the gateway is NOT
+   * answering" about a gateway that was working perfectly, which is a lie told
+   * by the one command whose entire job is to be trusted about this. */
+  start = snos_frames;
+  deadline = (uint16_t)(start + 180u);
+  while (net_stat_hello == before) {
+    if ((int16_t)(snos_frames - deadline) >= 0) {
+      /* Say what the link did while we waited. Frames arriving means the far
+       * end is alive and merely slow or busy; none at all means nothing is
+       * coming back, and those want different things done about them. */
+      uint16_t moved = (uint16_t)(net_stat_rx_frames - rx0);
+      kcon_puts("no answer in 3s. ");
+      kcon_putu(moved);
+      kcon_puts(" frames in, ");
+      kcon_putu(net_stat_resent);
+      kcon_puts(" resends\n");
+      kcon_puts(moved ? "(the link is alive - the gateway is busy or wedged)\n"
+                      : "(nothing is coming back - is tools/gateway.py running?)\n");
+      return;
+    }
+    kbd_idle();
+  }
+  /* Against the recorded start, not deadline-minus-a-constant: the constant
+   * was still 60 after the timeout above became 180, and every normal reply
+   * printed as a ~65000-frame underflow. */
+  waited = (uint16_t)(snos_frames - start);
+
+  cmd_net_report(waited);
 }
 
 /* `ping A.B.C.D` — four real ICMP echo requests, composed on this machine.
@@ -1222,13 +1226,35 @@ static void cmd_send(char *hostport) {
   kcon_puts(" bytes]\n");
 }
 
+/* Allow an unplugged peer to return during the same three-second window as
+ * status. ip_service sends HELLO as soon as a backend is present. */
+static void cmd_net_reset(void) {
+  uint16_t start;
+  int n = net_reset();
+  kcon_puts("network reset: ");
+  kcon_putu((uint16_t)n);
+  kcon_puts(n == 1 ? " channel failed, IP cleared\n"
+                   : " channels failed, IP cleared\n");
+  start = snos_frames;
+  while (net_stat_hello == 0 && (uint16_t)(snos_frames - start) < 180u)
+    kbd_idle();
+  if (net_stat_hello == 0) {
+    kcon_puts(net_up() ? "link up, no answer in 3s\n"
+                       : "no link, no answer in 3s\n");
+    return;
+  }
+  cmd_net_report((uint16_t)(snos_frames - start));
+}
+
 static void cmd_net(char *rest) {
   char *what = rest;
   (void)split_word(rest);
   if (streq(what, "status")) cmd_net_status();
   else if (streq(what, "test")) cmd_net_test();
+  else if (streq(what, "reset")) cmd_net_reset();
   else {
     kcon_puts("net status         the daemon, its address and counters\n");
+    kcon_puts("net reset          fail channels and restart the network\n");
     kcon_puts("net test           reach a known host to prove the path works\n");
   }
 }

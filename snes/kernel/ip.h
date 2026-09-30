@@ -38,6 +38,7 @@
 #define IP_MTU 1500
 
 void ip_init(void);
+int ip_reset(void); /* scheduler pinned; -1 while ip_service is active */
 /* The foreground pump: datagram reassembly, the stack, timers, and the
  * auto-HELLO that discovers whether the gateway speaks IP at all. Called
  * from kbd_idle — every blocking loop in the kernel funnels through there —

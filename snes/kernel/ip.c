@@ -42,6 +42,7 @@
  * type, which would make the console's own ping mysteriously never answer.
  */
 #include "ip.h"
+#include <string.h>
 #include "net.h"
 #include "snos.h"
 #include "link.h" /* link_mb_move: one MVN within bank $7E */
@@ -913,6 +914,38 @@ void ip_init(void) {
     uip_ipaddr(a, 255, 255, 255, 0);
     uip_setnetmask(a);
   }
+}
+
+/* Called with the scheduler pinned. Refuse a suspended service pass: clearing
+ * its tables would leave it resuming into somebody else's stack state. */
+int ip_reset(void) {
+  int i;
+  if (ip_busy) return -1;
+  ip_started = 0;
+  ip_init();
+  uip_len = 0;
+  memset(&uip_stat, 0, sizeof uip_stat);
+  for (i = 0; i < NET_CHANNELS; i++) {
+    lport[i] = 0;
+    pend[i].busy = 0;
+    pend[i].resolving = 0;
+  }
+  res_state = IP_RES_IDLE;
+  res_conn = 0;
+  res_kick = 0;
+  res_qlen = 0;
+  res_tries = 0;
+  res_name[0] = 0;
+  for (i = 0; i < 4; i++) res_addr[i] = 0;
+  /* Do not rewind tags or DNS ids: old callers and late answers must not
+   * match the first lookup in the new session. */
+  res_tag = (uint8_t)(res_tag + 1);
+  if (res_tag == 0) res_tag = 1;
+  hello_last = (uint16_t)(snos_frames - 121u);
+  tick_last = snos_frames;
+  ip_ping_replies = ip_ping_rtt = ip_ping_seq = 0;
+  ip_stat_rx = ip_stat_tx = ip_stat_drop = ip_stat_desync = 0;
+  return 0;
 }
 
 void ip_service(void) {

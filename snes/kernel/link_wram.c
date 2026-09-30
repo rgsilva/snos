@@ -24,6 +24,8 @@ void link_wram_init(void) {
   last_host_seq = 0;
 }
 
+void link_wram_reset(void) { last_host_seq = LINK_MB_HOST_SEQ; }
+
 int link_wram_present(void) { return LINK_MB_MAGIC == LINK_MAGIC; }
 
 /* The two halves of a poll. See the comment on link_recv in link.h for why they

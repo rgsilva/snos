@@ -636,10 +636,15 @@ int main(void) {
          * abandons the corpse and CLEARS the send queue, so the next
          * client cannot inherit the middle of this one's packet. */
         if (sys_net_hangup(cur->ch) == 0) sess_reset(cur);
+        else if (s2 == NET_ST_ERROR) {
+          say("mc: listener lost\n");
+          goto done;
+        }
       }
     }
     sys_yield();
   }
+done:
   for (i = 0; i < NSESS; i++) sys_net_close(S[i].ch);
   say("mc: stopped (");
   sys_putu(digs);

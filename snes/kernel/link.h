@@ -108,6 +108,7 @@
 #define LINK_MB_RX ((volatile __far uint8_t *)(LINK_MB + 0x10 + LINK_FRAME))
 
 void link_init(void);
+void link_reset(void);
 int link_present(void);
 
 /* A POLL IS TWO HALVES, AND THE GAP BETWEEN THEM IS WORTH A ROUND TRIP.
@@ -144,6 +145,7 @@ void link_send(const uint8_t *tx);
 
 /* Backends. link.c picks one at runtime. */
 void link_wram_init(void);
+void link_wram_reset(void);
 int link_wram_present(void);
 int link_wram_recv(uint8_t *rx);
 void link_wram_send(const uint8_t *tx);

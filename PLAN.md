@@ -356,10 +356,11 @@ frames; uIP sends one segment at a time; so TCP payload tops out near
   the protocol's cycle makes it ~1.7), and `input.c`'s "most of the way to
   the next vblank" above.
 
-**2. `net reset` — restart the network stack.** Re-probe for the adapter,
-re-HELLO, re-acquire the IP config, drop every channel and let the apps see a
-clean error rather than a wedge. Today a peer that goes away mid-session is
-only recovered by rebooting the console.
+**2. `net reset` — restart the network stack. Shipped.** Fails every occupied
+channel, clears uIP and DNS state, re-probes both link backends and re-HELLOs.
+The shell reports the channel count and the answering peer's address, or a
+three-second timeout. `test-netreset` covers replacement and surviving peers,
+background listeners, an interrupted lookup, and fresh DNS/TCP traffic.
 
 **3. `restart` — reboot the OS, not the console. ✅** The shell pins scheduling
 and kills background jobs, then jumps to Calypsi's reset entry with NMI off.

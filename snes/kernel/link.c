@@ -17,6 +17,14 @@ void link_init(void) {
   backend = 0;
 }
 
+/* A running bridge keeps its claim and mailbox counters. Only its pending
+ * receive frame belongs to the old session. */
+void link_reset(void) {
+  link_wram_reset();
+  link_serial_init();
+  backend = 0;
+}
+
 int link_present(void) {
   /* Re-checked rather than latched, because the host script can claim the link
    * at any point after boot — you start the ROM, then start the script. */
