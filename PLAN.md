@@ -356,7 +356,7 @@ frames; uIP sends one segment at a time; so TCP payload tops out near
   the protocol's cycle makes it ~1.7), and `input.c`'s "most of the way to
   the next vblank" above.
 
-**2. `net reset` — restart the network stack. Shipped.** Fails every occupied
+**2. `net reset` — restart the network stack. ✅** Fails every occupied
 channel, clears uIP and DNS state, re-probes both link backends and re-HELLOs.
 The shell reports the channel count and the answering peer's address, or a
 three-second timeout. `test-netreset` covers replacement and surviving peers,
@@ -379,7 +379,7 @@ layer already abstracts rows and columns, and `SYS_SCREEN` exists precisely
 so apps ask rather than assume — but `edit`, `vnc`, `irc` and `telnetd` all
 paint full screens, so this is a real compatibility pass, not a register poke.
 
-**5. `net speedtest` — measure the link, both ways, then both at once.**
+**5. `net speedtest` — measure the link, both ways, then both at once. ✅**
 Console → gateway, gateway → console, then simultaneous, reporting B/s and
 the link counters. Pure fun, and it is also the instrument item 1 needs: every
 fix above wants a number before and after, and a scripted test beats timing a
