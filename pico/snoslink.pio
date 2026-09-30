@@ -1,0 +1,71 @@
+; The 4021 that listens (docs/pico-adapter.md §4): on each CLK rising edge
+; sample LATCH into the ISR, then shift the next TX bit onto DATA1. Between
+; clocks a countdown runs; if none arrives in ~64 us that is a gap, the ARM
+; restarts us at `start`. While parked at `start` there is NO timeout: the
+; first clock of a burst is waited for indefinitely, so silence does not
+; re-trigger the gap over and over.
+.program snoslink
+start:
+    out pins, 1            ; TX bit 0 onto DATA1 while parked
+    wait 0 gpio 2          ; idle until the first clock, no timeout
+    jmp edge
+.wrap_target
+    set x, 31
+outer:
+    set y, 23
+inner:
+    jmp pin, keep_waiting  ; CLK still high
+    jmp edge               ; CLK low: a pulse began
+keep_waiting:
+    jmp y--, inner
+    jmp x--, outer
+    irq wait 0             ; gap: the ARM restarts us at start
+edge:
+    wait 1 gpio 2          ; trailing edge
+    in pins, 1             ; LATCH (in base = GP3)
+    out pins, 1            ; next DATA1 bit (out base = GP5)
+.wrap
+; Open-drain twin: the bit drives the pin DIRECTION. With the output value
+; preset to 0 and the TX bytes inverted, a 1 bit releases the pin (input, the
+; pull-up gives 5 V) and a 0 bit drives it low.
+.program snoslink_od
+start:
+    out pindirs, 1            ; TX bit 0 onto DATA1 while parked
+    wait 0 gpio 2          ; idle until the first clock, no timeout
+    jmp edge
+.wrap_target
+    set x, 31
+outer:
+    set y, 23
+inner:
+    jmp pin, keep_waiting  ; CLK still high
+    jmp edge               ; CLK low: a pulse began
+keep_waiting:
+    jmp y--, inner
+    jmp x--, outer
+    irq wait 0             ; gap: the ARM restarts us at start
+edge:
+    wait 1 gpio 2          ; trailing edge
+    in pins, 1             ; LATCH (in base = GP3)
+    out pindirs, 1            ; next DATA1 bit (out base = GP5)
+.wrap
+% c-sdk {
+#include "hardware/clocks.h"
+static inline void snoslink_program_init(PIO pio, uint sm, uint offset) {
+    pio_gpio_init(pio, 2);
+    pio_gpio_init(pio, 3);
+    pio_gpio_init(pio, 5);
+    pio_sm_set_consecutive_pindirs(pio, sm, 2, 2, false);
+    pio_sm_set_consecutive_pindirs(pio, sm, 5, 1, true);
+    pio_sm_config c = snoslink_program_get_default_config(offset);
+    sm_config_set_jmp_pin(&c, 2);
+    sm_config_set_in_pins(&c, 3);
+    sm_config_set_out_pins(&c, 5, 1);
+    sm_config_set_in_shift(&c, false, true, 8);
+    sm_config_set_out_shift(&c, false, true, 8);
+    /* Countdown: (1 + 32*(1 + 24*2 + 1) + 1) cycles at 25 MHz = 64.08 us.
+       Longest CLK polling interval in the inner loop: 4 cycles = 160 ns. */
+    sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / 25000000.0f);
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}

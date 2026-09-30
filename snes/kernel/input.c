@@ -344,6 +344,11 @@ static int fg_poll_room(void) {
 #define POLL_LAST 134u
 static int fg_poll_fits(void) {
   uint8_t v;
+#ifdef LINK_HW
+  /* A serial exchange is ~92k master cycles, most of the way to the next
+   * vblank from anywhere: it only ever fits from the NMI. */
+  return 0;
+#endif
   (void)R8(0x213F); /* reset the OPVCT read toggle to the low half */
   (void)R8(0x2137); /* latch H/V */
   v = R8(0x213D);   /* OPVCT low eight bits */

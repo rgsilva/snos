@@ -39,7 +39,15 @@
 
 #include <stdint.h>
 
+/* 256 on the emulated mailbox. The hardware build (make LINK_HW=1) bit-bangs
+ * every frame through the controller port at ~180 master cycles a bit, so it
+ * takes 64: one exchange per vblank fits the NMI budget. The Pico firmware
+ * (pico/link.h) carries the same constant; the two must agree. */
+#ifdef LINK_HW
+#define LINK_FRAME 64
+#else
 #define LINK_FRAME 256
+#endif
 #define LINK_HDR 4
 #define LINK_PAYLOAD (LINK_FRAME - LINK_HDR) /* record bytes per frame */
 
@@ -75,6 +83,11 @@
  * datagram boundaries inside that stream are a 2-byte little-endian length
  * prefix per datagram (kernel/ip.c) — link-local convention, not IP. */
 #define LINK_CH_IP 0x10
+
+/* Keyboard bytes from the hardware adapter (docs/pico-adapter.md): ASCII plus
+ * the SNOS_KEY_* codes, pushed straight into the input ring. Peer -> console
+ * only; an older kernel steps over it by length like any unknown channel. */
+#define LINK_CH_KBD 0x11
 
 /* The emulated backend's mailbox, mirroring the physical exchange exactly.
  * Carved out of HiRAM in calypsi/linker.scm. The host claims the link by

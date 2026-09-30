@@ -7,3 +7,4 @@ build/
 *.map
 .DS_Store
 __pycache__/
+snes/build-hw/

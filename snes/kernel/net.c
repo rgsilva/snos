@@ -54,6 +54,8 @@
 #include "proc.h"
 #include "ip.h"
 #include "snos.h" /* snos_frames, for the foreground-poll hot window */
+#include "input.h"   /* kbd_push: LINK_CH_KBD lands in the input ring */
+#include "mailbox.h" /* MB_IN_*: the ring frame_fits reserves against */
 /* proc_lock (M10 review): the txq record appends and channel scan-and-claim
  * below are run BOTH by the shell directly and by background syscalls. A
  * context switch mid-record interleaves two control records and desyncs the
@@ -910,11 +912,13 @@ static void ctrl_bytes(const uint8_t *p, int n) {
 static int frame_fits(const uint8_t *f) {
   int o = LINK_HDR;
   uint16_t need_ip = 0;
+  uint16_t need_kbd = 0;
   while (o + 2 <= LINK_FRAME) {
     uint8_t ch = f[o];
     uint8_t len = f[o + 1];
     if (ch == LINK_CH_PAD) break;
     if (o + 2 + len > LINK_FRAME) break;
+    if (ch == LINK_CH_KBD) need_kbd = (uint16_t)(need_kbd + len);
     /* Only IP records need room reserved; control bytes feed a state machine
      * with no backpressure of its own, and any other channel number is
      * something this kernel no longer speaks — stepped over by its length,
@@ -926,6 +930,10 @@ static int frame_fits(const uint8_t *f) {
    * UNDERSTATES free space, so the worst case is one refused frame that the
    * peer resends — the ordinary backpressure path, never corruption. */
   if (need_ip > (uint16_t)(IP_RXRING - 1 - iprx_used())) return 0;
+  /* Keyboard bytes go to the input ring, which the foreground drains; a full
+   * ring refuses the frame and the peer resends, same as IP. */
+  if (need_kbd > (uint16_t)(MB_IN_RING_SIZE - (uint16_t)(MB_IN_WINDEX - MB_IN_RINDEX)))
+    return 0;
   return 1;
 }
 
@@ -939,6 +947,10 @@ static void frame_deliver(const uint8_t *f) {
     if (ch == LINK_CH_CTRL) ctrl_bytes(&f[o + 2], len);
     else if (ch == LINK_CH_IP)
       iprx_put(&f[o + 2], len); /* frame_fits reserved the space */
+    else if (ch == LINK_CH_KBD) {
+      uint8_t i;
+      for (i = 0; i < len; i++) kbd_push(f[o + 2 + i]);
+    }
     /* Anything else is a record type this kernel no longer speaks: skipped. */
     o += 2 + len;
   }

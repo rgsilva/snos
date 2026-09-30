@@ -47,6 +47,14 @@ MODEL := --code-model=large --data-model=large
 # already makes interrupt-safe. See docs/calypsi-interrupt-hazard.md.
 CFLAGS = --core=65816 $(MODEL) -O0 -I$(K) -I$(K)/uip \
          --list-file=$(@:.o=.lst)
+# The real-hardware ROM: the port-2 serial backend (kernel/link_serial.c)
+# instead of the emulated mailbox, LINK_FRAME 64, no foreground link poll.
+# See docs/pico-adapter.md. `make LINK_HW=1` builds into build-hw/ so the
+# emulator ROM the suite tests is never overwritten by it.
+ifdef LINK_HW
+CFLAGS += -DLINK_HW=1
+BUILD := build-hw
+endif
 AFLAGS := --core=65816 --target=SNES $(MODEL)
 # Generic clib to match the bare-target C objects (the -snes variants carry a
 # target attribute the linker refuses to mix). Verified to contain no
@@ -59,12 +67,12 @@ KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
             $(K)/link.c $(K)/link_wram.c $(K)/link_serial.c $(K)/proc.c $(K)/ip.c \
             $(K)/uip/uip.c
 KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s \
-            $(K)/netasm.s
+            $(K)/netasm.s $(K)/linkxfer.s
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-vnc test-mc clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -119,7 +127,7 @@ $(BUILD)/snos.raw: $(KERNEL_O) calypsi/linker.scm
 # Each app is a separate link into its own ROM bank, then dropped into the
 # cartridge image at the byte offset that bank maps to. HiROM makes that
 # arithmetic trivial: SNES $C0:0000+N is ROM byte N, so bank $C8 is 0x080000.
-APPS := hello pad basic edit view get netecho httpd vnc irc telnetd mc
+APPS := hello pad basic edit view get netecho httpd vnc irc telnetd mc wire
 APP_BANK_hello := c8
 APP_BANK_pad   := c9
 APP_BANK_basic := ca
@@ -132,6 +140,7 @@ APP_BANK_telnetd := d1   # the slot `web` left behind
 APP_BANK_vnc   := d2
 APP_BANK_irc   := d3
 APP_BANK_mc    := d4
+APP_BANK_wire  := d5   # the port-2 cable test (docs/pico-adapter.md)
 APP_AT_hello   := 0x080000
 APP_AT_pad     := 0x090000
 APP_AT_basic   := 0x0A0000
@@ -144,6 +153,7 @@ APP_AT_telnetd := 0x110000
 APP_AT_vnc     := 0x120000
 APP_AT_irc     := 0x130000
 APP_AT_mc      := 0x140000   # bank $d4
+APP_AT_wire    := 0x150000   # bank $d5
 # The editor needs the ABI-2 full-screen calls and says so in its header, so an
 # older kernel refuses to run it rather than failing on a missing syscall.
 APP_ABI_edit   := 2
@@ -200,6 +210,7 @@ APP_ARENA_vnc     := 7f0000 7fffff
 # outgrows the 1 KB small-server slot. It overlaps irc's region: they can
 # never co-run, and the kernel refuses the pairing by name.
 APP_ARENA_mc      := 7f5000 7f57ff
+APP_ARENA_wire    := 7f0000 7f3bff
 
 APP_RAWS := $(foreach a,$(APPS),$(BUILD)/apps/$(a)/$(a).raw)
 APP_BLOBS := $(foreach a,$(APPS),--at $(APP_AT_$(a)) $(BUILD)/apps/$(a)/$(a).raw)
@@ -246,7 +257,7 @@ $(BUILD)/apps/mc/mc.raw: $(BUILD)/mcdata.h
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-mc
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-mc test-kbd test-wire
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -341,6 +352,18 @@ test-httpd: $(BUILD)/snos.sfc $(BUILD)/test/httpd.lua
 test-mc: $(BUILD)/snos.sfc $(BUILD)/test/mc.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mc.lua
+
+# Keystrokes over the link (LINK_CH_KBD, the hardware adapter's keyboard path),
+# driven through the same gwip peer the network tests use.
+test-kbd: $(BUILD)/snos.sfc $(BUILD)/test/kbd.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/kbd.lua
+
+# apps/wire, the port-2 cable test, run with no adapter: the loop, the stats
+# line and the B exit are what the emulator can check.
+test-wire: $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
 
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)
