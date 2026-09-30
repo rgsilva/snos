@@ -16,15 +16,18 @@ typedef struct {
     bool (*tcp_write)(void *arg, unsigned slot, const uint8_t *data, size_t len);
     void (*tcp_shutdown)(void *arg, unsigned slot);
     void (*tcp_abort)(void *arg, unsigned slot);
-    bool (*udp_send)(void *arg, unsigned slot, uint32_t ip, uint16_t port,
-                     const uint8_t *data, size_t len);
+    bool (*udp_send)(void *arg, unsigned slot, uint32_t ip, uint16_t port, const uint8_t *data,
+                     size_t len);
     bool (*forward_add)(void *arg, uint16_t port);
     void (*forward_del)(void *arg, uint16_t port);
     void (*tcp_recved)(void *arg, unsigned slot, size_t len);
     void *arg;
 } nat_ops_t;
 
-typedef struct { uint32_t in, out, drop; uint8_t tcp, udp, forwards; } nat_stats_t;
+typedef struct {
+    uint32_t in, out, drop;
+    uint8_t tcp, udp, forwards;
+} nat_stats_t;
 size_t nat_core_size(void);
 
 /* All state is fixed-size: 8 TCP flows, 8 UDP flows, no heap. */
