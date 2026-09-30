@@ -245,7 +245,7 @@ static uint16_t txframe_bytes;
  * uninitialised WRAM, and treating that garbage as a host claiming the link is
  * exactly the class of bug that cost this project a day in M3. Kernel statics
  * are zeroed by the C startup, so this is false until net_init says otherwise. */
-static uint8_t net_ready;
+static volatile uint8_t net_ready;
 
 /* Foreground-poll hot window: the frame count until which extra polls are
  * worth running. Stamped by net_service() whenever a received frame carries
@@ -296,20 +296,8 @@ typedef char net_checksum_needs_16_byte_frames[(LINK_FRAME % 16) == 0 ? 1 : -1];
  * see netasm.s for why it cannot simply be taken from the pointer. */
 extern void ring_move(uint8_t __far *dst, const uint8_t *src, uint16_t n);
 
-void net_init(void) {
-  int i, j;
-  for (i = 0; i < NET_CHANNELS; i++) {
-    ring_head[i] = 0;
-    ring_tail[i] = 0;
-    ch_state[i] = NET_ST_FREE;
-    ch_app[i] = 0;
-    ch_listen[i] = 0;
-    txring_head[i] = 0;
-    txring_tail[i] = 0;
-    ch_stack[i] = 0;
-    ch_lport[i] = 0;
-    unfwd_port[i] = 0;
-  }
+static void session_init(void) {
+  int j;
   txq_head = 0;
   txq_tail = 0;
   iprx_head = 0;
@@ -356,9 +344,66 @@ void net_init(void) {
    * control records rather than stopping at PAD. Benign by luck, wrong by
    * the invariant this file documents. */
   for (j = 0; j < LINK_FRAME; j++) rxframe[j] = 0;
-  link_init();
+  net_hot_until = snos_frames;
   build_frame();
+}
+
+void net_init(void) {
+  int i;
+  for (i = 0; i < NET_CHANNELS; i++) {
+    ring_head[i] = 0;
+    ring_tail[i] = 0;
+    ch_state[i] = NET_ST_FREE;
+    ch_app[i] = 0;
+    ch_listen[i] = 0;
+    txring_head[i] = 0;
+    txring_tail[i] = 0;
+    ch_stack[i] = 0;
+    ch_lport[i] = 0;
+    unfwd_port[i] = 0;
+  }
+  session_init();
+  link_init();
   net_ready = 1;
+}
+
+/* Keep handles owned until their callers observe ERROR and close them. */
+static int fail_channels(void) {
+  int i, n = 0;
+  for (i = 1; i < NET_CHANNELS; i++) {
+    if (ch_state[i] == NET_ST_FREE) continue;
+    ch_state[i] = NET_ST_ERROR;
+    n++;
+  }
+  return n;
+}
+
+/* A background ip_service may be suspended beneath the shell. Let it finish
+ * before pinning the scheduler; net_ready then excludes the NMI's link work
+ * without masking vblank for the whole rebuild. */
+int net_reset(void) {
+  int i, n;
+  for (;;) {
+    proc_lock();
+    if (ip_reset() == 0) break;
+    proc_unlock();
+    kbd_idle();
+  }
+  NET_NMI_OFF();
+  net_ready = 0;
+  NET_NMI_ON();
+  n = fail_channels();
+  for (i = 1; i < NET_CHANNELS; i++) {
+    ring_head[i] = ring_tail[i] = 0;
+    txring_head[i] = txring_tail[i] = 0;
+    ch_stack[i] = ch_listen[i] = 0;
+    ch_lport[i] = unfwd_port[i] = 0;
+  }
+  session_init();
+  link_reset();
+  net_ready = 1;
+  proc_unlock();
+  return n;
 }
 
 int net_up(void) { return net_ready && link_present(); }
@@ -1082,11 +1127,9 @@ void net_service(void) {
        * retransmissions, because the seq check below is what discards those. */
       if ((rxframe[LINK_FLAGS] & LINK_F_SYN) != 0) {
         if (!peer_syn_seen) {
-          int i;
           peer_syn_seen = 1;
           rx_next = rxframe[LINK_SEQ];
-          for (i = 1; i < NET_CHANNELS; i++)
-            if (ch_state[i] != NET_ST_FREE) ch_state[i] = NET_ST_ERROR;
+          fail_channels();
           /* The IP layer dies with the daemon too. Mode drops until the NEW
            * process claims it in its own HELLO; unsent datagrams are for a
            * NAT table that no longer exists (tail skip: both stores are

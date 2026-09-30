@@ -64,7 +64,7 @@ void link_serial_init(void) {
   have_rx = 0;
   up = 0;
   misses = 0;
-  probe_wait = 0;
+  probe_wait = PROBE_EVERY - 1; /* probe on the first poll after init/reset */
 }
 
 int link_serial_present(void) {

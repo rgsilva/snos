@@ -42,7 +42,7 @@ local MAGIC = 0x4B4C       -- "LK"
 local FRAME, HDR = 256, 4
 local TXOFF, RXOFF = 0x10, 0x10 + FRAME
 local SEQ, ACK, FLAGS, SUM = 0, 1, 2, 3
-local F_DATA = 0x01
+local F_DATA, F_SYN = 0x01, 0x02
 local CH_CTRL, CH_PAD, CH_IP = 0, 0xFF, 0x10
 local WRAM = emu.memType.snesWorkRam
 
@@ -550,6 +550,20 @@ function G.new(opt)
         local f = {}
         for i = 0, FRAME - 1 do f[i] = rb(TXOFF + i) end
         if f[SUM] == sum_of(f) then
+          -- A console reset starts a new session even when this peer lives
+          -- on. Adopt once per SYN episode, just as tools/gateway.py does.
+          if (f[FLAGS] & F_SYN) ~= 0 then
+            if not gw.peer_syn_seen then
+              gw.peer_syn_seen = true
+              gw.rx_next = f[SEQ]
+              gw.cmsg = { state = 0, typ = 0, len = 0, buf = {} }
+              gw.ipbuf, gw.out, gw.window = "", {}, {}
+              gw.socks = {}
+              gw.fwd_port, gw.fwd_ch = nil, nil
+            end
+          else
+            gw.peer_syn_seen = false
+          end
           while #gw.window > 0 and seq_le(gw.window[1].seq, f[ACK]) do
             table.remove(gw.window, 1)
             gw.stall = 0
