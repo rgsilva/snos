@@ -8,7 +8,7 @@ project(snos_pico C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(SKIP_PICO_BTSTACK 1) # No Bluetooth targets.
 pico_sdk_init()
-add_executable(snos_pico main.c port.c link.c ctrl.c kbd.c relay.c config.c log.c)
+add_executable(snos_pico main.c port.c link.c ctrl.c kbd.c relay.c nat.c nat_core.c config.c log.c)
 pico_generate_pio_header(snos_pico ${CMAKE_CURRENT_SOURCE_DIR}/snoslink.pio)
 target_include_directories(snos_pico PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(snos_pico PRIVATE DATA1_OPEN_DRAIN=1)

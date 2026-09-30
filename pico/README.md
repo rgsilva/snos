@@ -29,8 +29,12 @@ also enabled (`screen /dev/ttyACM0 115200`). Enter a command followed by Enter
 
 ```text
 wifi My WiFi|my password|192.168.1.100
+wifi My WiFi|my password|
 wifi?
 wifi clear
+mode
+mode nat
+mode relay 192.168.1.100
 stats
 log off
 log on
@@ -39,8 +43,12 @@ log
 
 `wifi SSID|PASSWORD|HOST` saves settings and starts an asynchronous join.
 SSID/password/host limits are 32/64/63 bytes; `|` cannot appear in fields.
-An empty password selects an open network. HOST is the IPv4 address or DNS
-name of the machine running `picoslirp.py`; the relay uses TCP port 3210.
+An empty password selects an open network. An empty HOST selects tier-2 NAT;
+otherwise HOST is the IPv4 address or DNS name of the machine running
+`picoslirp.py` and tier-1 relay uses TCP port 3210. `mode` reports the active
+setting; `mode nat` and `mode relay HOST` save mode changes without changing
+WiFi credentials. Existing saved settings with a host remain relay settings.
+In NAT mode HELLO reports the Pico DHCP address and `stats` includes flows.
 Input is echoed, including the password in the setup command; `wifi?` masks it.
 Backspace edits input. Overlong lines are discarded.
 
