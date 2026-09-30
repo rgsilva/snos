@@ -43,6 +43,17 @@ int main(void) {
     config_t value = {0}, loaded, defaults;
     memset(flash_memory, 255, sizeof(flash_memory));
     assert(!config_load(&defaults));
+    /* A pre-NAT version-1 flash image, authored independently of config_save. */
+    uint8_t *old = flash_memory + sizeof(flash_memory) - 4096;
+    old[0] = 0x53; old[1] = 0x4f; old[2] = 0x4e; old[3] = 0x53;
+    old[4] = 1; old[5] = old[6] = old[7] = 0;
+    memcpy(old + 8, "legacy-ssid", 12);
+    memcpy(old + 41, "legacy-pass", 12);
+    memcpy(old + 106, "relay.local", 12);
+    assert(config_load(&loaded));
+    assert(!strcmp(loaded.ssid, "legacy-ssid"));
+    assert(!strcmp(loaded.pass, "legacy-pass"));
+    assert(!strcmp(loaded.host, "relay.local"));
     strcpy(value.ssid, "SSID with spaces"); strcpy(value.pass, "secret");
     strcpy(value.host, "relay.local");
     assert(config_save(&value) && !disabled && erases == 1 && programs == 1);
@@ -54,6 +65,9 @@ int main(void) {
     assert(config_save(&value));
     flash_memory[sizeof(flash_memory) - 4096] ^= 1;
     assert(!config_load(&loaded));
+    value.host[0] = 0;
+    assert(config_save(&value) && config_load(&loaded) && !loaded.host[0]);
+    assert(!strcmp(loaded.ssid, value.ssid));
     memset(value.ssid, 's', sizeof(value.ssid));
     memset(value.pass, 'p', sizeof(value.pass));
     memset(value.host, 'h', sizeof(value.host));
