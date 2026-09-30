@@ -9,7 +9,9 @@ CLK and LATCH require the documented dividers; Pico GPIO is not 5 V tolerant.
 WiFi and relay settings are configured at runtime through USB CDC or UART0.
 No credentials header is needed to build.
 
-Build with pico-sdk **2.1.1** and the ARM GNU toolchain:
+Build with pico-sdk **2.1.1** and the ARM GNU toolchain. The Bluetooth
+keyboard needs the SDK's BTstack submodule, which a shallow SDK clone lacks:
+`git -C $PICO_SDK_PATH submodule update --init lib/btstack`.
 
 ```sh
 export PICO_SDK_PATH=/home/ricardo/pico/pico-sdk
@@ -35,6 +37,10 @@ stats
 log off
 log on
 log
+bt
+bt scan
+bt pair 1
+bt forget
 ```
 
 `wifi SSID|PASSWORD|HOST` saves settings and starts an asynchronous join.
@@ -46,6 +52,8 @@ Backspace edits input. Overlong lines are discarded.
 
 Settings persist in the last 4 KiB sector of the Pico W's 2 MiB flash.
 `wifi clear` erases that sector and disconnects WiFi until configured again.
+Bluetooth bonds use BTstack's two-sector flash bank immediately before that
+sector, so saving WiFi settings does not erase keyboard bonds.
 An optional local `wifi_secrets.h` can supply boot defaults when flash has no
 valid settings (including after clearing and rebooting); the template defaults
 are empty. Flash erase/program briefly pauses interrupt-driven link service.
@@ -71,8 +79,23 @@ Allow TCP port 3210 and application forward ports through the host firewall.
 Only one Pico session is serviced at a time. Disconnecting releases NAT flows
 and forwards. `--debug` dumps IP datagrams; `SNOS_GW_STATS=1` enables host stats.
 HELLO reports protocol version 2 and the relay host's address. The keyboard
-module sends `abcdef` every five seconds only with `kbd test on`; `type <text>` sends
-text plus Enter as keystrokes.
+module sends `abcdef` every five seconds only with `kbd test on`; `type <text>`
+sends text plus Enter as keystrokes.
+
+Bluetooth Classic HID keyboards pair from the console:
+
+```text
+bt scan
+bt pair 1
+bt
+```
+
+`bt scan` runs for about 10 seconds and prints Classic devices with likely
+keyboards first. `bt pair <n|addr>` connects to an entry from the latest scan,
+or to a Bluetooth address. If a passkey is printed, type those digits on the
+keyboard and press Enter. A bonded keyboard reconnects automatically at boot
+and after sleep disconnects. `bt forget` disconnects and drops the bond target.
+`bt off`/`bt on` power the Bluetooth host stack down/up.
 
 `LINK_FRAME` is defined once in `link.h`, at 64 bytes. Each exchange is 512
 clocks, MSB first, about 8 us per bit. The console writes $4016 bit 0 onto
@@ -131,6 +154,7 @@ PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/link_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/ctrl_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/wire_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/config_test.py
+PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/hidkeys_test.py
 ```
 
 The first compares 10,000 seeded exchanges to `gateway.py` at 64 bytes,
