@@ -72,7 +72,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -257,7 +257,7 @@ $(BUILD)/apps/mc/mc.raw: $(BUILD)/mcdata.h
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-mc test-kbd test-wire
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-pager test-httpd test-irc test-mc test-kbd test-wire
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -290,6 +290,13 @@ test-fs: $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
+
+# Start with room for the persistence fixture; neither restart in the test
+# deletes the save or resets the emulator.
+test-restart: $(BUILD)/snos.sfc $(BUILD)/test/restart.lua
+	$(call check_env)
+	rm -f "$(MESEN_SRM)"
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/restart.lua
 
 test-basic: $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
 	$(call check_env)

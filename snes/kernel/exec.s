@@ -109,3 +109,20 @@ app_return:
               .section code, root
 snos_exec_state:
               .word   0x1a10
+
+;;; Reuse the reset entry, including the C runtime's data initialisation:
+;;; main alone would inherit the old process table, network and input state.
+;;; The shell has already pinned scheduling and killed the background jobs.
+;;; NMI stays off until main has cleared the fixed exec/scheduler words; SEI
+;;; alone cannot protect the runtime's stack/DP/DB replacement from NMI.
+;;; SRAM is outside the runtime's RAM sections and is mounted normally.
+              .public snos_restart
+              .extern __program_start
+snos_restart:
+              sei
+              sep     #0x20
+              lda     #0
+              sta     long:0x004200        ; NMI, IRQ and auto-joypad off
+              sta     long:0x00420c        ; stop HDMA before reinitialising PPU
+              lda     long:0x004210        ; acknowledge the old vblank
+              jmp     long:__program_start

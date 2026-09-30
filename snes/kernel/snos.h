@@ -83,6 +83,7 @@ void snos_brk_c(uint16_t sp);
 
 /* shell.c */
 void shell_run(void);
+void snos_restart(void); /* exec.s; shell only, jobs stopped; never returns */
 
 /* ---- exec state (kernel/exec.s) ----
  * Fixed addresses inside the block linker.scm reserves at $1A00-$1A3F.

@@ -75,6 +75,7 @@ static void put_kv(const char *k, uint16_t v) {
 static void cmd_help(void) {
   kcon_puts("help          this list\n");
   kcon_puts("clear         clear the screen\n");
+  kcon_puts("restart       reboot SNOS, preserving files\n");
   kcon_puts("mem           memory and cartridge SRAM usage\n");
   kcon_puts("echo ...      print arguments\n");
   kcon_puts("apps          list applications\n");
@@ -91,6 +92,17 @@ static void cmd_help(void) {
   kcon_puts("ping HOST     ICMP echo, composed on this machine (M11)\n");
   kcon_puts("resolve NAME  DNS, asked and parsed by this machine (M11)\n");
   kcon_puts("debug         other diagnostics\n");
+}
+
+/* Only the shell may abandon the kernel stack. A foreground app first comes
+ * back through the existing kill-switch/break unwind; background jobs are
+ * pinned and killed before the runtime can reset anything beneath them. */
+static void cmd_restart(void) {
+  uint8_t id;
+  if (proc_current() != 0 || SNOS_EXEC_RUN) return;
+  proc_lock();
+  for (id = 1; id < PROC_MAX; id++) proc_kill(id);
+  snos_restart();
 }
 
 static void cmd_ver(void) {
@@ -1266,6 +1278,7 @@ void shell_run(void) {
     if (line[0] == 0) continue;
     if (streq(line, "help")) cmd_help();
     else if (streq(line, "clear")) con_clear();
+    else if (streq(line, "restart")) cmd_restart();
     else if (streq(line, "mem")) cmd_mem();
     else if (streq(line, "echo")) cmd_echo(rest);
     else if (streq(line, "apps")) cmd_apps();

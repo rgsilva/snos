@@ -361,14 +361,14 @@ re-HELLO, re-acquire the IP config, drop every channel and let the apps see a
 clean error rather than a wedge. Today a peer that goes away mid-session is
 only recovered by rebooting the console.
 
-**3. `restart` — reboot the OS, not the console.** Clear the bank-$00 state
-the way `hw_init` does at power-on (exec flags, scheduler handshake words,
-process table), reset the stack and direct page, re-init the console, the
-filesystem and the link, and re-enter `main`. The point is recovering from a
-wedged app or a confused stack without a power cycle. Watch: SRAM must NOT be
-wiped, the mailbox magic must survive for the harness, and the kill-switch
-path already does most of the unwinding — reuse it rather than inventing a
-second one.
+**3. `restart` — reboot the OS, not the console. ✅** The shell pins scheduling
+and kills background jobs, then jumps to Calypsi's reset entry with NMI off.
+That restores S/D/DB and reinitialises C data before `main` clears the fixed
+exec/scheduler words and brings up the console, filesystem and link. SRAM is
+mounted without wiping it. A wedged foreground app comes back through the
+existing kill switch or keyboard break before the shell accepts `restart`.
+`test-restart` checks two boots, mailbox ring resets, the power-on screen,
+file persistence, job removal and a fresh TCP session.
 
 **4. Text mode — the 64-column font is hard to read on a CRT.** Add a `mode`
 command and make the DEFAULT bigger. Mode 5's 64×28 is the hardware ceiling,
