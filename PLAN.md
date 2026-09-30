@@ -385,6 +385,10 @@ the link counters. Pure fun, and it is also the instrument item 1 needs: every
 fix above wants a number before and after, and a scripted test beats timing a
 Minecraft join with a stopwatch.
 
+Shipped: `net speedtest [host:port|-] [seconds]`, with an ordinary TCP peer
+in `snes/tools/speedtest.py`. Receiver-timed windows, two connections for the
+simultaneous phase, and link counters; [measurement notes](docs/net-speedtest.md).
+
 **6. A real keyboard on the Pico.** `kbd.c` is a stub that types a test
 pattern (and now `type <text>` from the USB console). Bluetooth HID via
 BTstack is likely easier than USB host on the Pico W — no OTG adapter, no
