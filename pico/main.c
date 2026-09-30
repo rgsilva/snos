@@ -7,6 +7,7 @@
 #include "lwip/netif.h"
 #include "port.h"
 #include "ctrl.h"
+#include "btkbd.h"
 #include "kbd.h"
 #include "relay.h"
 #include "nat.h"
@@ -52,6 +53,7 @@ static void wifi_poll(void) {
             wifi_status = e; wifi_state = "init-failed"; return;
         }
         wifi_ready = true;
+        btkbd_init();
         cyw43_arch_enable_sta_mode(); relay_init(); nat_init();
         wifi_status = 99; wifi_retry_at = now;
     }
@@ -100,6 +102,7 @@ static void wifi_poll(void) {
     }
 }
 static void console_command(char *line) {
+    if (btkbd_command(line)) return;
     if (!strcmp(line, "stats")) { print_stats(true); return; }
     if (!strcmp(line, "log") || !strcmp(line, "log on") || !strcmp(line, "log off")) {
         if (!strcmp(line, "log on")) log_set_enabled(true);
@@ -147,7 +150,7 @@ static void console_command(char *line) {
             }
         }
     }
-    puts("commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], stats, log, log on|off, type <text>, kbd test on|off");
+    puts("commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text>, kbd test on|off");
 }
 static void console_poll(void) {
     static char line[168];
@@ -193,7 +196,7 @@ int main(void) {
                 else if (r->ch == CH_IP) { if (nat_mode()) nat_ip_bytes(r->data, r->len); else relay_ip_bytes(r->data, r->len); }
             }
         }
-        kbd_poll(); console_poll(); wifi_poll(); if (nat_mode()) nat_poll(); else relay_poll();
+        kbd_poll(); btkbd_poll(); console_poll(); wifi_poll(); if (nat_mode()) nat_poll(); else relay_poll();
         if (moved) { link_next_out(tx); port_set_tx(tx); }
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (last_valid_at && (int32_t)(now - last_valid_at) > 2000) { last_valid_at = 0; port_set_idle(true); }

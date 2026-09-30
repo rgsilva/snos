@@ -389,12 +389,18 @@ Shipped: `net speedtest [host:port|-] [seconds]`, with an ordinary TCP peer
 in `snes/tools/speedtest.py`. Receiver-timed windows, two connections for the
 simultaneous phase, and link counters; [measurement notes](docs/net-speedtest.md).
 
-**6. A real keyboard on the Pico.** `kbd.c` is a stub that types a test
-pattern (and now `type <text>` from the USB console). Bluetooth HID via
-BTstack is likely easier than USB host on the Pico W — no OTG adapter, no
-power question, and a BT keyboard is what is lying around. The console side
-needs nothing: keystrokes are already `LINK_CH_KBD` records feeding the same
-input ring the OSK and telnetd feed.
+**6. A real keyboard on the Pico. ✅ (Classic Bluetooth; untested on a real
+keyboard)** Bluetooth rather than USB host, to keep a second USB stack out of
+the firmware. `bt scan` lists nearby devices with keyboards first, `bt pair
+<n>` pairs and bonds (printing the passkey to type on the keyboard when one is
+needed), `bt forget` drops the bond, and the bonded keyboard reconnects on its
+own at boot and after sleep. Reports are translated on the Pico in
+`pico/hidkeys.c` (rollover-correct, typematic repeat, arrows as the
+`SNOS_KEY_*` codes, Ctrl+letter as control codes) and ride the existing
+`LINK_CH_KBD` records, so the console side did not change. Bonds live in an
+8 KB BTstack flash bank just below the settings sector, with a linker guard
+against the firmware growing into either. BLE (HID over GATT) keyboards are
+not supported yet.
 
 **7. `log off` / `log on` on the Pico's USB console. ✅** The 2-second stats
 line and every asynchronous event line scrolled over whatever was being typed.
