@@ -26,7 +26,7 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M5 — BASIC | ✅ |
 | EDIT — menu-driven text editor | ✅ |
 | M6 — Networking (framed link + gateway; `get`, `view`, `httpd`, `netecho`) | ✅ |
-| M7 — Real hardware | |
+| M7 — Real hardware: Pico W adapter on port 2 (keyboard + network), `make LINK_HW=1` | ✅ live on silicon 2026-09-29: keystrokes and a real Minecraft client over the cable. Speed and comfort are the open list in [`PLAN.md`](PLAN.md) ([docs/pico-adapter.md](docs/pico-adapter.md)) |
 | M8 — IRC client (`irc`, windows/tabs/user list) | ✅ |
 | VNC — `vnc`, a Super Nintendo as a live VNC thin client | ✅ |
 | M10 — Preemptive multitasking (`run &`, `jobs`, `kill`, `fg`, notify) | ✅ |
@@ -55,7 +55,12 @@ and Mesen 2 for the test harness.
 cd snes
 make            # -> build/snos.sfc
 make test       # run the automated Mesen tests
+make LINK_HW=1  # -> build-hw/snos.sfc, the real-hardware ROM (port-2 adapter)
 ```
+
+On Linux the toolchain and Mesen live elsewhere; `CALDIR`, `MESEN` and
+`MESEN_SRM` are the three variables to override (Mesen's data directory is
+`~/.config/Mesen2` there).
 
 Override `CALDIR` if the toolchain lives elsewhere:
 
@@ -81,9 +86,10 @@ If a key does nothing, check Mesen's own input bindings before suspecting the
 script: Mesen consumes keys bound to a controller button or hotkey before a
 script sees them. Backspace is bound by default.
 
-Real hardware gets a fourth backend at M7: the USB-keyboard-over-controller-port
-bridge already proven in `../keyboard-test-rom`. Nothing above `kbd_getchar()`
-has to change for any of them.
+Real hardware gets a fourth backend at M7: the Pico W adapter on port 2 carries
+keystrokes as `LINK_CH_KBD` records on the same link frames as the network and
+the kernel pushes them into that same ring (`docs/pico-adapter.md`,
+`test/kbd.lua`). Nothing above `kbd_getchar()` has to change for any of them.
 
 ## Layout
 

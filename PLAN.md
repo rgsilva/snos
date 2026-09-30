@@ -265,6 +265,40 @@ iron and an unknown number of evenings finding bugs no emulator surfaces. The
 demo works without it; the backlog items that say "M7 re-measures this" simply
 keep waiting.
 
+**SHIPPED 2026-09-29 as the Pico W adapter, and it runs on silicon.** One
+board on controller port 2 carries both the keyboard and the network, the
+keyboard as a `LINK_CH_KBD` record on the same frames. Circuit, wire protocol,
+firmware (`pico/`, tier 1: the Pico relays IP datagrams to
+`tools/picoslirp.py` on the host) and the console side (`make LINK_HW=1`:
+`link_serial_xfer` in `kernel/linkxfer.s`, `LINK_FRAME` 64) are in
+`docs/pico-adapter.md`. Tier 2 (the Pico *is* the slirp box) is designed
+there and not built.
+
+**The cable is five wires, and that shaped the protocol.** Ricardo's cable
+carries pins 1-4 and 7 only — no IOBIT, no DATA2 — so LATCH (`$4016` bit 0)
+is the console's data-OUT line, DATA1 is the Pico's, and each `$4017` read is
+one clock moving one bit each way. There is no sync line: frames are found by
+silence (the console guarantees ~300 µs of quiet, the Pico's PIO gaps out at
+~64 µs), and the vblank auto-joypad read's 16-clock burst is discarded by
+count. `apps/wire` + `snos_wiretest.uf2` are the bring-up test, and they are
+what proved each half.
+
+**What silicon taught us, all of it now in the doc:** the 5A22 does NOT read
+3.3 V as a logic high, so DATA1 is open-drain with a 1 kΩ pull-up to the
+console's own 5 V; and the CPU reads that line INVERTED (a pad's active-low
+buttons read as 1s), so `linkxfer.s` flips the bit. Two firmware traps cost
+an evening each and are recorded in `docs/pico-adapter.md`: an RP2040 DMA
+channel reads back 0 remaining after `dma_channel_abort` (read the count
+BEFORE aborting, or every burst looks like a full frame), and the SDK's
+shared-IRQ-handler pool is four slots for the whole program. The adapter also
+idles as an empty port until a valid frame arrives, because otherwise it
+feeds the Everdrive menu phantom pad-2 presses.
+
+**Done when — met 2026-09-29:** SNOS boots on silicon, takes real keystrokes
+(the Pico typed `abcdef` into the shell, then `type <text>` from its USB
+console), and serves a real Minecraft client over its own TCP through the
+NAT. What is left is speed and comfort, which is the list below.
+
 *(original heading: M7 — Real hardware ← first silicon for this entire repo)*
 Build the cable (Teensy/Pico + level shifter, **pull-up on `$4201` bit 6, port 1**). Real console
 + flashcart. Real keyboard via the existing `keyboard-test-rom` Pico protocol on **port 2**.
@@ -272,6 +306,95 @@ Decide: two Picos, or one multiplexing keyboard + network.
 **Done when:** SNOS boots on silicon, takes real keystrokes, completes a TCP echo.
 **Risk:** nothing in this tree has ever run on real hardware. Expect this milestone to find bugs
 that no emulator surfaced. Do not schedule anything tight after it.
+
+### M7 follow-ups — the open list *(2026-09-29/30, agreed with Ricardo)*
+
+Everything here is *after* first light. Ordered by what a demo notices.
+
+**1. Link throughput — the headline. ~1.4 KB/s today, and it should be ~10.**
+Two clean-room investigations (2026-09-29, published as
+`opus-link-analysis.md` / `codex-link-analysis.md`) agree on the model: one
+64-byte frame per vblank, 58 payload bytes after headers, and stop-and-wait
+at the LINK layer on both ends, so a fresh frame costs two exchanges and the
+ceiling is ~1.7 KB/s of IP stream per direction. A 511-byte TCP segment is 10
+frames; uIP sends one segment at a time; so TCP payload tops out near
+**1.4 KB/s** and a 146 KB `mc` join is ~2 minutes at best. The fixes, ranked:
+
+  a. **More exchanges per video frame (~3×).** `input.c`'s `fg_poll_fits()`
+     returns 0 unconditionally under `LINK_HW`, and the comment justifying it
+     is arithmetically WRONG: an exchange is ~68 scanlines of 262, the same
+     span the function already admits for the 256-byte mailbox poll. Two
+     extra exchanges fit per frame. Needs the stack-headroom guard
+     re-derived and the Pico's main loop to turn round in <5.5 ms.
+  b. **Link-layer sliding window (~2× on top, ~3× alone).** Removes the ack
+     turnaround from the cycle: 58 B *per exchange*. `net.c` already names
+     the spot; `pico/link.c`'s `inflight`/`awaiting` become a ring. Nothing
+     above `link_recv`/`link_send` changes. Subsumes (a)'s value rather than
+     adding to it if done alone.
+  c. **`LINK_FRAME` 128 on hardware (~2×).** One constant each side. But the
+     exchange doubles to ~8 ms, which competes with (a) for the frame; 256
+     does not fit at this bit rate.
+  d. **Bigger TCP segments (+7-15%).** The 511-byte segments are an artifact
+     of `NET_TXRING` being 512 (`net.c`), not of the MSS, which is already
+     1460. Costs WRAM; worth more once (b) exists.
+  e. **Priority in the Pico's send queue.** It is strict FIFO, so an 800-byte
+     position packet from a walking player sits in front of every ACK behind
+     it for half a second. This is the best candidate for the 18% of segments
+     the log showed being retransmitted after they had already been acked —
+     uIP's RTO is 1.5-2.5 s against a ~0.55 s round trip, so a too-eager
+     timer is NOT the explanation.
+  f. RTO tuning: **last**, and only if the loss counters come back zero.
+
+  **Read the counters first** (`net_stat_bad_sum`, `ip_stat_desync`,
+  `net_stat_refused`, `ip_stat_drop`, and the Pico's `stats` line). The
+  duplicate-segment episodes are a symptom of something dropping ACKs, and
+  every fix above that assumes otherwise is a trap.
+
+  Also free, and worth doing while in here: three numbers in the tree are
+  wrong — `linkxfer.s`'s "~2.5 ms" for a 64-byte frame (it is ~4.1 ms),
+  `docs/pico-adapter.md`'s "~3.5 KB/s each way" (that is the raw frame rate;
+  the protocol's cycle makes it ~1.7), and `input.c`'s "most of the way to
+  the next vblank" above.
+
+**2. `net reset` — restart the network stack.** Re-probe for the adapter,
+re-HELLO, re-acquire the IP config, drop every channel and let the apps see a
+clean error rather than a wedge. Today a peer that goes away mid-session is
+only recovered by rebooting the console.
+
+**3. `restart` — reboot the OS, not the console.** Clear the bank-$00 state
+the way `hw_init` does at power-on (exec flags, scheduler handshake words,
+process table), reset the stack and direct page, re-init the console, the
+filesystem and the link, and re-enter `main`. The point is recovering from a
+wedged app or a confused stack without a power cycle. Watch: SRAM must NOT be
+wiped, the mailbox magic must survive for the harness, and the kill-switch
+path already does most of the unwinding — reuse it rather than inventing a
+second one.
+
+**4. Text mode — the 64-column font is hard to read on a CRT.** Add a `mode`
+command and make the DEFAULT bigger. Mode 5's 64×28 is the hardware ceiling,
+not a requirement; a 32-column mode at double width (or Mode 1 with 8×8 tiles
+at 32×28) is legible across a room, which is what a talk needs. The console
+layer already abstracts rows and columns, and `SYS_SCREEN` exists precisely
+so apps ask rather than assume — but `edit`, `vnc`, `irc` and `telnetd` all
+paint full screens, so this is a real compatibility pass, not a register poke.
+
+**5. `net speedtest` — measure the link, both ways, then both at once.**
+Console → gateway, gateway → console, then simultaneous, reporting B/s and
+the link counters. Pure fun, and it is also the instrument item 1 needs: every
+fix above wants a number before and after, and a scripted test beats timing a
+Minecraft join with a stopwatch.
+
+**6. A real keyboard on the Pico.** `kbd.c` is a stub that types a test
+pattern (and now `type <text>` from the USB console). Bluetooth HID via
+BTstack is likely easier than USB host on the Pico W — no OTG adapter, no
+power question, and a BT keyboard is what is lying around. The console side
+needs nothing: keystrokes are already `LINK_CH_KBD` records feeding the same
+input ring the OSK and telnetd feed.
+
+**7. `log off` / `log on` on the Pico's USB console.** The 2-second stats
+line scrolls over whatever you are typing. Default the periodic logging off,
+keep `stats` for a one-shot, and let `log on` bring the stream back when
+debugging.
 
 ### M8 — IRC client
 Port Contiki's IRC app onto uIP + the SNOS console.
