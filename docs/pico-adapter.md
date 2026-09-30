@@ -300,23 +300,32 @@ for types 2/3. `gateway.py` and the file mailbox are not involved.
 `nat.c` is its lwIP raw-API adapter. An empty relay host selects it; a saved
 host keeps tier-1 relay mode. Outbound TCP is spliced through `tcp_connect`;
 the core emits console-side SYN-ACK, ACK, data, FIN and RST packets. It keeps
-one 1460-byte segment per direction per flow, sends only one console segment
-at a time, records uIP's advertised window, and calls `tcp_recved()` only
+two-MSS receive chains per flow, sends only one console segment at a time,
+records uIP's advertised window, and calls `tcp_recved()` only
 after the console ACKs. RTO is 2.5 s, data retries 120, idle 300 s,
 TIME_WAIT 4 s, inbound FIN grace 750 ms and the per-port accept cap is 4,
 matching `slirp.py`.
 
 UDP has eight fixed flows and preserves the console-visible source address.
-`10.0.2.3` uses DHCP's first resolver (`dns_getserver(0)`) and replies are
-restored to `10.0.2.3`; oversized replies are dropped. Echoes to `10.0.2.2`
+`10.0.2.3` rotates the DHCP resolvers and falls back to 1.1.1.1 then 8.8.8.8;
+replies are restored to `10.0.2.3` and oversized replies are counted and
+dropped. Echoes to `10.0.2.2`
 and `10.0.2.3` are answered locally. External ICMP is not implemented yet:
 it needs a separate lwIP raw-ICMP request/reply demux.
 
 `IPFWD`/`IPUNFWD` bind/listen on the Pico and accepted sockets become inbound
-console SYNs. HELLO reports the DHCP IPv4 address. Foreground raw-API calls
-are under `cyw43_arch_lwip_begin/end`. The fixed core costs about 25 KiB
-(eight TCP flows × two MSS buffers); the adapter reserves 26 KiB. `lwipopts.h`
-uses an 18 KiB heap, 2-MSS TCP windows, 16 pbufs and 24 TCP segments.
+console SYNs. Accepted sockets take ownership callbacks before they are
+queued, and mode/reset tears down their listeners and PCBs. HELLO reports the
+DHCP IPv4 address. Foreground raw-API calls are under
+`cyw43_arch_lwip_begin/end`; callback output uses a four-packet handoff, and
+the link queue itself is spinlock protected for every producer. The fixed core
+is 35.0 KiB (eight TCP flows × two-MSS output buffers); its 40,000-byte store,
+receive scratch and callback handoff are static. `lwipopts.h` uses an 18 KiB
+heap, 2-MSS TCP windows, 16 pbufs, 32 TCP segments, 12 TCP PCBs, eight listen
+PCBs and 10 UDP PCBs. Packet scratch is static under the lwIP serialization;
+the ARM stack report's deepest NAT/link call chain is 296 bytes (1,032 bytes
+including `main`), and the firmware reserves
+8 KiB in scratch-Y for main, link and Bluetooth callbacks.
 
 `pico/tests/nat_test.py` compiles the pure C core with a fake raw transport.
 It covers local ICMP, UDP and DNS source restoration, TCP state/data/FIN,

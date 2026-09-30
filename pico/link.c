@@ -1,5 +1,8 @@
 #include "link.h"
 #include <string.h>
+#ifdef PICO_ON_DEVICE
+#include "pico/critical_section.h"
+#endif
 #define QUEUE_COUNT 32
 #define CHUNK_SIZE (LINK_MTU + 2)
 typedef struct { uint8_t ch; size_t pos, len; uint8_t data[CHUNK_SIZE]; } chunk_t;
@@ -9,14 +12,27 @@ static size_t count;
 static bool awaiting, syn, peer_syn_seen, rx_resync, started;
 static uint8_t tx_seq, rx_next, inflight[LINK_FRAME];
 static uint32_t resends, bad_sum;
+#ifdef PICO_ON_DEVICE
+static critical_section_t queue_lock;
+#define LOCK() critical_section_enter_blocking(&queue_lock)
+#define UNLOCK() critical_section_exit(&queue_lock)
+#else
+#define LOCK() ((void)0)
+#define UNLOCK() ((void)0)
+#endif
 static uint8_t checksum(const uint8_t *f) {
     uint8_t sum = 0;
     for (size_t i = 0; i < LINK_FRAME; ++i) if (i != 3) sum += f[i];
     return sum;
 }
 void link_init(void) {
+#ifdef PICO_ON_DEVICE
+    critical_section_init(&queue_lock);
+#endif
+    LOCK();
     count = 0; awaiting = peer_syn_seen = started = false;
     syn = rx_resync = true; tx_seq = rx_next = 0; resends = bad_sum = 0;
+    UNLOCK();
 }
 static bool enqueue(uint8_t ch, const uint8_t *data, size_t len, bool hello) {
     size_t prefix = ch == CH_IP ? 2 : 0;
@@ -41,14 +57,15 @@ static bool enqueue(uint8_t ch, const uint8_t *data, size_t len, bool hello) {
     return true;
 }
 bool link_push(uint8_t ch, const uint8_t *data, size_t len) {
-    return enqueue(ch, data, len, false);
+    LOCK(); bool ok = enqueue(ch, data, len, false); UNLOCK(); return ok;
 }
 bool link_push_hello(const uint8_t *data, size_t len) {
-    return enqueue(CH_CTRL, data, len, true);
+    LOCK(); bool ok = enqueue(CH_CTRL, data, len, true); UNLOCK(); return ok;
 }
 link_rx_t link_on_rx(const uint8_t *f) {
     link_rx_t result = {0};
-    if (f[3] != checksum(f)) { ++bad_sum; return result; }
+    LOCK();
+    if (f[3] != checksum(f)) { ++bad_sum; UNLOCK(); return result; }
     result.valid = true;
     if (rx_resync) { rx_resync = false; rx_next = f[0]; }
     if (awaiting && f[1] == tx_seq) { awaiting = false; ++tx_seq; syn = false; }
@@ -67,12 +84,13 @@ link_rx_t link_on_rx(const uint8_t *f) {
         }
         ++rx_next;
     }
-    return result;
+    UNLOCK(); return result;
 }
 void link_next_out(uint8_t *f) {
+    LOCK();
     if (awaiting) {
         ++resends; inflight[1] = rx_next - 1; inflight[3] = checksum(inflight);
-        memcpy(f, inflight, LINK_FRAME); return;
+        memcpy(f, inflight, LINK_FRAME); UNLOCK(); return;
     }
     memset(f, 0, LINK_HDR); f[0] = tx_seq; f[1] = rx_next - 1;
     size_t o = LINK_HDR;
@@ -91,15 +109,17 @@ void link_next_out(uint8_t *f) {
     if (syn) f[2] |= F_SYN;
     f[3] = checksum(f); awaiting = (f[2] & F_DATA) != 0;
     memcpy(inflight, f, LINK_FRAME);
+    UNLOCK();
 }
 size_t link_queued(uint8_t ch) {
+    LOCK();
     size_t n = 0;
     for (size_t i = 0; i < count; ++i) {
         chunk_t *q = &pool[order[i]];
         if (q->ch == ch) n += q->len - q->pos;
     }
-    return n;
+    UNLOCK(); return n;
 }
 link_stats_t link_stats(void) {
-    return (link_stats_t){tx_seq, rx_next - 1, resends, bad_sum};
+    LOCK(); link_stats_t s = {tx_seq, rx_next - 1, resends, bad_sum}; UNLOCK(); return s;
 }

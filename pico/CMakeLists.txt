@@ -13,8 +13,9 @@ target_include_directories(snos_pico PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(snos_pico PRIVATE
     DATA1_OPEN_DRAIN=1
     PICO_FLASH_BANK_STORAGE_OFFSET=0x1fd000
+    PICO_STACK_SIZE=0x2000
 )
-target_compile_options(snos_pico PRIVATE -Wall -Wextra)
+target_compile_options(snos_pico PRIVATE -Wall -Wextra -fstack-usage)
 target_link_libraries(snos_pico
     pico_stdlib hardware_pio hardware_dma hardware_flash
     pico_cyw43_arch_lwip_threadsafe_background
