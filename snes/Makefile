@@ -72,7 +72,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-hwspeed clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-hwspeed test-hwresponse clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -404,6 +404,14 @@ test-hwspeed: $(BUILD)/snos.sfc $(BUILD)/test/hwspeed.lua
 	  sed -i "s|^CONFIG = {\(.*\)}$$|CONFIG = {\1}; CONFIG.prof = $$prof|" $(BUILD)/test/hwspeed-run.lua; \
 	fi
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwspeed-run.lua
+
+# Responsiveness on the LINK_HW ROM while the cable runs flat out: a key from
+# the adapter's keyboard and START+SELECT each stop a download in bounded
+# time, and the link answers afterwards. `make LINK_HW=1 test-hwresponse`.
+test-hwresponse: $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
+	$(call check_env)
+	@test -n "$(LINK_HW)" || { echo "test-hwresponse needs LINK_HW=1"; exit 1; }
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
 
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)
