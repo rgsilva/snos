@@ -14,8 +14,10 @@
  *   - pico/port.c's TX staging: the frame shifted out in an exchange is the
  *     one latched at the most recent restart before its first clock -- the
  *     DMA restart at the end of the previous exchange, an auto-read gap, or
- *     a kick gap -- and the Pico's main loop needs `pico_us` to turn a
- *     received frame into the next port_set_tx();
+ *     a kick gap -- from its two-slot queue; its four-frame receive ring;
+ *     and pico/main.c's loop, one received frame per turn, `pico_us` from
+ *     taking it to port_set_tx(), blocked for real by slow turns and stalls
+ *     (see "pico/port.c and pico/main.c, as a timeline" below);
  *   - the cost of every piece of console work (the `cost` table, from the
  *     -O0 listings and Mesen measurements of the LINK_HW ROM), charged as
  *     the real code runs, so an NMI lands where it would and a foreground
@@ -83,6 +85,8 @@ static cost_t cost[] = {
     {"pico_us", 300},        /* Pico main loop: received frame to port_set_tx */
     {"pico_us_slow", 3000},  /* ...and its occasional long turn */
     {"pico_slow_every", 0},  /* one turn in N is slow (0: never) */
+    {"pico_stall_us", 0},    /* the main loop busy elsewhere (WiFi, BT) this long... */
+    {"pico_stall_every_ms", 0}, /* ...once a period, frame or none (0: never) */
 };
 #define NCOST (sizeof cost / sizeof *cost)
 static double C(const char *name) {
@@ -290,58 +294,63 @@ static void ip_stream_bytes(const uint8_t *data, size_t len) {
     }
 }
 
-/* pico/port.c, as a timeline: replies with the time each became pending.
- * Two staging policies. "latest" is port.c before link windows: every
- * restart latches the newest pending frame, so a frame latched but not yet
- * shifted out can be replaced unsent. "fifo" latches replies in order and
- * replaces the latched frame only once it has gone out whole -- a repeat of
- * the last frame fills an exchange the Pico had no answer ready for. */
-#define REPLIES 64
-static struct { uint64_t ready; uint8_t f[LINK_FRAME]; } reply[REPLIES];
-static unsigned reply_head, reply_count;
+/* pico/port.c and pico/main.c, as a timeline.
+ *
+ * port.c: a whole exchange lands in a four-frame receive ring -- when all
+ * four are still unread, the frame is lost (an overrun) -- and port_set_tx()
+ * queues a reply in two slots, dropping the oldest when both are full. Each
+ * restart -- the end of an exchange, an auto-read gap, a kick gap -- may
+ * stage one queued reply for the next exchange. Two staging policies.
+ * "fifo" (port.c now) stages replies in order and replaces the staged frame
+ * only once it has gone out whole; a repeat of the last frame fills an
+ * exchange the Pico had no answer ready for. "latest" (port.c before link
+ * windows) stages the newest queued reply at every restart, so a frame
+ * staged but not yet shifted out can be replaced unsent.
+ *
+ * main.c: one turn per received frame, strictly one at a time -- take it,
+ * link_on_rx, the rest of the loop, link_next_out, port_set_tx -- each
+ * `pico_us` long, one in `pico_slow_every` `pico_us_slow`; and, if set, a
+ * stall of `pico_stall_us` every `pico_stall_every_ms` in which no turn
+ * starts, frame or none -- the loop busy in WiFi or Bluetooth with
+ * interrupts running. A frame that arrives during a turn or a stall waits
+ * in the ring, so either is a main loop that is actually blocked: exchanges
+ * go on, the ring fills, and the turns that catch up afterwards queue a
+ * reply each, evicting older ones. The Pico runs lazily: pico_run(t) brings
+ * it up to time t before anything the console's side can see at t is
+ * decided. Not modelled: a stall with interrupts off (a flash write -- no
+ * restart, so no ring and no staging at all while it lasts), IRQ latency,
+ * the main loop's own polls between turns, and anything electrical. */
+#define RXQ 4
+static struct { uint64_t at; uint8_t f[LINK_FRAME]; } rxq[RXQ];
+static unsigned rxq_head, rxq_count, rxq_high;
+static uint8_t staged[2][LINK_FRAME];
+static unsigned staged_head, staged_count;
 static uint8_t latched[LINK_FRAME];
 static bool staging_fifo = true, latched_sent = true;
-static uint64_t skipped, filled;
+static uint64_t skipped, filled, overruns, evicted;
 static uint64_t last_xfer_end, last_kick_end;
+static uint64_t pico_free;          /* the main loop's next turn starts no earlier */
+static bool turn_open;              /* a turn has run whose port_set_tx is still ahead */
+static uint64_t turn_end;
+static uint8_t turn_reply[LINK_FRAME];
 static unsigned pico_turns;
+static uint64_t stall_every, stall_len; /* master cycles, from the cost table */
 static bool old_pico;
 static uint64_t raw_tx_pico;
-static void pico_set_tx(const uint8_t *f, uint64_t ready) {
-    unsigned i = (reply_head + reply_count) % REPLIES;
-    if (reply_count == REPLIES) {
-        reply_head = (reply_head + 1) % REPLIES;
-        --reply_count;
+static void pico_set_tx(const uint8_t *f) {
+    if (staged_count == 2) { /* after a stall only: oldest goes */
+        staged_head ^= 1;
+        --staged_count;
+        ++evicted;
     }
-    reply[i].ready = ready;
-    memcpy(reply[i].f, f, LINK_FRAME);
-    ++reply_count;
+    memcpy(staged[(staged_head + staged_count) & 1], f, LINK_FRAME);
+    ++staged_count;
 }
-/* restart(): stage what the policy allows at time t. `sent` says the
- * restart follows a whole exchange, so the latched frame went out. */
-static void pico_restage(uint64_t t, bool sent) {
-    if (sent) latched_sent = true;
-    if (staging_fifo) {
-        if (latched_sent && reply_count && reply[reply_head].ready <= t) {
-            memcpy(latched, reply[reply_head].f, LINK_FRAME);
-            reply_head = (reply_head + 1) % REPLIES;
-            --reply_count;
-            latched_sent = false;
-        }
-        return;
-    }
-    while (reply_count && reply[reply_head].ready <= t) {
-        if (!latched_sent && (latched[2] & F_DATA)) ++skipped;
-        memcpy(latched, reply[reply_head].f, LINK_FRAME);
-        reply_head = (reply_head + 1) % REPLIES;
-        --reply_count;
-        latched_sent = false;
-    }
-}
-static void pico_main_turn(const uint8_t *rx, uint64_t t_end) {
+static void pico_main_turn(const uint8_t *rx, uint64_t start) {
     double us = C("pico_us");
     unsigned every = (unsigned)C("pico_slow_every");
     if (every && ++pico_turns % every == 0) us = C("pico_us_slow");
-    uint64_t t = t_end + (uint64_t)(us * MC_PER_US);
+    uint64_t t = start + (uint64_t)(us * MC_PER_US);
     pico_ms = (uint32_t)(t / (MC_PER_US * 1000.0));
     link_rx_t r = link_on_rx(rx);
     if (r.reset) {
@@ -367,9 +376,65 @@ static void pico_main_turn(const uint8_t *rx, uint64_t t_end) {
         nat_core_poll(core, pico_ms);
     }
     ctrl_poll();
-    uint8_t tx[LINK_FRAME];
-    link_next_out(tx);
-    pico_set_tx(tx, t);
+    link_next_out(turn_reply);
+    turn_end = pico_free = t;
+    turn_open = true;
+}
+/* Every turn that starts by t, and every port_set_tx that happens by t. */
+static void pico_run(uint64_t t) {
+    for (;;) {
+        if (turn_open) {
+            if (turn_end > t) return;
+            pico_set_tx(turn_reply);
+            turn_open = false;
+        }
+        if (!rxq_count) return;
+        uint64_t s = rxq[rxq_head].at > pico_free ? rxq[rxq_head].at : pico_free;
+        if (stall_every) {
+            uint64_t phase = s % stall_every;
+            if (phase < stall_len) s += stall_len - phase;
+        }
+        if (s > t) return;
+        uint8_t f[LINK_FRAME];
+        memcpy(f, rxq[rxq_head].f, LINK_FRAME);
+        rxq_head = (rxq_head + 1) % RXQ;
+        --rxq_count;
+        pico_main_turn(f, s);
+    }
+}
+/* restart() after a whole exchange: into the ring, if there is room. */
+static void pico_rx(const uint8_t *f, uint64_t at) {
+    pico_run(at);
+    if (rxq_count == RXQ) {
+        ++overruns;
+        return;
+    }
+    unsigned i = (rxq_head + rxq_count) % RXQ;
+    rxq[i].at = at;
+    memcpy(rxq[i].f, f, LINK_FRAME);
+    if (++rxq_count > rxq_high) rxq_high = rxq_count;
+}
+/* restart(): stage what the policy allows at time t. `sent` says the
+ * restart follows a whole exchange, so the latched frame went out. */
+static void pico_restage(uint64_t t, bool sent) {
+    pico_run(t);
+    if (sent) latched_sent = true;
+    if (staging_fifo) {
+        if (latched_sent && staged_count) {
+            memcpy(latched, staged[staged_head], LINK_FRAME);
+            staged_head ^= 1;
+            --staged_count;
+            latched_sent = false;
+        }
+        return;
+    }
+    while (staged_count) {
+        if (!latched_sent && (latched[2] & F_DATA)) ++skipped;
+        memcpy(latched, staged[staged_head], LINK_FRAME);
+        staged_head ^= 1;
+        --staged_count;
+        latched_sent = false;
+    }
 }
 
 /* ------------------------------------------------------- the wire, watched */
@@ -463,7 +528,15 @@ void link_serial_xfer(const uint8_t *tx, uint8_t *rx, uint16_t n) {
     }
     watch(&to_snes, latched);
     watch(&to_pico, tx);
-    if (!collided) pico_main_turn(tx, end);
+    if (collided) {
+        /* The adapter took the auto-read's clocks as part of the frame. */
+        uint8_t bad[LINK_FRAME];
+        memcpy(bad, tx, LINK_FRAME);
+        bad[LINK_HDR] ^= 0x55;
+        pico_rx(bad, end);
+    } else {
+        pico_rx(tx, end);
+    }
     charge(end - now);
     last_xfer_end = end;
     if (in_nmi) ++st.xfer_nmi;
@@ -551,6 +624,7 @@ static unsigned nmarks;
 static void take_mark(void) {
     if (nmarks == 8) return;
     struct snap *m = &marks[nmarks++];
+    pico_run(now);
     m->t = now; m->nmi = st.nmi; m->xfer_nmi = st.xfer_nmi; m->xfer_fg = st.xfer_fg;
     m->up = to_pico; m->down = to_snes;
     m->pico_resends = link_stats().resends;
@@ -680,6 +754,9 @@ int main(int argc, char **argv) {
     c_nmi_entry = (uint64_t)C("nmi_entry"); c_pad_latch = (uint64_t)C("pad_latch");
     c_nmi_tail = (uint64_t)C("nmi_tail"); c_svc_fixed = (uint64_t)C("svc_fixed");
     c_recv_copy = (uint64_t)C("recv_copy"); c_frame_ok = (uint64_t)C("frame_ok");
+    stall_every = (uint64_t)(C("pico_stall_every_ms") * 1000 * MC_PER_US);
+    stall_len = (uint64_t)(C("pico_stall_us") * MC_PER_US);
+    if (stall_len >= stall_every) stall_every = 0;
 
     boot(); /* HELLO through the real stack, which arms IP mode */
     for (unsigned i = 0; i < ntunes; ++i) tune(tunes[i]);
@@ -712,12 +789,14 @@ int main(int argc, char **argv) {
     printf("  hazards: nmi late %llu (max %.0f us), masked across vblank %llu, nmi spans %llu, "
            "autoread collisions %llu, kicks %llu, refused %u, bad sums %u, ip drop %u desync %u\n"
            "  pico staging %s: %llu repeats of a frame already sent, "
-           "%llu data frames replaced unsent\n",
+           "%llu data frames replaced unsent, %llu replies evicted from the queue\n"
+           "  pico receive: %llu frames lost to a full ring, at most %u waiting\n",
            (unsigned long long)st.nmi_late, st.nmi_late_max / MC_PER_US,
            (unsigned long long)st.masked_vblank, (unsigned long long)st.nmi_span,
            (unsigned long long)st.collisions, (unsigned long long)st.kicks, net_stat_refused,
            net_stat_bad_sum, ip_stat_drop, ip_stat_desync, staging_fifo ? "fifo" : "latest",
-           (unsigned long long)filled, (unsigned long long)skipped);
+           (unsigned long long)filled, (unsigned long long)skipped, (unsigned long long)evicted,
+           (unsigned long long)overruns, rxq_high);
     printf("  fg exchanges per frame:");
     for (unsigned i = 0; i < 8; ++i)
         if (st.fg_frames_with[i]) printf(" %u:%llu", i, (unsigned long long)st.fg_frames_with[i]);
