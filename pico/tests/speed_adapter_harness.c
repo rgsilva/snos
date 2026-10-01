@@ -86,10 +86,55 @@ static void v_other_destination_and_port(void) {
     nat_poll();
     assert(nat_stats().speed == 0 && nat_stats().tcp == 2);
 }
+/* Feed actual framed control traffic through nat_ip_bytes before tearing down
+ * a local flow with outstanding download data or an unacknowledged report. */
+static void local_payload(uint32_t seq, uint32_t ack, const char *data) {
+    uint8_t frame[96] = {0};
+    uint8_t *p = frame + 2;
+    size_t len = 40 + strlen(data);
+    frame[0] = len;
+    p[0] = 0x45; put16(p + 2, len); p[8] = 64; p[9] = 6;
+    put32(p + 12, 0x0a00020f); put32(p + 16, 0xc000020a);
+    put16(p + 10, checksum(p, 20, 0));
+    put16(p + 20, 5000); put16(p + 22, 7778);
+    put32(p + 24, seq); put32(p + 28, ack);
+    p[32] = 0x50; p[33] = 24; put16(p + 34, 1460);
+    memcpy(p + 40, data, len - 40);
+    put16(p + 36, checksum(p + 20, len - 20,
+                           0x0a00 + 0x020f + 0xc000 + 0x020a + 6 + len - 20));
+    nat_ip_bytes(frame, 7);
+    nat_ip_bytes(frame + 7, len + 2 - 7);
+}
+static void active_teardown(bool disable) {
+    for (unsigned upload = 0; upload < 2; ++upload) {
+        uint32_t ack = local_open();
+        local_payload(101, ack, upload ? "U 60\n" : "D 60\n");
+        nat_poll();
+        assert(packet_len == 43 && !memcmp(packet + 40, "OK\n", 3));
+        local_payload(106, ack + 3, "GO\n");
+        if (upload) clock_ms += 1000;
+        nat_poll();
+        assert(packet_len == (upload ? 42u : 1500u));
+        uint32_t generation = tcp_generation[0];
+        if (disable) nat_configure(false);
+        else nat_reset();
+        assert(nat_stats().speed == 0 && nat_stats().tcp == 0);
+        assert(tcp_generation[0] != generation && out_head == out_tail);
+        unsigned before = outputs;
+        clock_ms += 20000;
+        nat_poll();
+        assert(outputs == before);
+        nat_configure(true);
+    }
+    local_open(); /* reuse after both forms of active teardown */
+}
+static void v_active_transfer_reset(void) { active_teardown(false); }
+static void v_active_transfer_mode_switch(void) { active_teardown(true); }
+
 static const struct { const char *name; void (*run)(void); } validation_tests[] = {
     TEST(v_reset_local), TEST(v_wifi_loss_and_disabled_input),
     TEST(v_remote_generation_reused_locally), TEST(v_local_with_inbound_and_dns),
-    TEST(v_other_destination_and_port)
+    TEST(v_other_destination_and_port), TEST(v_active_transfer_reset), TEST(v_active_transfer_mode_switch)
 };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

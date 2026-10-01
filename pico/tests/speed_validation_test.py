@@ -42,7 +42,7 @@ exe = build / "console"
 subprocess.run([*common, "-I", str(root / "snes/kernel"), "-I", str(root / "apps/lib"),
                 str(core), str(root / "pico/tests/speed_console_harness.c"),
                 "-o", str(exe)], check=True)
-run(exe, ["1", "10", "120"])
+run(exe, ["1", "10", "120", "cancel-download", "cancel-upload", "cancel-duplex"])
 
 # Reuse the established SDK test's tiny platform headers; do not edit them or
 # any existing test. Run it as well so this new runner works on a clean tree.

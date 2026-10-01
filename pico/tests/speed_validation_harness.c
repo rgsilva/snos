@@ -600,6 +600,206 @@ static void t_remote_busy_deferral_and_full_retry_budget(void) {
     nat_core_poll(n, tick);
     assert((last[33] & RST) && nat_core_stats(n).tcp == 0);
 }
+/* Third-pass checks: mixed scheduler work, rejected output and hard lifetimes. */
+static void t_mixed_ready_flows_one_rotation(void) {
+    uint32_t ack[8];
+    ack[0] = remote_open(0, 5700); /* continuously replenished new data */
+    ack[1] = remote_open(1, 5701); /* data retransmission */
+    send_tcp_to(REMOTE, 5702, 80, SYN, 100, 0, 1460, NULL);
+    nat_core_tcp_connected(n, 2, 0, tick);
+    ack[2] = rd32(last + 24); /* SYN retransmission */
+    ack[3] = remote_open(3, 5703); /* FIN retransmission */
+    ack[4] = remote_open(4, 5704); /* first FIN */
+    ack[5] = remote_open(5, 5705); /* first data */
+    begin_speed(5706, "D 7200\n", &ack[6]);
+    input(5706, 108, ack[6], 0, PSH | ACK, "GO\n");
+    begin_speed(5707, "U 7200\n", &ack[7]);
+    input(5707, 108, ack[7], 0, PSH | ACK, "GO\n");
+    assert(nat_core_tcp_received(n, 1, (const uint8_t *)"retry", 5, tick));
+    nat_core_tcp_eof(n, 3, tick);
+    nat_core_poll(n, tick);
+    single_packet_adapter();
+    occupied = true;
+    nat_core_poll(n, tick + 1); /* normal main-loop busy observation before RTO */
+    tick += 120001; /* upload report becomes ready; all retries are due */
+    assert(nat_core_tcp_received(n, 0, (const uint8_t *)"new", 3, tick));
+    assert(nat_core_tcp_received(n, 5, (const uint8_t *)"other", 5, tick));
+    nat_core_tcp_eof(n, 4, tick);
+    input(5706, 111, ack[6], 128, ACK, NULL);
+    input(5707, 111, ack[7], 1460, ACK, NULL);
+    unsigned seen = 0;
+    for (unsigned opportunity = 0; opportunity < NAT_TCP_MAX; ++opportunity) {
+        occupied = false;
+        unsigned before = emitted;
+        nat_core_poll(n, ++tick);
+        assert(occupied && emitted == before + 1);
+        unsigned i = rd16(last + 22) - 5700;
+        assert(i < 8 && !(seen & (1u << i)));
+        seen |= 1u << i;
+        assert(rd32(last + 24) == ack[i]);
+        if (i == 2) assert(last[33] == (SYN | ACK));
+        else if (i == 3 || i == 4) assert(last[33] == (FIN | ACK));
+        else {
+            assert(last[33] == (PSH | ACK));
+            const char *want = i == 0 ? "new" : i == 1 ? "retry" :
+                               i == 5 ? "other" : i == 7 ? "0\n" : NULL;
+            if (want) assert(last_len == 40 + strlen(want) &&
+                             !memcmp(last + 40, want, strlen(want)));
+            else {
+                assert(last_len == 168);
+                for (unsigned j = 40; j < last_len; ++j) assert(last[j] == 'x');
+            }
+        }
+        /* Keep slot zero eligible: it must not get a second turn before
+         * every other flow that was ready at entry has had its first. */
+        if (i == 0) {
+            ack[0] += 3;
+            send_tcp_to(REMOTE, 5700, 80, ACK, 101, ack[0], 1460, NULL);
+            assert(nat_core_tcp_received(n, 0, (const uint8_t *)"new", 3, tick));
+        }
+    }
+    assert(seen == 255);
+}
+static void t_rejected_output_keeps_sequence_and_rotation(void) {
+    uint32_t ack[2];
+    ack[0] = remote_open(0, 5700);
+    ack[1] = remote_open(1, 5701);
+    for (unsigned i = 0; i < 2; ++i)
+        assert(nat_core_tcp_received(n, i, (const uint8_t *)"abc", 3, tick));
+    single_packet_adapter();
+    reject_output = true;
+    unsigned before = emitted;
+    for (unsigned i = 0; i < 8; ++i) nat_core_poll(n, ++tick);
+    assert(emitted == before);
+    reject_output = false;
+    unsigned seen = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        occupied = false;
+        nat_core_poll(n, ++tick);
+        unsigned slot = rd16(last + 22) - 5700;
+        assert(slot < 2 && !(seen & (1u << slot)));
+        seen |= 1u << slot;
+        assert(rd32(last + 24) == ack[slot] && last_len == 43);
+        assert(!memcmp(last + 40, "abc", 3));
+    }
+    assert(seen == 3);
+}
+static void t_fin_partial_ack_retries_only_outstanding_prefix(void) {
+    uint32_t ack;
+    begin_speed(5700, "D 7200\n", &ack);
+    input(5700, 108, ack, 128, PSH | ACK, "GO\n");
+    nat_core_poll(n, ++tick);
+    assert(last_len == 168);
+    input(5700, 111, ack + 37, 0, FIN | ACK, NULL);
+    tick += 2501;
+    nat_core_poll(n, tick);
+    assert(last_len == 131 && rd32(last + 24) == ack + 37);
+    for (unsigned i = 40; i < last_len; ++i) assert(last[i] == 'x');
+    input(5700, 112, ack + 128, 0, ACK, NULL);
+    nat_core_poll(n, ++tick);
+    assert(last[33] == (FIN | ACK) && rd32(last + 24) == ack + 128);
+}
+static void blocked_deadline(bool report, bool wrap) {
+    uint32_t ack;
+    tick = wrap ? (uint32_t)(0u - 15001u - (report ? 1000u : 0u)) : 100;
+    if (report) {
+        begin_speed(5700, "U 60\n", &ack);
+        input(5700, 106, ack, 0, PSH | ACK, "GO\n");
+        tick += 1000;
+    } else {
+        ack = speed_open(5700, 100, 1460);
+        ++tick;
+        input(5700, 101, ack, 0, PSH | ACK, "U 60\n");
+    }
+    uint32_t end = tick + 15000;
+    if (wrap) assert(end == 0);
+    single_packet_adapter();
+    reject_output = true; /* even the timeout's RST cannot enter the link */
+    nat_core_poll(n, tick);
+    unsigned before = emitted;
+    tick = end - 1;
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 1);
+    tick = end;
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 0 && emitted == before);
+    reject_output = false;
+    occupied = false;
+    speed_open(5700, 100, 1460); /* slot and same tuple can immediately be reused */
+}
+static void t_blocked_handshake_release_exact_deadline(void) { blocked_deadline(false, false); }
+static void t_blocked_handshake_release_zero_deadline(void) { blocked_deadline(false, true); }
+static void t_blocked_report_release_exact_deadline(void) { blocked_deadline(true, false); }
+static void t_blocked_report_release_zero_deadline(void) { blocked_deadline(true, true); }
+static void t_local_syn_busy_lifetime_wrap_and_reuse(void) {
+    tick = (uint32_t)(0u - 30000u);
+    single_packet_adapter();
+    reject_output = true;
+    input(5700, 100, 0, 1460, SYN, NULL);
+    tick = UINT32_MAX;
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 1);
+    tick = 0;
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 0 && emitted == 0);
+    reject_output = false;
+    speed_open(5700, 100, 1460);
+}
+static void t_local_fin_busy_lifetime_wrap_and_reuse(void) {
+    uint32_t ack = speed_open(5700, 100, 1460);
+    tick = (uint32_t)(0u - 30000u);
+    input(5700, 101, ack, 1460, FIN | ACK, NULL);
+    single_packet_adapter();
+    reject_output = true;
+    tick = UINT32_MAX;
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 1);
+    tick = 0;
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 0);
+    reject_output = false;
+    speed_open(5700, 100, 1460);
+}
+static void t_abort_download_preserves_remote_stream(void) {
+    uint32_t ack, remote;
+    begin_speed(5700, "D 7200\n", &ack);
+    input(5700, 108, ack, 1460, PSH | ACK, "GO\n");
+    remote = remote_open(1, 5701);
+    assert(nat_core_tcp_received(n, 1, (const uint8_t *)"remote", 6, tick));
+    single_packet_adapter();
+    nat_core_poll(n, ++tick);
+    assert(rd16(last + 22) == 5701); /* cursor follows the earlier OK */
+    send_tcp_to(REMOTE, 5701, 80, ACK, 101, remote + 2, 1460, NULL);
+    occupied = false;
+    nat_core_poll(n, ++tick);
+    assert(rd16(last + 22) == 5700 && last_len == 1500);
+    input(5700, 111, ack, 0, RST | ACK, NULL); /* cancel with local data in flight */
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 0 && nat_core_stats(n).tcp == 1);
+    occupied = false;
+    tick += 2501;
+    nat_core_poll(n, tick);
+    assert(last_len == 44 && rd16(last + 22) == 5701);
+    assert(rd32(last + 24) == remote + 2 && !memcmp(last + 40, "mote", 4));
+    send_tcp_to(REMOTE, 5701, 80, ACK, 101, remote + 6, 1460, NULL);
+    assert(recved == 9); /* three OK bytes and six remote bytes, once each */
+}
+static void t_upload_lost_ack_does_not_duplicate_count(void) {
+    uint32_t ack;
+    begin_speed(5700, "U 60\n", &ack);
+    input(5700, 106, ack, 1460, PSH | ACK, "GO\n");
+    single_packet_adapter();
+    reject_output = true;
+    input(5700, 109, ack, 1460, PSH | ACK, "payload");
+    reject_output = false;
+    input(5700, 109, ack, 1460, PSH | ACK, "payload");
+    assert(last[33] == ACK && rd32(last + 28) == 116);
+    occupied = false;
+    tick += 1000;
+    nat_core_poll(n, tick);
+    assert(last_len == 42 && !memcmp(last + 40, "7\n", 2));
+}
+
 static const test_t validation_tests[] = {
     TEST(t_upload_fragment_duplicate_tail_wrap), TEST(t_download_window_stop_and_wait),
     TEST(t_download_small_window_progress), TEST(t_download_fin_discards_unsent_tail),
@@ -622,7 +822,13 @@ static const test_t validation_tests[] = {
     TEST(t_busy_local_source_remote_fin_retry_fair),
     TEST(t_input_ack_cannot_starve_ready_remote),
     TEST(t_handshake_zero_window_has_deadline),
-    TEST(t_download_exact_deadline_and_clock_wrap), TEST(t_report_small_window_tail_deadline)
+    TEST(t_download_exact_deadline_and_clock_wrap), TEST(t_report_small_window_tail_deadline),
+    TEST(t_mixed_ready_flows_one_rotation), TEST(t_rejected_output_keeps_sequence_and_rotation),
+    TEST(t_fin_partial_ack_retries_only_outstanding_prefix),
+    TEST(t_blocked_handshake_release_exact_deadline), TEST(t_blocked_handshake_release_zero_deadline),
+    TEST(t_blocked_report_release_exact_deadline), TEST(t_blocked_report_release_zero_deadline),
+    TEST(t_local_syn_busy_lifetime_wrap_and_reuse), TEST(t_local_fin_busy_lifetime_wrap_and_reuse),
+    TEST(t_abort_download_preserves_remote_stream), TEST(t_upload_lost_ack_does_not_duplicate_count)
 };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

@@ -46,6 +46,7 @@ static unsigned opened, frame, max_open;
 static char transcript[4096];
 static size_t transcript_len;
 static unsigned seconds = 1;
+static unsigned cancel_after_opened;
 static uint16_t window(const struct stream *s) { return s->rxlen <= 587 ? 1460 : 0; }
 static void stream_send(struct stream *s, unsigned flags, const uint8_t *p, size_t len) {
     uint8_t b[NAT_MTU] = {0};
@@ -123,7 +124,12 @@ static void service(void) {
 }
 static uint16_t sys_frames(void) { service(); return frame; }
 static uint16_t sys_yield(void) { service(); return 0; }
-static uint16_t sys_pollkey(void) { return SYS_ERR; }
+static uint16_t sys_pollkey(void) {
+    if (cancel_after_opened && opened == cancel_after_opened &&
+        streams[opened - 1].start && tick - streams[opened - 1].start >= 100)
+        return 'q';
+    return SYS_ERR;
+}
 static uint16_t sys_net_state(uint16_t ch) { return streams[ch].open ? NET_ST_OPEN : 0; }
 static uint16_t sys_net_close(uint16_t ch) {
     stream_send(&streams[ch], RST | ACK, NULL, 0);
@@ -184,12 +190,26 @@ static void sl_hostport(char *dst, int cap, const char *src, const char *suffix)
     strcpy(dst, src); strcat(dst, suffix);
 }
 int main(int argc, char **argv) {
-    if (argc == 2) seconds = (unsigned)atoi(argv[1]);
+    if (argc == 2) {
+        if (!strcmp(argv[1], "cancel-download")) cancel_after_opened = 1;
+        else if (!strcmp(argv[1], "cancel-upload")) cancel_after_opened = 2;
+        else if (!strcmp(argv[1], "cancel-duplex")) cancel_after_opened = 4;
+        else seconds = (unsigned)atoi(argv[1]);
+    }
     nat_ops_t ops = {console_emit, connect_, write_, shutdown_, abort_, udp,
                      fadd, fdel, got, NULL};
     nat_core_init(n, &ops); nat_core_set_local_address(n, PICO);
     int result = speed_console_main();
     puts(transcript);
+    if (cancel_after_opened) {
+        assert(result == 1 && opened == cancel_after_opened);
+        assert(strstr(transcript, "speedtest: cancelled\n"));
+        for (unsigned i = 0; i < opened; ++i) assert(!streams[i].open);
+        nat_core_poll(n, ++tick);
+        assert(nat_core_stats(n).tcp == 0 && connects == 0 && writes == 0);
+        printf("PASS actual_console_app_%s\n", argv[1]);
+        return 0;
+    }
     assert(result == 0 && opened == 4 && max_open == 2);
     assert(streams[2].start >= streams[3].start); /* upload GO precedes download GO */
     const char *labels[] = {"download: ", "upload: ", "both download: ", "both upload: "};
