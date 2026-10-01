@@ -1119,6 +1119,7 @@ static uint8_t net_window_now(void) {
 
 int net_tune_get(int what) {
   if (what == NET_TUNE_WINDOW) return net_window;
+  if (what == NET_TUNE_EXCH) return link_serial_exch(0);
   return -1;
 }
 
@@ -1130,6 +1131,7 @@ int net_tune_set(int what, int value) {
     window_told = 0xFFFFu; /* tell the peer on the next pass */
     return value;
   }
+  if (what == NET_TUNE_EXCH) return link_serial_exch(value < 1 ? 1 : value);
   return -1;
 }
 

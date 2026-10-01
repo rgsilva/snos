@@ -23,6 +23,8 @@
  * link_serial_recv() hands that frame over on the NEXT poll. */
 #include "link.h"
 #include "net.h"
+#include "snos.h"  /* snos_frames: which exchanges share a video frame */
+#include "input.h" /* beam_line */
 
 #ifdef LINK_HW
 
@@ -32,12 +34,80 @@ uint8_t net_checksum(const uint8_t *f, uint16_t n);
 #define PROBE_EVERY 60u
 #define MISS_LIMIT 120u
 
+void link_serial_kick(void);
+
 static uint8_t last_rx[LINK_FRAME];
 static uint8_t probe[LINK_FRAME];
 static uint8_t have_rx;
 static uint8_t up;
 static uint16_t misses;
 static uint16_t probe_wait;
+
+/* Exchanges per video frame (`net tune exch`, docs/link-throughput.md). The
+ * NMI's exchange is the first; kbd_idle's spin may add more while a transfer
+ * is live, each only where link_serial_fg_fits allows. xfer_frame/xfer_count
+ * count this frame's exchanges -- snos_frames moves at the top of the NMI --
+ * so they also say which exchanges had no auto-joypad read before them. */
+#define EXCH_MAX 3u
+static uint8_t exch_max = 2;
+static uint16_t xfer_frame;
+static uint8_t xfer_count;
+
+/* Every exchange comes through here, and returns 0 if it did not happen.
+ *
+ * THE LAST WORD ON VBLANK. From the kick's first clock to the exchange's last
+ * is ~85 lines and never varies; what comes before it -- net_service's C,
+ * receiving and building -- does, up to ~40 lines. So whatever the early
+ * gate (link_serial_fg_fits) allowed, an exchange that would still be
+ * clocking at vblank -- the beam past XFER_LAST and short of 229 -- is not
+ * started: NMI would be held off across vblank and the auto-joypad read's
+ * clocks would land in the frame (input.c, fg_poll_fits). The frame built for
+ * it is lost as if on the wire, and the window resends it. The NMI's own
+ * exchange begins near line 230 and is never refused.
+ *
+ * One that follows another in the same video frame has had no auto-joypad
+ * read before it, and that read's short burst is what makes the adapter
+ * restart and stage the answer it computed to the last exchange
+ * (pico/port.c); without it the answer waits for the exchange after. So such
+ * an exchange is kicked first: a short burst of our own (linkxfer.s), which
+ * the adapter takes exactly as it takes the auto-read. */
+#define XFER_LAST 135u
+static int xfer(const uint8_t *tx) {
+  uint8_t line = beam_line();
+  if (line > XFER_LAST && line < 229u) return 0;
+  if (xfer_frame != snos_frames) {
+    xfer_frame = snos_frames;
+    xfer_count = 0;
+  } else if (xfer_count != 0) {
+    link_serial_kick();
+  }
+  if (xfer_count < 255u) xfer_count++;
+  link_serial_xfer(tx, last_rx, LINK_FRAME);
+  return 1;
+}
+
+/* May kbd_idle start a foreground exchange with the beam on `line` (the low
+ * eight bits of the V counter, input.c)? While this frame has had fewer than
+ * exch_max exchanges, the link is up, and the poll will most likely reach its
+ * exchange by XFER_LAST: net_service's C takes ~30 lines before the clocks
+ * and up to ~40, measured on the hardware ROM. Or it may start after this
+ * frame's NMI and auto-joypad read are both done (229 on; 256-261 read as
+ * 0-5, inside the early zone and just as safe). xfer() makes the final call;
+ * this one only keeps it from having to refuse often, because a refused
+ * exchange costs a resend. */
+#define FG_LAST 100u
+int link_serial_fg_fits(uint16_t line) {
+  if (!up || exch_max < 2u) return 0;
+  if (xfer_frame == snos_frames && xfer_count >= exch_max) return 0;
+  return line <= FG_LAST || line >= 229u;
+}
+
+/* `net tune exch`: 0 asks, 1..EXCH_MAX sets; returns what is in force. One
+ * is the NMI's exchange alone, as the hardware build ran before. */
+int link_serial_exch(int value) {
+  if (value > 0) exch_max = (uint8_t)(value > (int)EXCH_MAX ? EXCH_MAX : value);
+  return exch_max;
+}
 
 /* An idle or absent adapter reads as all zeros, and 64 zero bytes checksum
  * to zero, so a frame that sums correctly is not yet a frame. Two bytes
@@ -72,7 +142,7 @@ int link_serial_present(void) {
   if (up) return 1;
   if (++probe_wait < PROBE_EVERY) return 0;
   probe_wait = 0;
-  link_serial_xfer(probe, last_rx, LINK_FRAME);
+  if (!xfer(probe)) return 0;
   if (!frame_ok(last_rx)) return 0;
   up = 1;
   misses = 0;
@@ -90,7 +160,10 @@ int link_serial_recv(uint8_t *rx) {
 }
 
 void link_serial_send(const uint8_t *tx) {
-  link_serial_xfer(tx, last_rx, LINK_FRAME);
+  if (!xfer(tx)) {
+    have_rx = 0;
+    return;
+  }
   if (frame_ok(last_rx)) {
     have_rx = 1;
     misses = 0;
@@ -112,5 +185,13 @@ int link_serial_recv(uint8_t *rx) {
   return 0;
 }
 void link_serial_send(const uint8_t *tx) { (void)tx; }
+int link_serial_fg_fits(uint16_t line) {
+  (void)line;
+  return 0;
+}
+int link_serial_exch(int value) {
+  (void)value;
+  return 1;
+}
 
 #endif

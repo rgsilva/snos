@@ -100,6 +100,7 @@ the host bench's, at that commit.
 | baseline (silicon: 876 / 919 / 876 + 561) | 876 | 919 | 876 + 561 | 1022 / 1021 / 876 + 612 |
 | 2. the turnaround is CPU | 1314 | 1226 | 1314 + 510 | 1460 / 1277 / 1314 + 510 |
 | 3. link window (4) | 2336 | 1839 | 2172 + 817 | 2482 / 2043 / 2336 + 868 |
+| 4. two exchanges a frame | 2482 | 1941 | 2190 + 817 | 3212 / 2554 / 3066 + 1123 |
 
 ### 2. The turnaround is CPU
 
@@ -157,3 +158,76 @@ the next step makes the reply latency two exchanges on some of them.
 frames both ways while the console stops reading for stretches: every pair
 of windows 1..8, exactly-once in-order delivery of IP both ways and keyboard
 records, 64/64.
+
+### 4. More than one exchange per video frame
+
+`input.c`'s `fg_poll_fits()` said "a serial exchange is ~92k master cycles,
+most of the way to the next vblank from anywhere: it only ever fits from the
+NMI". The exchange is ~112k cycles, 82 lines -- a third of a frame, not most
+of it -- so the arithmetic was wrong; but the conclusion was nearly right for
+a reason the comment did not give. The NMI handler, exchange included, runs
+from vblank to about line 96 of the next frame (133 lines, measured with the
+window in), and a foreground poll is ~110 lines with its C: it must end
+before vblank, so it can only start in a ~5-line window right after the NMI.
+The spin in `kbd_idle` almost never reaches it -- by the time the display
+work, an `ip_service` pass and the application have run, the window has shut.
+
+What this step does:
+
+- `kbd_idle` takes its extra exchange first thing after the frame turns
+  (hardware build only), while the caller is waiting anyway.
+- `link_serial.c` keeps the budget (`net tune exch`, at most 3, default 2)
+  and the gate, `link_serial_fg_fits`: start by line 100, or after the NMI
+  and auto-read (229 on).
+- **The last word is a check of the beam just before the clocks start**
+  (`xfer()`): from the kick's first clock to the exchange's last is a fixed
+  ~85 lines, but the C before it varies from 29k to 93k cycles. An exchange
+  that could still be clocking at vblank is not started; the frame built for
+  it is lost as if on the wire, and the window resends it. Mesen found this:
+  with the early gate alone, 125 exchanges were still clocking when vblank
+  began, NMIs were held off, and the run wedged. The host bench had not seen
+  it -- its cost table had the C before the exchange at half its real size
+  (corrected now). With the check: none, in every run since.
+- An exchange that follows another in the same frame is **kicked**: eight
+  bare `$4017` clocks (`link_serial_kick`, linkxfer.s), a short burst like
+  the auto-read's, which the adapter's gap detector turns into a restart
+  ~64 us later -- the restart that stages its answer. Without it the answer
+  to the previous exchange waits one exchange more. `kick_test.py` runs the
+  burst through the assembled PIO program: one byte, gap after 64.6 us.
+- **`pico/port.c` stages in order.** It used to stage the newest pending
+  reply at every restart; a reply staged at one restart and replaced at the
+  next never reached the wire. Harmless at window 1 -- every reply was the
+  same frame or an ack -- but with frames in flight a frame that silently
+  never left costs a go-back. Now a staged frame is replaced only once it
+  has gone out whole, and with nothing new the last frame goes out again.
+  The host bench, at two exchanges a frame: with the old staging a Pico main
+  loop slower than ~2 ms per turn, or one that stalls 5 ms every 20 turns,
+  lost hundreds of frames unsent and download fell to 1460 B/s (duplex 584 +
+  357); with in-order staging, nothing was lost and throughput did not move.
+  At one exchange a frame the two policies are identical.
+
+The gain on the hardware ROM is small: the NMI ends too late for the
+foreground exchange to fit in most frames (186 of 2300 in a speedtest). The
+bench says 33% of frames, because it still underestimates how much of each
+frame the application has left when the NMI returns; Mesen is the number.
+What would make it pay: an NMI handler that ends earlier. `proc_tick` alone is
+22k cycles of it, and `net_service`'s own C ~39k.
+
+With a new ROM and **old** firmware (no window from the Pico, newest-wins
+staging), the bench says two exchanges a frame with the kick still helps
+(1460 / 2043 -> 1898 / 2554); without the kick it does nothing.
+
+## The one test this breaks
+
+`pico/tests/transition_test.py` ends with a property,
+`p4_console_sources_equal_main`, that fails unless `snes/kernel/net.c` and
+`link.h` are byte-identical to commit 99b6002. It was tier 2's guard that the
+NAT work left the SNES tree alone. A console-side window cannot leave net.c
+alone, so from step 3 on that one property fails; the brief says not to edit
+an existing test that encodes behaviour being deliberately changed, so it is
+not edited. Its 21 behavioural properties -- mode switches at every byte
+offset, restarts, keyboard exactly-once -- still pass, and they run the 99b6002
+console against the new windowed Pico, which is the old-ROM/new-firmware
+pairing. Retiring the property, or re-pinning `console_main_fixture.MAIN`
+(which would also move the other harnesses to the new console), is the
+owner's call.

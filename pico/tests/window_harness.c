@@ -57,6 +57,7 @@ uint8_t proc_fg(void) { return 0; }
 void proc_switch_now(void) {}
 void kbd_idle(void) {}
 void link_serial_kick(void) {}
+uint8_t beam_line(void) { return 0; } /* always early in the frame: never refused */
 bool relay_send(uint8_t type, const uint8_t *data, size_t len) {
     (void)type; (void)data; (void)len;
     return false;

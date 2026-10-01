@@ -21,6 +21,10 @@
 -- read (its 16 clocks are a short burst; Mesen does not show them to Lua, so
 -- the NMI event stands in), and ~64 us after a kick. A reply only exists
 -- `pico_us` after the frame it answers ended -- the Pico's main loop.
+-- opt.staging picks port.c's policy: "fifo" (the firmware now) stages
+-- replies in order and replaces a staged frame only once it has gone out
+-- whole; "latest" (the firmware before link windows) stages the newest
+-- reply at every restart, so a staged frame can be replaced unsent.
 --
 -- Time comes from emu.getState().masterClock, which costs ~0.3 ms of real
 -- time per call, so it is read at most a few times per exchange.
@@ -41,6 +45,8 @@ function P.new(gw, opt)
   local pico = {
     gw = gw,
     pico_mc = math.floor((opt.pico_us or 300) * 21.47727),
+    staging = opt.staging or "fifo",
+    latched_sent = true,
     exchanges = 0, kicks = 0, short = 0,
     latched = nil,          -- frame the next exchange shifts out
     pending = {},           -- { ready = clock, frame = table }, oldest first
@@ -58,7 +64,15 @@ function P.new(gw, opt)
   end
   pico.latched = idle_frame()
 
-  local function restage(t)
+  local function restage(t, whole)
+    if whole then pico.latched_sent = true end
+    if pico.staging == "fifo" then
+      if pico.latched_sent and #pico.pending > 0 and pico.pending[1].ready <= t then
+        pico.latched = table.remove(pico.pending, 1).frame
+        pico.latched_sent = false
+      end
+      return
+    end
     while #pico.pending > 0 and pico.pending[1].ready <= t do
       pico.latched = table.remove(pico.pending, 1).frame
     end
@@ -76,6 +90,23 @@ function P.new(gw, opt)
   emu.addEventCallback(function()
     pico.last_nmi = clock()
   end, emu.eventType.nmi)
+  -- Vblank begins (endFrame is line 225) whether or not NMI is enabled, and
+  -- the auto-joypad read with it: an exchange still clocking then has the
+  -- auto-read's clocks in it, and an NMI held off past here is the hazard
+  -- input.c's fg_poll_fits exists to prevent.
+  pico.collisions = 0
+  emu.addEventCallback(function()
+    if pico.nbits ~= 0 then
+      pico.collisions = pico.collisions + 1
+      if pico.collisions <= 8 then
+        local st = emu.getState()
+        print(string.format("hwport: vblank at bit %d of an exchange that began %.1f lines ago,"
+          .. " on line %d; last NMI %.1f lines ago", pico.nbits,
+          (st.masterClock - pico.t_first) / LINE, pico.first_line or -1,
+          (st.masterClock - pico.last_nmi) / LINE))
+      end
+    end
+  end, emu.eventType.endFrame)
 
   emu.addMemoryCallback(function(addr, value)
     pico.latch = value & 1
@@ -98,13 +129,18 @@ function P.new(gw, opt)
     local n = pico.nbits
     if n == 0 then
       -- First clock: what is in the shifter now is what goes out.
-      local t = clock()
+      local st0 = emu.getState()
+      local t = st0["masterClock"]
       pico.t_first = t
-      restage(pico.last_end + IRQ)
+      pico.first_line = st0["ppu.scanline"]
+      restage(pico.last_end + IRQ, true)
       local ar = pico.last_nmi + AUTOREAD_END + GAP + IRQ
-      if pico.last_nmi >= 0 and ar > pico.last_end and ar < t then restage(ar) end
       local kick = pico.last_kick + GAP + IRQ
-      if pico.last_kick > pico.last_end and kick < t then restage(kick) end
+      local kicked = pico.last_kick > pico.last_end and kick < t
+      local autoread = pico.last_nmi >= 0 and ar > pico.last_end and ar < t
+      if autoread and (not kicked or ar < kick) then restage(ar, false) end
+      if kicked then restage(kick, false) end
+      if autoread and kicked and ar >= kick then restage(ar, false) end
       load_tx()
       pico.sent = pico.latched
       for i = 0, FR - 1 do pico.rx[i] = 0 end

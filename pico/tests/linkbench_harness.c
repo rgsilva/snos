@@ -57,7 +57,8 @@ static cost_t cost[] = {
     {"nmi_entry", 1500},     /* shim, snos_frames++ */
     {"pad_latch", 300},      /* after the auto-read finished (4593 incl. the wait) */
     {"nmi_tail", 24000},     /* proc_tick (21942), kill switch, shim exit */
-    {"svc_fixed", 6200},     /* net_service's own C, beyond what is charged below */
+    {"svc_fixed", 22000},    /* net_service's own C before the exchange, beyond what is
+                              * charged below: entry to first clock is 41.7k (29-93k) */
     {"recv_copy", 0},        /* link_serial_recv: an MVN now, charged as one */
     {"frame_ok", 3000},      /* link_serial_send after the exchange, checksum aside */
     {"checksum_byte", 47},   /* net_checksum, per byte */
@@ -126,6 +127,8 @@ static void charge(uint64_t c) {
     now += c;
 }
 static unsigned line_now(void) { return (unsigned)((now % MC_FRAME) / MC_LINE); }
+/* input.c's OPVCT read: the low eight bits of the beam's line. */
+uint8_t beam_line(void) { return (uint8_t)line_now(); }
 
 /* ------------------------------------------------------- the console side */
 
@@ -295,10 +298,11 @@ static void ip_stream_bytes(const uint8_t *data, size_t len) {
 static struct { uint64_t ready; uint8_t f[LINK_FRAME]; } reply[REPLIES];
 static unsigned reply_head, reply_count;
 static uint8_t latched[LINK_FRAME];
-static bool staging_fifo, latched_sent = true;
+static bool staging_fifo = true, latched_sent = true;
 static uint64_t skipped, filled;
 static uint64_t last_xfer_end, last_kick_end;
 static unsigned pico_turns;
+static bool old_pico;
 static uint64_t raw_tx_pico;
 static void pico_set_tx(const uint8_t *f, uint64_t ready) {
     unsigned i = (reply_head + reply_count) % REPLIES;
@@ -346,6 +350,7 @@ static void pico_main_turn(const uint8_t *rx, uint64_t t_end) {
         if (r.records[i].ch == CH_CTRL) ctrl_bytes(r.records[i].data, r.records[i].len);
         else if (r.records[i].ch == CH_IP) ip_stream_bytes(r.records[i].data, r.records[i].len);
     }
+    if (old_pico) link_set_window(1); /* firmware that never heard of C2S_LINKWIN */
     /* wifi_poll -> nat_configure(true) restates both on every pass. */
     ctrl_address(pico_ip);
     nat_core_set_local_address(core, pico_addr());
@@ -407,7 +412,9 @@ static void watch(dir_t *d, const uint8_t *f) {
 }
 
 /* One exchange: kernel/linkxfer.s. */
+static bool no_kick;
 void link_serial_kick(void) {
+    if (no_kick) return; /* what the wire would do without one */
     charge((uint64_t)C("kick"));
     last_kick_end = now;
     ++st.kicks;
@@ -490,9 +497,10 @@ static void run_nmi(void) {
 /* --------------------------------------------------------- the foreground */
 
 /* input.c's fg_poll_room: the bench always has the headroom. */
+static bool post_nmi_poll = true; /* input.c, LINK_HW: the extra exchange right after the NMI */
 static int fg_poll_fits(void) {
     if (!link_serial_fg_fits) return 0; /* LINK_HW: "only ever fits from the NMI" */
-    return link_serial_fg_fits((uint16_t)line_now());
+    return link_serial_fg_fits(beam_line());
 }
 static bool raw_console_feed(void);
 void kbd_idle(void) {
@@ -510,6 +518,10 @@ void kbd_idle(void) {
         }
     } else {
         while (snos_frames == f) charge(next_nmi > now ? next_nmi - now : c_spin);
+    }
+    if (post_nmi_poll && net_fg_wanted() && fg_poll_fits()) {
+        ++fg_this_frame;
+        net_service_fg();
     }
     charge((uint64_t)C("after_spin"));
     st.t_idle += now - t0;
@@ -640,6 +652,9 @@ int main(int argc, char **argv) {
                 if (!strcmp(cost[k].name, name)) { cost[k].v = v; found = true; }
             if (!strcmp(name, "seconds")) { seconds = (unsigned)v; found = true; }
             if (!strcmp(name, "fifo")) { staging_fifo = v != 0; found = true; }
+            if (!strcmp(name, "postnmi")) { post_nmi_poll = v != 0; found = true; }
+            if (!strcmp(name, "kick")) { no_kick = v == 0; found = true; }
+            if (!strcmp(name, "oldpico")) { old_pico = v != 0; found = true; }
             if (!strcmp(name, "window") || !strcmp(name, "exch")) {
                 assert(ntunes < 8);
                 tunes[ntunes++] = argv[i];
@@ -649,8 +664,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "raw") || !strcmp(argv[i], "tcp")) {
             mode = argv[i];
         } else {
-            fprintf(stderr, "usage: [tcp|raw] [seconds=N] [fifo=0|1] [window=N] [exch=N] "
-                            "[cost=value...]\n");
+            fprintf(stderr, "usage: [tcp|raw] [seconds=N] [window=N] [exch=N] [fifo=0|1] "
+                            "[postnmi=0|1] [kick=0|1] [oldpico=0|1] [cost=value...]\n");
             return 2;
         }
     }

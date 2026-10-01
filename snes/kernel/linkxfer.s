@@ -26,7 +26,7 @@
               .extern _Dp
 
               .section farcode, root
-              .public link_serial_xfer
+              .public link_serial_xfer, link_serial_kick
 
 ;;; One bit. `lda #0 / rol a` turns the carry into bit 0 without a branch.
 xsbit         .macro
@@ -88,6 +88,58 @@ xs_byte:
 xs_done:
               lda     #0
               sta     abs:0x4016      ; leave LATCH low, as a game would
+              rep     #0x30           ; A/X/Y back to 16 bits for the caller
+              plb
+              rtl
+
+;;; void link_serial_kick(void)
+;;;
+;;; Eight bare clocks on port 2 and no LATCH writes: a short burst, the shape
+;;; of the vblank auto-joypad read, which the adapter's gap detector turns
+;;; into a restart ~64 us later. A restart is where pico/port.c stages the
+;;; answer it computed to the last exchange, so link_serial.c kicks before an
+;;; exchange that follows another in the same video frame -- one with no
+;;; auto-read before it (docs/link-throughput.md). The adapter drops the
+;;; burst by count, as it drops the auto-read's sixteen clocks.
+;;;
+;;; The clocks are ~6 us apart -- a little quicker than the data bits' ~8 us
+;;; cell, far slower than the PIO's ~160 ns poll -- and LATCH stays low. An
+;;; auto-joypad read in progress is waited out first, as link_serial_xfer
+;;; does. Touches no _Dp byte; DB is set to $00 and restored.
+lkbit         .macro
+              lda     abs:0x4017      ; one clock
+              nop
+              nop
+              nop
+              nop
+              nop
+              nop
+              nop
+              nop
+              .endm
+
+link_serial_kick:
+              rep     #0x30
+              phb
+              sep     #0x30           ; A and X 8 bits
+              lda     #0
+              pha
+              plb                     ; DB = $00 for the registers
+              ldx     #0              ; bounds the wait: 256 turns
+lk_busy:      lda     abs:0x4212
+              and     #0x01
+              beq     lk_idle
+              dex
+              bne     lk_busy
+lk_idle:
+              lkbit
+              lkbit
+              lkbit
+              lkbit
+              lkbit
+              lkbit
+              lkbit
+              lkbit
               rep     #0x30           ; A/X/Y back to 16 bits for the caller
               plb
               rtl

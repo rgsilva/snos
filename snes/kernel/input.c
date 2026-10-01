@@ -342,18 +342,27 @@ static int fg_poll_room(void) {
  * bit is deliberately ignored: lines 256..261 alias to 0..5, which the
  * early zone allows — correctly, they are deep in the post-NMI region. */
 #define POLL_LAST 134u
-static int fg_poll_fits(void) {
+uint8_t beam_line(void) {
   uint8_t v;
-#ifdef LINK_HW
-  /* A serial exchange is ~92k master cycles, most of the way to the next
-   * vblank from anywhere: it only ever fits from the NMI. */
-  return 0;
-#endif
   (void)R8(0x213F); /* reset the OPVCT read toggle to the low half */
   (void)R8(0x2137); /* latch H/V */
   v = R8(0x213D);   /* OPVCT low eight bits */
   (void)R8(0x213F); /* leave the toggle reset for the next caller */
+  return v;
+}
+
+static int fg_poll_fits(void) {
+  uint8_t v = beam_line();
+#ifdef LINK_HW
+  /* A cable poll is not a mailbox copy: the exchange alone is ~112k master
+   * cycles (82 lines), and the C before it measures up to ~40 more -- far
+   * from "most of the way to the next vblank", but not seventy lines either.
+   * link_serial.c owns that arithmetic, the per-frame budget (`net tune
+   * exch`) and a last check of its own just before the clocks start. */
+  return link_serial_fg_fits(v);
+#else
   return v <= POLL_LAST || v >= 227u;
+#endif
 }
 
 void kbd_idle(void) {
@@ -377,6 +386,17 @@ void kbd_idle(void) {
     while (snos_frames == f) {
     }
   }
+#ifdef LINK_HW
+  /* The frame has just turned and the NMI has had its cable exchange, which
+   * leaves the beam near line 90 -- the only place a ~100-line foreground
+   * exchange can still fit before the next vblank. The spin above rarely
+   * gets one: by the time the display and stack work below and the
+   * application are done, the window has shut. So the foreground's extra
+   * exchange is taken here, first, while the caller is waiting anyway; the
+   * work below waits for it, and link_serial_fg_fits keeps the frame's
+   * budget (docs/link-throughput.md). */
+  if (net_fg_wanted() && fg_poll_room() && fg_poll_fits()) net_service_fg();
+#endif
   /* The IP layer's foreground pump (M11). Here for the same reason the OSK
    * is serviced here: every blocking loop funnels through, so the stack gets
    * cycles whenever anything waits — which is most of every second. It

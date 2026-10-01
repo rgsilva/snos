@@ -88,7 +88,63 @@ if CONFIG.prof then
   end
 end
 
+-- CONFIG.linewatch: print where net_service_fg starts and ends whenever it
+-- starts outside the zones link_serial_fg_fits allows.
+if CONFIG.prof and CONFIG.linewatch and CONFIG.prof.net_service_fg then
+  local a = CONFIG.prof.net_service_fg
+  local started, shown = nil, 0
+  emu.addMemoryCallback(function()
+    local st = emu.getState()
+    started = { line = st["ppu.scanline"], t = st["masterClock"] }
+  end, emu.callbackType.exec, a[1])
+  for i = 2, #a do
+    emu.addMemoryCallback(function()
+      local st = emu.getState()
+      if started and (started.line > 110 and started.line < 229) and shown < 10 then
+        shown = shown + 1
+        print(string.format("linewatch: fg poll from line %d to line %d (%.1f lines)",
+          started.line, st["ppu.scanline"], (st["masterClock"] - started.t) / 1364))
+      end
+    end, emu.callbackType.exec, a[i])
+  end
+end
+
+-- With net_service profiled: how long its C runs before the exchange's first
+-- clock, the part of a poll that varies.
+if CONFIG.prof and CONFIG.prof.net_service then
+  local entered
+  emu.addMemoryCallback(function()
+    entered = emu.getState()["masterClock"]
+  end, emu.callbackType.exec, CONFIG.prof.net_service[1])
+  local base = port.on_exchange
+  port.on_exchange = function(f, sent, t_first, t_end)
+    if entered and entered < t_first then
+      local d = t_first - entered
+      local p = prof["svc_to_first_clock"] or { n = 0, sum = 0, min = 1 / 0, max = 0 }
+      prof["svc_to_first_clock"] = p
+      p.n, p.sum = p.n + 1, p.sum + d
+      if d < p.min then p.min = d end
+      if d > p.max then p.max = d end
+    end
+    entered = nil
+    if base then base(f, sent, t_first, t_end) end
+  end
+end
+
+-- CONFIG.stackwatch: the stack pointer at kbd_idle's entry -- input.c's
+-- fg_poll_room wants 640 bytes above the slot's floor for a foreground poll.
+local sp_seen = {}
+if CONFIG.prof and CONFIG.stackwatch and CONFIG.prof.kbd_idle then
+  emu.addMemoryCallback(function()
+    local sp = emu.getState()["cpu.sp"]
+    sp_seen[sp] = (sp_seen[sp] or 0) + 1
+  end, emu.callbackType.exec, CONFIG.prof.kbd_idle[1])
+end
+
 local function prof_report()
+  for sp, n in pairs(sp_seen) do
+    print(string.format("stackwatch: kbd_idle entered with S=%04x %d times", sp, n))
+  end
   local names = {}
   for name in pairs(prof) do names[#names + 1] = name end
   table.sort(names)
@@ -207,6 +263,7 @@ emu.addEventCallback(function()
   r.check(gw.tcp_bad_csum == 0, "bad TCP checksum")
   print(string.format("hwspeed: %d exchanges in %d frames, %d kicks, first-to-last clock %.0f mc",
     port.exchanges, frame, port.kicks, (port.span_sum or 0) / math.max(port.exchanges, 1)))
+  r.check(port.collisions == 0, port.collisions .. " exchanges were still running at vblank")
   prof_report()
   r.finish()
 end, emu.eventType.endFrame)

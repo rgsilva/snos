@@ -156,6 +156,10 @@ void link_serial_init(void);
 int link_serial_present(void);
 int link_serial_recv(uint8_t *rx);
 void link_serial_send(const uint8_t *tx);
+/* More than one cable exchange a video frame (link_serial.c): may a foreground
+ * poll start on this scanline, and how many a frame at most (0 asks). */
+int link_serial_fg_fits(uint16_t line);
+int link_serial_exch(int value);
 
 /* Move n bytes within WRAM bank $7E, as one MVN (kernel/netasm.s).
  *

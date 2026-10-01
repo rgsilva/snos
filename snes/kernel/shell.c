@@ -1259,15 +1259,18 @@ static void cmd_net_tune(char *rest) {
   int v = 0;
   if (*what) {
     while (*arg >= '0' && *arg <= '9' && v < 100) v = v * 10 + (*arg++ - '0');
-    if (!streq(what, "window") || v == 0 || *arg) {
-      kcon_puts("net tune [window 1..8]\n");
+    if ((!streq(what, "window") && !streq(what, "exch")) || v == 0 || *arg) {
+      kcon_puts("net tune [window 1..8 | exch 1..3]\n");
       return;
     }
-    net_tune_set(NET_TUNE_WINDOW, v);
+    net_tune_set(streq(what, "window") ? NET_TUNE_WINDOW : NET_TUNE_EXCH, v);
   }
   kcon_puts("window ");
   kcon_putu((uint16_t)net_tune_get(NET_TUNE_WINDOW));
   kcon_puts(" frames in flight each way (1 = stop-and-wait)\n");
+  kcon_puts("exch   ");
+  kcon_putu((uint16_t)net_tune_get(NET_TUNE_EXCH));
+  kcon_puts(" exchanges per video frame at most (1 = the NMI's only)\n");
 }
 
 /* Return a launch request; the lookup and launch must stay in shell_run
@@ -1305,7 +1308,7 @@ static int cmd_net(char *rest) {
     kcon_puts("net reset          fail channels and restart the network\n");
     kcon_puts("net test           reach a known host to prove the path works\n");
     kcon_puts("net speedtest [host:port|-] [seconds 1..120]\n");
-    kcon_puts("net tune           show or set the link's window\n");
+    kcon_puts("net tune           show or set the link's window and pace\n");
   }
   return 0;
 }

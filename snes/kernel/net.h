@@ -145,6 +145,7 @@ int net_ip_wspace(void);
 /* `net tune` (docs/link-throughput.md): the link's runtime knobs. Out of range
  * is clamped; set returns what is now in force, get -1 for an unknown knob. */
 #define NET_TUNE_WINDOW 0 /* frames in flight each way on the cable, 1..8 */
+#define NET_TUNE_EXCH 1   /* cable exchanges per video frame at most, 1..3 */
 int net_tune_get(int what);
 int net_tune_set(int what, int value);
 /* Foreground, every ip_service pass: tells the peer the window when it has
