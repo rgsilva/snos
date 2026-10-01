@@ -85,7 +85,8 @@ $(BUILD):
 
 # Mesen's Lua sandbox blocks dofile/require, so the shared harness is spliced
 # into each test at build time. See tools/mktest.py.
-$(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua test/hwport.lua tools/mktest.py | $(BUILD)
+$(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua test/hwport.lua tools/mktest.py \
+                     | $(BUILD)
 	python3 tools/mktest.py $< test/lib.lua $@
 
 # Every object depends on every kernel header. Coarse, but the kernel is a
@@ -398,10 +399,12 @@ HWPROF_FUNCS ?= snos_nmi_c net_service ip_service snos_cop_c kbd_idle uip_proces
 test-hwspeed: $(BUILD)/snos.sfc $(BUILD)/test/hwspeed.lua
 	$(call check_env)
 	@test -n "$(LINK_HW)" || { echo "test-hwspeed needs LINK_HW=1"; exit 1; }
-	sed 's|^-- @CONFIG@.*|CONFIG = {$(HWSPEED)}|' $(BUILD)/test/hwspeed.lua > $(BUILD)/test/hwspeed-run.lua
+	sed 's|^-- @CONFIG@.*|CONFIG = {$(HWSPEED)}|' $(BUILD)/test/hwspeed.lua \
+	  > $(BUILD)/test/hwspeed-run.lua
 	if [ -n "$(HWPROF)" ]; then \
 	  prof=$$(python3 tools/hwprof.py $(BUILD) $(HWPROF_FUNCS)) && \
-	  sed -i "s|^CONFIG = {\(.*\)}$$|CONFIG = {\1}; CONFIG.prof = $$prof|" $(BUILD)/test/hwspeed-run.lua; \
+	  sed -i "s|^CONFIG = {\(.*\)}$$|CONFIG = {\1}; CONFIG.prof = $$prof|" \
+	    $(BUILD)/test/hwspeed-run.lua; \
 	fi
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwspeed-run.lua
 

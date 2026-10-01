@@ -703,12 +703,14 @@ int main(int argc, char **argv) {
                          (double)(marks[i + 1].t - marks[i].t) / (MC_PER_US * 1e6));
     }
     double total = (double)now;
-    printf("  cpu: nmi %.0f%% (exchanges %.0f%% of all time) ip_service %.0f%% app %.0f%% spin+idle %.0f%%\n",
+    printf("  cpu: nmi %.0f%% (exchanges %.0f%% of all time) ip_service %.0f%% app %.0f%% "
+           "spin+idle %.0f%%\n",
            100 * st.t_nmi / total, 100 * st.t_xfer / total, 100 * st.t_ips / total,
            100 * st.t_app / total, 100 * st.t_idle / total);
     printf("  hazards: nmi late %llu (max %.0f us), masked across vblank %llu, nmi spans %llu, "
            "autoread collisions %llu, kicks %llu, refused %u, bad sums %u, ip drop %u desync %u\n"
-           "  pico staging %s: %llu repeats of a frame already sent, %llu data frames replaced unsent\n",
+           "  pico staging %s: %llu repeats of a frame already sent, "
+           "%llu data frames replaced unsent\n",
            (unsigned long long)st.nmi_late, st.nmi_late_max / MC_PER_US,
            (unsigned long long)st.masked_vblank, (unsigned long long)st.nmi_span,
            (unsigned long long)st.collisions, (unsigned long long)st.kicks, net_stat_refused,
