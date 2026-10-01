@@ -1,5 +1,5 @@
 /* NAT mode changes are not LINK lifetime changes. Real Pico link/NAT/ctrl,
- * SDK lwIP, relay, and the unmodified main console run in this executable. */
+ * SDK lwIP, relay, and an unmodified legacy/current console run in this executable. */
 #define relay_send unused_baseline_relay_send
 #define main baseline_main
 #include "revalidation_lwip_harness.c"
@@ -8,6 +8,8 @@
 #include "../relay.h"
 #include <signal.h>
 void console_peer_init(void);
+void console_peer_window(void);
+unsigned console_peer_window_expected(void);
 void console_peer_receive(const uint8_t *, uint8_t *);
 int console_peer_ip_read(uint8_t *, int);
 int console_peer_ip_write(const uint8_t *, int);
@@ -83,6 +85,8 @@ static void setup_peer(void) {
     if (relay_mode) transition_relay_address(relay_address);
     else ctrl_poll();
     pump(3); /* Finish the startup HELLO before measuring transition replies. */
+    console_peer_window(); pump(5);
+    assert(link_stats().window == console_peer_window_expected());
     console_peer_enable_ip(); console_peer_open_channel();
     received_len = reverse_len = pico_resets = console_resets = 0;
     assert(!console_peer_syn());
@@ -420,6 +424,7 @@ static const struct { const char *name; void (*run)(void); } properties[] = {
 /* Avoid invoking the host crash reporter thousands of times. Assertions
  * still print their diagnostic and produce a failing exit status. */
 static void assertion_exit(int signal_number) { (void)signal_number; _Exit(1); }
+#ifndef TRANSITION_NO_MAIN
 int main(int argc, char **argv) {
     signal(SIGABRT, assertion_exit);
     if (argc < 2) return 2;
@@ -435,3 +440,5 @@ int main(int argc, char **argv) {
         }
     return 2;
 }
+
+#endif
