@@ -5,7 +5,7 @@
 #include "snoslib.h"
 
 #define WAIT 900u
-#define BUF 128
+#define BUF 512
 
 static char args[SNOS_ARGV_MAX];
 static char host[SNOS_ARGV_MAX];
