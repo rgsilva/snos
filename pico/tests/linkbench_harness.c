@@ -153,6 +153,7 @@ int bench_run_speedtest(void);
 int link_serial_fg_fits(uint16_t line) __attribute__((weak));
 void net_tune_set(int what, int value) __attribute__((weak));
 int net_tune_get(int what) __attribute__((weak));
+void net_tune_announce(void);
 
 /* The emulator mailbox: never claimed here. */
 void link_wram_init(void) {}
@@ -579,6 +580,7 @@ static uint64_t raw_rx_snes, raw_tx_snes;
 static bool raw_console_feed(void) {
     static uint8_t buf[1500];
     int n;
+    net_tune_announce(); /* ip_service's job, which raw mode replaces */
     while ((n = net_ip_read(buf, sizeof buf)) > 0) raw_rx_snes += (uint64_t)n;
     while (net_ip_wspace() >= 1462) {
         uint8_t pre[2] = {0xb4, 0x05};
@@ -679,9 +681,9 @@ int main(int argc, char **argv) {
     c_nmi_tail = (uint64_t)C("nmi_tail"); c_svc_fixed = (uint64_t)C("svc_fixed");
     c_recv_copy = (uint64_t)C("recv_copy"); c_frame_ok = (uint64_t)C("frame_ok");
 
-    raw_mode = !strcmp(mode, "raw");
-    boot();
+    boot(); /* HELLO through the real stack, which arms IP mode */
     for (unsigned i = 0; i < ntunes; ++i) tune(tunes[i]);
+    raw_mode = !strcmp(mode, "raw");
     if (raw_mode) {
         take_mark();
         uint64_t rs = raw_rx_snes, rp = raw_rx_pico;

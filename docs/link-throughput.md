@@ -282,6 +282,21 @@ pairing. Retiring the property, or re-pinning `console_main_fixture.MAIN`
 (which would also move the other harnesses to the new console), is the
 owner's call.
 
+## The link alone
+
+`linkbench.py raw` drops TCP and the application: both ends keep the IP
+stream full and the bench counts what arrives. Both directions at once:
+
+| window, exch | each way | fresh frames per exchange |
+|---|---|---|
+| 1, 1 (the protocol of 2026-10-01) | 1734 B/s | 0.5 |
+| 4, 1 | 3469 B/s | 1.0 |
+| 4, 2 (the defaults) | 5209 B/s | 1.0, at 1.5 exchanges a frame |
+
+58 payload bytes a frame, 60 or 90 exchanges a second: the link does what
+the arithmetic says it can. Everything between those figures and the TCP
+numbers above is the console's own CPU and TCP's one segment in flight.
+
 ## Defaults, and why
 
 | knob | default | range | 1 means |
