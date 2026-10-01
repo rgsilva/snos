@@ -55,6 +55,7 @@ otherwise HOST is the IPv4 address or DNS name of the machine running
 setting; `mode nat` and `mode relay HOST` save mode changes without changing
 WiFi credentials. Existing saved settings with a host remain relay settings.
 In NAT mode HELLO reports the Pico DHCP address and `stats` includes flows.
+A key typed at the instant of a mode switch may be lost.
 Input is echoed, including the password in the setup command; `wifi?` masks it.
 Backspace edits input. Overlong lines are discarded.
 

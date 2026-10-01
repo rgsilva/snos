@@ -9,8 +9,8 @@ typedef struct { uint8_t ch; size_t pos, len; uint8_t data[CHUNK_SIZE]; } chunk_
 static chunk_t pool[QUEUE_COUNT];
 static uint8_t order[QUEUE_COUNT];
 static size_t count;
-static bool awaiting, syn, peer_syn_seen, rx_resync, started;
-static uint8_t tx_seq, rx_next, syn_seq, inflight[LINK_FRAME];
+static bool awaiting, syn, peer_syn_seen, awaiting_peer_restart, rx_resync, started;
+static uint8_t tx_seq, rx_next, syn_seq, peer_syn_seq, inflight[LINK_FRAME];
 static uint32_t resends, bad_sum;
 #ifdef PICO_ON_DEVICE
 static critical_section_t queue_lock;
@@ -30,8 +30,8 @@ void link_init(void) {
     critical_section_init(&queue_lock);
 #endif
     LOCK();
-    count = 0; awaiting = peer_syn_seen = started = false;
-    syn = rx_resync = true; tx_seq = syn_seq = rx_next = 0; resends = bad_sum = 0;
+    count = 0; awaiting = peer_syn_seen = awaiting_peer_restart = started = false;
+    syn = rx_resync = true; tx_seq = syn_seq = rx_next = peer_syn_seq = 0; resends = bad_sum = 0;
     UNLOCK();
 }
 static bool enqueue(uint8_t ch, const uint8_t *data, size_t len, bool hello) {
@@ -70,12 +70,22 @@ link_rx_t link_on_rx(const uint8_t *f) {
     if (rx_resync) { rx_resync = false; rx_next = f[0]; }
     if (awaiting && f[1] == tx_seq) { awaiting = false; ++tx_seq; syn = false; }
     if (f[2] & F_SYN) {
-        if (!peer_syn_seen) {
-            peer_syn_seen = true; rx_next = f[0];
-            count = 0; started = awaiting = false; result.reset = true;
+        if (!peer_syn_seen && (!awaiting_peer_restart || f[0] != peer_syn_seq)) {
+            peer_syn_seen = true; peer_syn_seq = f[0]; rx_next = f[0];
+            if (awaiting_peer_restart) {
+                /* The console's SYN is the other half of our own restart.
+                 * Keep keyboard chunks that were still queued when the mode
+                 * changed; they belong to this new lifetime. */
+                awaiting_peer_restart = false;
+            } else {
+                count = 0; started = awaiting = false; result.reset = true;
+            }
         }
     } else peer_syn_seen = false;
-    if ((f[2] & F_DATA) && f[0] == rx_next) {
+    /* After a local restart, old console output is from the abandoned
+     * lifetime. Keep it out of the IP assembler until the console's SYN
+     * establishes its replacement lifetime. */
+    if (!awaiting_peer_restart && (f[2] & F_DATA) && f[0] == rx_next) {
         for (size_t o = LINK_HDR; o + 2 <= LINK_FRAME;) {
             uint8_t ch = f[o], n = f[o + 1];
             if (ch == CH_PAD || o + 2 + n > LINK_FRAME) break;
@@ -137,61 +147,15 @@ void link_purge(uint8_t ch) {
     UNLOCK();
 }
 
-/* Keep keyboard records that shared the abandoned frame.  NAT and control
- * bytes belong to the old adapter lifetime, but keystrokes must survive it. */
-static void replay_keyboard(void) {
-    uint8_t data[LINK_FRAME - LINK_HDR];
-    size_t lengths[(LINK_FRAME - LINK_HDR) / 2], records = 0, used = 0;
-    for (size_t o = LINK_HDR; o + 2 <= LINK_FRAME;) {
-        uint8_t ch = inflight[o++], len = inflight[o++];
-        if (ch == CH_PAD || o + len > LINK_FRAME)
-            break;
-        if (ch == CH_KBD && records < sizeof(lengths) / sizeof(*lengths)) {
-            memcpy(data + used, inflight + o, len);
-            lengths[records++] = len;
-            used += len;
-        }
-        o += len;
-    }
-    for (size_t record = records; record--;) {
-        unsigned slot;
-        for (slot = 0; slot < QUEUE_COUNT; ++slot) {
-            size_t i;
-            for (i = 0; i < count && order[i] != slot; ++i) {}
-            if (i == count)
-                break;
-        }
-        if (slot == QUEUE_COUNT) {
-            /* A full pool means this frame only advanced the first chunk:
-             * consuming a whole chunk would already have freed its slot. */
-            if (record == 0 && count && pool[order[0]].ch == CH_KBD &&
-                pool[order[0]].pos >= lengths[record])
-                pool[order[0]].pos -= lengths[record];
-            break;
-        }
-        size_t offset = 0;
-        for (size_t i = 0; i < record; ++i)
-            offset += lengths[i];
-        chunk_t *q = &pool[slot];
-        q->ch = CH_KBD;
-        q->pos = 0;
-        q->len = lengths[record];
-        memcpy(q->data, data + offset, q->len);
-        memmove(order + 1, order, count);
-        order[0] = slot;
-        ++count;
-    }
-}
-
 void link_restart(void) {
     LOCK();
-    if (awaiting)
-        replay_keyboard();
     /* A delayed ACK for the abandoned frame must not acknowledge fresh data.
      * Do not reuse the prior SYN base either: the console accepts a changed
      * SYN sequence as a distinct restart even if the old SYN was its last
-     * received frame. */
+     * received frame. Records already placed in the abandoned frame are not
+     * replayed: delivery is at-most-once across a user mode switch. */
     awaiting = false;
+    awaiting_peer_restart = true;
     ++tx_seq;
     if (tx_seq == syn_seq)
         ++tx_seq;

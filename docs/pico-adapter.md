@@ -334,8 +334,8 @@ discards a partly assembled incoming IP packet, and clears the advertised
 HELLO address. The Pico abandons any current frame, advances to a distinct
 link sequence base, and sends `F_SYN`; the console treats that changed base as
 a new peer lifetime and discards partial IP/control input. Keyboard records
-that shared the abandoned frame are replayed ahead of queued keyboard input,
-so a transition cannot lose a queued key. Stale IP/control output is therefore
+still queued behind the abandoned frame are retained in order; a key typed at
+the instant of a mode switch may be lost. Stale IP/control output is therefore
 discarded as part of the adapter restart, never spliced into the new stream.
 
 `pico/tests/nat_test.py` compiles the pure C core with a fake raw transport.

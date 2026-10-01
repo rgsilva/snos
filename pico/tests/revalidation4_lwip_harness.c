@@ -47,7 +47,7 @@ static void t_restart_replays_undelivered_keyboard(void) {
     nat_configure(false); link_next_out(f); console_peer_receive(f, reply);
     assert(console_peer_keys() == before + 1);
 }
-static void t_restart_full_refilled_queue_keeps_inflight_key(void) {
+static void t_restart_full_refilled_queue_preserves_queued_keys(void) {
     sync_peer(); unsigned before = console_peer_keys();
     uint8_t f[LINK_FRAME], reply[LINK_FRAME];
     assert(link_push(CH_KBD, (const uint8_t *)"a", 1));
@@ -58,8 +58,10 @@ static void t_restart_full_refilled_queue_keeps_inflight_key(void) {
     for (unsigned i = 0; i < 4; ++i) {
         link_next_out(f); console_peer_receive(f, reply); assert(link_on_rx(reply).valid);
     }
-    fprintf(stderr, "key deliveries from 33 accepted bytes: %u\n", console_peer_keys() - before);
-    assert(console_peer_keys() == before + 33);
+    fprintf(stderr, "queued key deliveries after restart: %u\n", console_peer_keys() - before);
+    /* The abandoned a may be lost, but every b that remained queued must
+     * arrive once. */
+    assert(console_peer_keys() == before + 32);
 }
 static void t_normal_syn_ack_does_not_fail_live_channel(void) {
     uint8_t f[LINK_FRAME], reply[LINK_FRAME]; console_peer_init();
@@ -143,7 +145,7 @@ static void t_restart_discards_console_inflight_ip_tail(void) {
 static const struct { const char *name; void (*run)(void); } cases[] = {
     TEST(t_restart_does_not_duplicate_delivered_keyboard),
     TEST(t_restart_replays_undelivered_keyboard),
-    TEST(t_restart_full_refilled_queue_keeps_inflight_key),
+    TEST(t_restart_full_refilled_queue_preserves_queued_keys),
     TEST(t_normal_syn_ack_does_not_fail_live_channel),
     TEST(t_saved_connect_generation_is_rejected_after_reuse),
     TEST(t_saved_accept_generation_is_rejected_after_reuse),

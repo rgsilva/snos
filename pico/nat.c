@@ -27,12 +27,7 @@ typedef struct {
     int8_t result;
     uint32_t generation;
 } connected_t;
-typedef struct {
-    unsigned slot;
-    uint32_t generation;
-} callback_t;
 static connected_t connected_pending[NAT_TCP_MAX];
-static callback_t tcp_callbacks[NAT_TCP_MAX], udp_callbacks[NAT_UDP_MAX];
 static uint32_t tcp_generation[NAT_TCP_MAX], udp_generation[NAT_UDP_MAX];
 typedef struct {
     struct tcp_pcb *pcb;
@@ -87,14 +82,24 @@ static void clear_pending(void) {
         accepted_pending[i].slot = -1;
 }
 
-/* Deferred callbacks must name the flow lifetime, not merely its slot. */
+/* Callback arguments are values, not pointers to reusable slot metadata.
+ * That preserves the lifetime which registered the callback after its slot
+ * has been closed and reused. */
+#define CALLBACK_SLOT_BITS 4u
+#define CALLBACK_SLOT_MASK ((1u << CALLBACK_SLOT_BITS) - 1u)
+#define CALLBACK_GENERATION_MAX (UINT32_MAX >> CALLBACK_SLOT_BITS)
+typedef char callback_slot_bits_fit[(NAT_TCP_MAX <= CALLBACK_SLOT_MASK &&
+                                     NAT_UDP_MAX <= CALLBACK_SLOT_MASK) ? 1 : -1];
+static void *callback_arg(unsigned slot, uint32_t generation) {
+    return (void *)(uintptr_t)(((uintptr_t)generation << CALLBACK_SLOT_BITS) | slot);
+}
 static void bump_generation(uint32_t *generation) {
-    if (!++*generation)
+    *generation = (*generation + 1u) & CALLBACK_GENERATION_MAX;
+    if (!*generation)
         ++*generation;
 }
 static void invalidate_tcp_slot(unsigned i) {
     bump_generation(&tcp_generation[i]);
-    tcp_callbacks[i] = (callback_t){i, tcp_generation[i]};
     connected_pending[i] = (connected_t){0};
     write_queued[i] = false;
     for (unsigned j = 0; j < 4; ++j)
@@ -103,28 +108,35 @@ static void invalidate_tcp_slot(unsigned i) {
 }
 static void invalidate_udp_slot(unsigned i) {
     bump_generation(&udp_generation[i]);
-    udp_callbacks[i] = (callback_t){i, udp_generation[i]};
 }
 static bool tcp_callback_slot(void *arg, struct tcp_pcb *pcb, unsigned *slot,
                               uint32_t *generation) {
-    for (unsigned i = 0; i < NAT_TCP_MAX; ++i) {
-        if (arg == &tcp_callbacks[i] || (!arg && pcb == tcp_pcbs[i])) {
-            *slot = i;
-            *generation = tcp_callbacks[i].generation;
-            return *generation == tcp_generation[i];
-        }
+    if (arg) {
+        uintptr_t value = (uintptr_t)arg;
+        *slot = (unsigned)(value & CALLBACK_SLOT_MASK);
+        *generation = (uint32_t)(value >> CALLBACK_SLOT_BITS);
+        return *slot < NAT_TCP_MAX && *generation == tcp_generation[*slot] &&
+               (!pcb || pcb == tcp_pcbs[*slot]);
     }
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+        if (pcb == tcp_pcbs[i]) {
+            *slot = i; *generation = tcp_generation[i]; return true;
+        }
     return false;
 }
 static bool udp_callback_slot(void *arg, struct udp_pcb *pcb, unsigned *slot,
                               uint32_t *generation) {
-    for (unsigned i = 0; i < NAT_UDP_MAX; ++i) {
-        if (arg == &udp_callbacks[i] || (!arg && pcb && pcb == udp_slots[i])) {
-            *slot = i;
-            *generation = udp_callbacks[i].generation;
-            return *generation == udp_generation[i];
-        }
+    if (arg) {
+        uintptr_t value = (uintptr_t)arg;
+        *slot = (unsigned)(value & CALLBACK_SLOT_MASK);
+        *generation = (uint32_t)(value >> CALLBACK_SLOT_BITS);
+        return *slot < NAT_UDP_MAX && *generation == udp_generation[*slot] &&
+               (!pcb || pcb == udp_slots[*slot]);
     }
+    for (unsigned i = 0; i < NAT_UDP_MAX; ++i)
+        if (pcb && pcb == udp_slots[i]) {
+            *slot = i; *generation = udp_generation[i]; return true;
+        }
     /* Host harnesses call the static callback directly to exercise oversized
      * packet handling; hardware callbacks always carry their context. */
     if (!arg && !pcb && udp_slots[0]) {
@@ -218,8 +230,7 @@ static bool op_tcp_connect(void *arg, unsigned i, uint32_t addr, uint16_t port) 
     if (!p)
         return false;
     tcp_pcbs[i] = p;
-    tcp_callbacks[i] = (callback_t){i, tcp_generation[i]};
-    tcp_arg(p, &tcp_callbacks[i]);
+    tcp_arg(p, callback_arg(i, tcp_generation[i]));
     tcp_err(p, nat_tcp_err);
     tcp_recv(p, nat_tcp_recv);
     tcp_nagle_disable(p);
@@ -301,8 +312,7 @@ static bool op_udp_send(void *arg, unsigned i, uint32_t addr, uint16_t port, con
         udp_slots[i] = udp_new_ip_type(IPADDR_TYPE_V4);
         if (!udp_slots[i])
             return false;
-        udp_callbacks[i] = (callback_t){i, udp_generation[i]};
-        udp_recv(udp_slots[i], nat_udp_recv, &udp_callbacks[i]);
+        udp_recv(udp_slots[i], nat_udp_recv, callback_arg(i, udp_generation[i]));
     }
     ip_addr_t ip;
     IP_ADDR4(&ip, addr >> 24, addr >> 16, addr >> 8, addr);
@@ -323,8 +333,7 @@ static err_t accepted(void *arg, struct tcp_pcb *pcb, err_t e) {
             if (i < 0)
                 break;
             tcp_pcbs[i] = pcb;
-            tcp_callbacks[i] = (callback_t){(unsigned)i, tcp_generation[i]};
-            tcp_arg(pcb, &tcp_callbacks[i]);
+            tcp_arg(pcb, callback_arg((unsigned)i, tcp_generation[i]));
             tcp_err(pcb, nat_tcp_err);
             tcp_recv(pcb, nat_tcp_recv);
             tcp_nagle_disable(pcb);

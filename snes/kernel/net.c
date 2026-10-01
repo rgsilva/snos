@@ -1146,8 +1146,16 @@ void net_service(void) {
            * an explicit resync for this; the control side had nothing. */
           cmsg_state = 0;
           cmsg_got = 0;
+          /* The Pico's changed SYN ends this transmit lifetime too. Do not
+           * retransmit an old IP tail into its fresh assembler; discard it
+           * and announce our distinct lifetime before sending anything new. */
+          txq_tail = txq_head;
           iptx_tail = iptx_head;
+          awaiting_ack = 0;
+          txframe_bytes = 0;
           txframe_ip = 0;
+          tx_seq++;
+          syn_out = 1;
           iprx_mark = iprx_head;
           iprx_resync = 1;
         }
