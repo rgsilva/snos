@@ -10,6 +10,7 @@ void nat_reset(void);
 void nat_configure(bool wifi_up);
 void nat_ip_bytes(const uint8_t *data, size_t len);
 void ip_stream_bytes(const uint8_t *data, size_t len, ip_stream_consumer_t consume);
+void ip_stream_reset(void);
 void nat_poll(void);
 bool nat_forward_add(uint16_t port, uint8_t channel);
 void nat_forward_del(uint16_t port, uint8_t channel);

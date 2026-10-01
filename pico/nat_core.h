@@ -39,6 +39,7 @@ void nat_core_set_adapter(nat_t *nat, bool (*emit_try)(void *, const uint8_t *, 
                           bool (*link_busy)(void *), void (*udp_close)(void *, unsigned),
                           bool (*tcp_queued)(void *, unsigned));
 void nat_core_reset(nat_t *nat);
+void nat_core_drop(nat_t *nat);
 void nat_core_input(nat_t *nat, const uint8_t *packet, size_t len, uint32_t now);
 void nat_core_poll(nat_t *nat, uint32_t now);
 void nat_core_tcp_connected(nat_t *nat, unsigned slot, int error, uint32_t now);

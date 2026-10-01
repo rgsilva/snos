@@ -439,10 +439,10 @@ void nat_configure(bool wifi_up) {
     if (!ready)
         return;
     if (!wifi_up) {
-        if (ctrl_clear_address)
-            ctrl_clear_address();
         if (up) {
             nat_reset();
+            if (ctrl_clear_address)
+                ctrl_clear_address();
             if (link_purge) {
                 link_purge(CH_IP);
                 link_purge(CH_CTRL);
@@ -478,6 +478,9 @@ void nat_configure(bool wifi_up) {
     nat_core_set_resolvers(core, resolvers, n);
     cyw43_arch_lwip_end();
 }
+void ip_stream_reset(void) {
+    ipused = 0;
+}
 void ip_stream_bytes(const uint8_t *data, size_t len, ip_stream_consumer_t consume) {
     for (size_t i = 0; i < len; ++i) {
         ipbuf[ipused++] = data[i];
@@ -496,14 +499,18 @@ void ip_stream_bytes(const uint8_t *data, size_t len, ip_stream_consumer_t consu
     }
 }
 static void nat_input(const uint8_t *packet, size_t len) {
-    nat_core_input(core, packet, len, now());
+    if (up)
+        nat_core_input(core, packet, len, now());
+    /* The link has accepted a complete datagram, but NAT has no endpoint. */
+    else
+        nat_core_drop(core);
 }
 void nat_ip_bytes(const uint8_t *data, size_t len) {
-    if (!ready || !up)
-        return;
-    cyw43_arch_lwip_begin();
+    if (ready)
+        cyw43_arch_lwip_begin();
     ip_stream_bytes(data, len, nat_input);
-    cyw43_arch_lwip_end();
+    if (ready)
+        cyw43_arch_lwip_end();
 }
 void nat_poll(void) {
     if (!ready || !up) {

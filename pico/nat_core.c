@@ -432,6 +432,9 @@ void nat_core_reset(nat_t *n) {
     n->iss = 0x2000;
     n->next_eport = 40000;
 }
+void nat_core_drop(nat_t *n) {
+    ++n->stat.drop;
+}
 void nat_core_input(nat_t *n, const uint8_t *p, size_t len, uint32_t now) {
     if (len < 20 || (p[0] >> 4) != 4) {
         ++n->stat.drop;

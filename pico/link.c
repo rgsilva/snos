@@ -10,8 +10,11 @@ static chunk_t pool[QUEUE_COUNT];
 static uint8_t order[QUEUE_COUNT];
 static size_t count;
 static bool awaiting, syn, peer_syn_seen, rx_resync, started;
-static uint8_t tx_seq, rx_next, syn_seq, inflight[LINK_FRAME];
+static uint8_t tx_seq, rx_next, inflight[LINK_FRAME];
 static uint32_t resends, bad_sum;
+/* The IP stream crosses mode endpoints, but it belongs to this peer lifetime.
+ * Keep the hook optional so LINK's standalone tests do not need NAT. */
+extern void ip_stream_reset(void) __attribute__((weak));
 #ifdef PICO_ON_DEVICE
 static critical_section_t queue_lock;
 #define LOCK() critical_section_enter_blocking(&queue_lock)
@@ -31,7 +34,7 @@ void link_init(void) {
 #endif
     LOCK();
     count = 0; awaiting = peer_syn_seen = started = false;
-    syn = rx_resync = true; tx_seq = syn_seq = rx_next = 0; resends = bad_sum = 0;
+    syn = rx_resync = true; tx_seq = rx_next = 0; resends = bad_sum = 0;
     UNLOCK();
 }
 static bool enqueue(uint8_t ch, const uint8_t *data, size_t len, bool hello) {
@@ -73,6 +76,8 @@ link_rx_t link_on_rx(const uint8_t *f) {
         if (!peer_syn_seen) {
             peer_syn_seen = true; rx_next = f[0];
             count = 0; started = awaiting = false; result.reset = true;
+            if (ip_stream_reset)
+                ip_stream_reset();
         }
     } else peer_syn_seen = false;
     if ((f[2] & F_DATA) && f[0] == rx_next) {
@@ -108,7 +113,6 @@ void link_next_out(uint8_t *f) {
     memset(f + o, CH_PAD, LINK_FRAME - o);
     if (syn) {
         f[2] |= F_SYN;
-        syn_seq = tx_seq;
     }
     f[3] = checksum(f); awaiting = (f[2] & F_DATA) != 0;
     memcpy(inflight, f, LINK_FRAME);

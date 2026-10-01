@@ -44,6 +44,8 @@ static void disconnect(void) {
     if (pcb) { tcp_arg(pcb, NULL); tcp_err(pcb, NULL); tcp_recv(pcb, NULL); tcp_abort(pcb); }
     pcb = NULL; connected = false; failed = false;
     in_len = out_len = 0;
+    link_purge(CH_IP);
+    link_purge(CH_CTRL);
     retry_at = now_ms() + backoff;
     if (backoff < 30000) backoff = backoff > 15000 ? 30000 : backoff * 2;
 }
@@ -52,8 +54,6 @@ void relay_configure(const char *name, bool wifi_up) {
     cyw43_arch_lwip_begin();
     if (strcmp(hostname, name) || network_up != wifi_up) {
         disconnect();
-        link_purge(CH_IP);
-        link_purge(CH_CTRL);
         ctrl_clear_address();
         ++dns_generation;
         resolving = resolved = false;
