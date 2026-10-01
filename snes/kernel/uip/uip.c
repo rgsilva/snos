@@ -697,6 +697,14 @@ uip_process(u8_t flag)
     if((uip_connr->tcpstateflags & UIP_TS_MASK) == UIP_ESTABLISHED &&
        !uip_outstanding(uip_connr)) {
 	uip_flags = UIP_POLL;
+	/* SNOS: cleared as the timer and new-data paths clear it. uIP 1.0 did
+	   not, so an application that sent nothing on this poll inherited the
+	   length of whatever the previous uip_process call sent -- on another
+	   connection -- and appsend sent that many stale bytes here. Latent
+	   while ip.c only polled connections with data to send; a poll that
+	   only reopens a closed receive window hit it at once
+	   (docs/link-throughput.md). */
+	uip_slen = 0;
 	UIP_APPCALL();
 	goto appsend;
     }

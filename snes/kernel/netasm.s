@@ -11,10 +11,10 @@
 ;;; Three routines cover almost all of it:
 ;;;
 ;;;   link_mb_move   the frame copies in and out of the emulated mailbox, as an
-;;;                  MVN block move — ~7 cycles/byte instead of ~103. Only the
-;;;                  EMULATED backend has these copies; link_serial.c bit-bangs
-;;;                  straight out of the frame, so this half buys nothing on real
-;;;                  hardware. Faster testing is the point (PLAN.md).
+;;;                  MVN block move — ~7 cycles/byte instead of ~103. The serial
+;;;                  backend has one too now: link_serial_recv hands each received
+;;;                  frame over with it, where its byte loop cost 34k master
+;;;                  cycles a poll inside NMI (docs/link-throughput.md).
 ;;;   net_checksum   the 8-bit frame checksum, twice per poll, ~8 cycles/byte.
 ;;;                  This half helps BOTH backends.
 ;;;   ring_move      the two receive-ring copies in kernel/net.c — ring_put on
@@ -99,7 +99,7 @@
               .extern _Dp
 
               .section farcode, root
-              .public link_mb_move, net_checksum, ring_move, ip_sum
+              .public link_mb_move, net_checksum, ring_move, ip_sum, far_copy
 
 ;;; The one bank kernel far data and the link mailbox share; see above.
 WRAM_BANK     .equ    0x7e
@@ -292,6 +292,29 @@ ipsum_zero:
               lda     ##0
               plb
               rtl
+
+;;; ---------------------------------------------------------------------------
+;;; void far_copy(uint8_t *dst, const uint8_t __far *src, uint16_t n)
+;;;
+;;; n bytes, either side in any bank, n may be 0. For the copy MVN cannot do:
+;;; its banks are immediates, and SYS_NET_WRITE takes its bytes from whichever
+;;; bank an application keeps its buffer in (net_write_far). [dp],y
+;;; long-indirect on both sides is ~22 cycles a byte; the C loop it replaced
+;;; in traps.c was ~840 master cycles a byte (docs/link-throughput.md).
+;;; ---------------------------------------------------------------------------
+far_copy:
+              rep     #0x30
+              tax                     ; X = n, the countdown
+              beq     fc_done
+              ldy     ##0
+              sep     #0x20           ; byte moves
+fc_loop:      lda     [.tiny (_Dp+4)],y
+              sta     [.tiny _Dp],y
+              iny
+              dex
+              bne     fc_loop
+              rep     #0x20           ; A/X/Y back to 16 bits for the caller
+fc_done:      rtl
 
 net_checksum:
               rep     #0x30           ; A/X/Y 16 bits: A arrives holding n

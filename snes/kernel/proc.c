@@ -241,7 +241,15 @@ int proc_kill(uint8_t id) {
 
 /* ------------------------------------------------------------- scheduling */
 
-static int runnable(uint8_t i) { return procs[i].state == ST_LIVE; }
+/* procs[i] with a variable i is a call to the soft multiplier at -O0 (no
+ * --target=snes: docs/calypsi-interrupt-hazard.md), and proc_tick asks this
+ * from the NMI on every frame. Constant indices cost nothing. */
+typedef char proc_max_is_three[PROC_MAX == 3 ? 1 : -1];
+static int runnable(uint8_t i) {
+  if (i == 0) return procs[0].state == ST_LIVE;
+  if (i == 1) return procs[1].state == ST_LIVE;
+  return procs[2].state == ST_LIVE;
+}
 
 void proc_lock(void) {
   NETMASK_OFF();
@@ -295,11 +303,13 @@ void proc_tick(void) {
   if (p_lock) return; /* pinned: file (above) but arm nothing */
 
   /* Round robin over live processes. With only process 0 live this decides
-   * "stay" in two array reads — the everyday cost of having a scheduler. */
+   * "stay" in two array reads — the everyday cost of having a scheduler. It
+   * used to cost 22k master cycles, a sixteenth of every frame inside NMI:
+   * each `% PROC_MAX` and each procs[n] was a soft divide or multiply. */
   {
     uint8_t n = cur;
     do {
-      n = (uint8_t)((n + 1) % PROC_MAX);
+      n = (uint8_t)(n + 1 == PROC_MAX ? 0 : n + 1);
     } while (!runnable(n) && n != cur);
     if (n == cur || !runnable(n)) return;
     p_filing_prev = cur;

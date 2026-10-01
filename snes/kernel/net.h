@@ -81,11 +81,15 @@ extern volatile uint16_t net_stat_hello;
 #define NET_TEXT_MAX 48
 extern char net_text[NET_TEXT_MAX + 1];
 extern volatile uint16_t net_gw_version;
+/* Bumped by the NMI each time it adopts a peer restart (F_SYN). */
+extern volatile uint8_t net_peer_restarts;
 int net_hello(void);
 int net_connect(const char *hostport);
 int net_listen(uint16_t port);
 int net_hangup(int ch);
 int net_write(int ch, const uint8_t *src, int n);
+/* The same, from any bank (SYS_NET_WRITE: an application's buffer). */
+int net_write_far(int ch, const uint8_t __far *src, int n);
 int net_wspace(int ch);
 extern volatile uint16_t net_stat_bad_sum;
 extern volatile uint16_t net_stat_resent;
@@ -141,5 +145,15 @@ int net_ip_write(const uint8_t *src, int n);
  * stream. Prefer this over two net_ip_write calls for anything framed. */
 int net_ip_write2(const uint8_t *a, int na, const uint8_t *b, int nb);
 int net_ip_wspace(void);
+
+/* `net tune` (docs/link-throughput.md): the link's runtime knobs. Out of range
+ * is clamped; set returns what is now in force, get -1 for an unknown knob. */
+#define NET_TUNE_WINDOW 0 /* frames in flight each way on the cable, 1..8 */
+#define NET_TUNE_EXCH 1   /* cable exchanges per video frame at most, 1..3 */
+int net_tune_get(int what);
+int net_tune_set(int what, int value);
+/* Foreground, every ip_service pass: tells the peer the window when it has
+ * not heard it since its last HELLO reply. */
+void net_tune_announce(void);
 
 #endif

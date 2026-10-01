@@ -1248,6 +1248,31 @@ static void cmd_net_reset(void) {
   cmd_net_report((uint16_t)(snos_frames - start));
 }
 
+/* The link's runtime knobs, so the cable can be A/B'd with `net speedtest`
+ * on the real machine -- and put back to the stop-and-wait it ran for its
+ * first year, `net tune window 1` -- without a rebuild. Values out of range
+ * are clamped; the answer is always what is now in force. Not saved: a
+ * restart brings back the defaults (docs/link-throughput.md). */
+static void cmd_net_tune(char *rest) {
+  char *what = rest;
+  char *arg = split_word(rest);
+  int v = 0;
+  if (*what) {
+    while (*arg >= '0' && *arg <= '9' && v < 100) v = v * 10 + (*arg++ - '0');
+    if ((!streq(what, "window") && !streq(what, "exch")) || v == 0 || *arg) {
+      kcon_puts("net tune [window 1..8 | exch 1..3]\n");
+      return;
+    }
+    net_tune_set(streq(what, "window") ? NET_TUNE_WINDOW : NET_TUNE_EXCH, v);
+  }
+  kcon_puts("window ");
+  kcon_putu((uint16_t)net_tune_get(NET_TUNE_WINDOW));
+  kcon_puts(" frames in flight each way (1 = stop-and-wait)\n");
+  kcon_puts("exch   ");
+  kcon_putu((uint16_t)net_tune_get(NET_TUNE_EXCH));
+  kcon_puts(" exchanges per video frame at most (1 = the NMI's only)\n");
+}
+
 /* Return a launch request; the lookup and launch must stay in shell_run
  * to avoid Calypsi corrupting the app pointer through an extra call frame. */
 static int cmd_net(char *rest) {
@@ -1256,6 +1281,7 @@ static int cmd_net(char *rest) {
   if (streq(what, "status")) cmd_net_status();
   else if (streq(what, "test")) cmd_net_test();
   else if (streq(what, "reset")) cmd_net_reset();
+  else if (streq(what, "tune")) cmd_net_tune(args);
   else if (streq(what, "speedtest")) {
     uint16_t i = 0, j = 0;
     if (!net_ipmode()) {
@@ -1282,6 +1308,7 @@ static int cmd_net(char *rest) {
     kcon_puts("net reset          fail channels and restart the network\n");
     kcon_puts("net test           reach a known host to prove the path works\n");
     kcon_puts("net speedtest [host:port|-] [seconds 1..120]\n");
+    kcon_puts("net tune           show or set the link's window and pace\n");
   }
   return 0;
 }

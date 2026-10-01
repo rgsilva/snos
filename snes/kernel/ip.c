@@ -85,6 +85,10 @@ static uint8_t ip_started;  /* uip_init has run */
  * after boot — so ask, at boot and then patiently, until an answer names a
  * version. One 2-byte record every ~2 s is the cost of autoconfiguration. */
 static uint16_t hello_last;
+/* net_peer_restarts as of the last pass. A peer restart throws away any
+ * HELLO still queued for the dead peer (net.c), so a move here asks again at
+ * once instead of waiting out the two seconds. */
+static uint8_t restarts_seen;
 
 /* uIP's periodic timer. Every connection gets a tick every half second: that
  * is uIP's retransmission clock, its connection timeout, and the only thing
@@ -157,6 +161,36 @@ static void put16(uint8_t *p, uint16_t v) { /* network byte order */
 static uint16_t get16(const uint8_t *p) {
   return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
+
+/* uIP's checksums (UIP_ARCH_CHKSUM in uip-conf.h), over ip_sum.
+ *
+ * uip.c's own are C at -O0: ~494 master cycles a byte, 838k to take in one
+ * 1500-byte datagram -- three frames of CPU on a console whose NMI already
+ * spends most of each frame on the link (docs/link-throughput.md). ip_sum
+ * is ~45 a byte. The arithmetic is uip.c's exactly: a ones-complement sum
+ * chained from the pseudo-header, 0 reported as 0xffff, and neither version
+ * ever produces 0 from data that is not all zero, so the two agree on every
+ * packet, not just on valid ones. */
+u16_t uip_chksum(u16_t *data, u16_t len) {
+  uint16_t s = csum_range((const uint8_t *)data, len);
+  return HTONS(s);
+}
+
+u16_t uip_ipchksum(void) {
+  uint16_t s = csum_range(&uip_buf[UIP_LLH_LEN], UIP_IPH_LEN);
+  return s == 0 ? 0xffffu : HTONS(s);
+}
+
+static u16_t upper_chksum(uint8_t proto) {
+  const uint8_t *ip = &uip_buf[UIP_LLH_LEN];
+  uint16_t len = (uint16_t)(get16(&ip[2]) - UIP_IPH_LEN);
+  uint16_t s = csum_add((uint16_t)(len + proto), csum_range(&ip[12], 8));
+  s = csum_add(s, csum_range(&ip[UIP_IPH_LEN], len));
+  return s == 0 ? 0xffffu : HTONS(s);
+}
+
+u16_t uip_tcpchksum(void) { return upper_chksum(UIP_PROTO_TCP); }
+u16_t uip_udpchksum(void) { return upper_chksum(UIP_PROTO_UDP); }
 
 int ip_ping_send(const uint8_t dst[4]) {
   uint8_t q[36]; /* 20 IP + 8 ICMP + 8 payload */
@@ -989,6 +1023,10 @@ void ip_service(void) {
   /* Ask the gateway what it is, until it answers. net_gw_version is zeroed at
    * boot and again on a peer restart, so this also re-arms IP mode after the
    * daemon bounces — the new process states its own capabilities. */
+  if (restarts_seen != net_peer_restarts) {
+    restarts_seen = net_peer_restarts;
+    hello_last = (uint16_t)(snos_frames - 121u);
+  }
   if (net_gw_version == 0 && (uint16_t)(snos_frames - hello_last) > 120u) {
     hello_last = snos_frames;
     net_hello();
@@ -1030,6 +1068,7 @@ void ip_service(void) {
   res_service();
   pend_service();
   net_unfwd_retry();
+  net_tune_announce();
 
   if ((uint16_t)(snos_frames - tick_last) >= IP_TICK_FRAMES) {
     tick_last = snos_frames;
@@ -1054,8 +1093,16 @@ void ip_service(void) {
         ip_send_uip();
         continue;
       }
+      /* A connection whose window we closed (the appcall's "close one
+       * segment early") is polled as soon as its ring has room again: the
+       * appcall's uip_restart then sends the window update. Waiting for the
+       * periodic tick instead held every download segment for up to half a
+       * second -- with a 1460-byte window, a segment and then nothing, so
+       * downloads ran at one segment per tick (docs/link-throughput.md). */
       if (net_stack_txused(uip_conns[i].appstate.ch) == 0 &&
-          uip_conns[i].appstate.closing != 1)
+          uip_conns[i].appstate.closing != 1 &&
+          !(uip_stopped(&uip_conns[i]) &&
+            net_stack_rxfree(uip_conns[i].appstate.ch) >= UIP_TCP_MSS))
         continue; /* nothing to say; do not spend a uip_process on it */
       uip_poll_conn(&uip_conns[i]);
       ip_send_uip();

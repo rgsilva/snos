@@ -40,6 +40,8 @@ int link_present(void) {
   return 0;
 }
 
+int link_is_serial(void) { return backend == 2; }
+
 int link_recv(uint8_t *rx) {
   if (backend == 0 && !link_present()) return 0;
   if (backend == 1) return link_wram_recv(rx);

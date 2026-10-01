@@ -72,7 +72,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-hwspeed test-hwresponse clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -85,8 +85,17 @@ $(BUILD):
 
 # Mesen's Lua sandbox blocks dofile/require, so the shared harness is spliced
 # into each test at build time. See tools/mktest.py.
-$(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua tools/mktest.py | $(BUILD)
-	python3 tools/mktest.py $< test/lib.lua $@
+#
+# test/hwport.lua judges the foreground poll's vblank margin against the gate
+# the ROM actually has, so link_serial.c's two last-moment lines are spliced
+# in too (@XFER_LAST@, @XFER_LAST_HDMA@).
+XFER_LAST := $(shell sed -n 's/^.define XFER_LAST \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
+XFER_LAST_HDMA := $(shell sed -n 's/^.define XFER_LAST_HDMA \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
+$(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua test/hwport.lua tools/mktest.py \
+                     $(K)/link_serial.c | $(BUILD)
+	python3 tools/mktest.py $< test/lib.lua $@.tmp
+	sed 's/@XFER_LAST@/$(XFER_LAST)/; s/@XFER_LAST_HDMA@/$(XFER_LAST_HDMA)/' $@.tmp > $@
+	rm -f $@.tmp
 
 # Every object depends on every kernel header. Coarse, but the kernel is a
 # dozen files and a full rebuild is seconds — whereas NOT tracking headers
@@ -384,6 +393,36 @@ test-kbd: $(BUILD)/snos.sfc $(BUILD)/test/kbd.lua
 test-wire: $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
+
+# The LINK_HW ROM's real cable path (linkxfer.s, NMI timing, the foreground
+# poll gate) against a model of the Pico on port 2 -- `make LINK_HW=1
+# test-hwspeed`. Not in `test`: the suite runs the emulator ROM, and this
+# prints rates for docs/link-throughput.md rather than asserting them.
+# HWSPEED is a Lua table body, e.g.
+#   HWSPEED="seconds=5, tune={[[net tune window 1]]}"
+# HWPROF=1 also times the kernel functions in HWPROF_FUNCS (tools/hwprof.py).
+HWPROF_FUNCS ?= snos_nmi_c net_service ip_service snos_cop_c kbd_idle uip_process \
+                net_read net_write link_serial_recv link_serial_send build_frame \
+                net_service_fg pad_latch proc_tick uip_len
+test-hwspeed: $(BUILD)/snos.sfc $(BUILD)/test/hwspeed.lua
+	$(call check_env)
+	@test -n "$(LINK_HW)" || { echo "test-hwspeed needs LINK_HW=1"; exit 1; }
+	sed 's|^-- @CONFIG@.*|CONFIG = {$(HWSPEED)}|' $(BUILD)/test/hwspeed.lua \
+	  > $(BUILD)/test/hwspeed-run.lua
+	if [ -n "$(HWPROF)" ]; then \
+	  prof=$$(python3 tools/hwprof.py $(BUILD) $(HWPROF_FUNCS)) && \
+	  sed -i "s|^CONFIG = {\(.*\)}$$|CONFIG = {\1}; CONFIG.prof = $$prof|" \
+	    $(BUILD)/test/hwspeed-run.lua; \
+	fi
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwspeed-run.lua
+
+# Responsiveness on the LINK_HW ROM while the cable runs flat out: a key from
+# the adapter's keyboard and START+SELECT each stop a download in bounded
+# time, and the link answers afterwards. `make LINK_HW=1 test-hwresponse`.
+test-hwresponse: $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
+	$(call check_env)
+	@test -n "$(LINK_HW)" || { echo "test-hwresponse needs LINK_HW=1"; exit 1; }
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
 
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)

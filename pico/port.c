@@ -14,7 +14,20 @@ static PIO const pio = pio0;
 #define IDLE_BYTE 0xff
 #endif
 static uint sm, offset, tx_dma, rx_dma;
-static uint8_t pending[LINK_FRAME], tx[LINK_FRAME], rx[LINK_FRAME];
+static uint8_t tx[LINK_FRAME], rx[LINK_FRAME];
+/* Replies leave in the order the link layer made them. restart() runs at
+ * the end of every exchange and after every gap -- the vblank auto-read's
+ * short burst, a console kick -- and each time it may stage a reply for the
+ * next exchange. It used to stage the newest; but a frame staged at one
+ * restart and replaced at the next never reached the wire, and with a
+ * window of frames in flight (link.c) a frame that silently never left
+ * costs the console a go-back. So the staged frame is replaced only after
+ * it has gone out whole; with nothing new to stage, the last frame goes out
+ * again, which the link layer already treats as the resend it is. Two
+ * slots: the main loop answers one exchange at a time. */
+static uint8_t queue[2][LINK_FRAME];
+static unsigned q_head, q_count;
+static bool tx_sent = true;
 static uint8_t received[4][LINK_FRAME];
 static unsigned head, tail;
 static bool armed;
@@ -35,7 +48,7 @@ static void restart(void) {
         if (bytes) {
             stats.clocks = bytes * 8;
             if (bytes == LINK_FRAME) {
-                ++stats.complete;
+                ++stats.complete; tx_sent = true;
                 if (head - tail == 4) ++stats.overruns;
                 else memcpy(received[head++ % 4], rx, LINK_FRAME);
             } else ++stats.short_frames;
@@ -45,7 +58,10 @@ static void restart(void) {
     if (armed) events[nevents++ % 16] = (port_event_t){ time_us_32(), last_cause, (uint8_t)moved };
     pio_sm_clear_fifos(pio, sm); pio_sm_restart(pio, sm);
     pio_sm_exec(pio, sm, pio_encode_jmp(offset));
-    if (idle) memset(tx, IDLE_BYTE, LINK_FRAME); else memcpy(tx, pending, LINK_FRAME);
+    if (idle) { memset(tx, IDLE_BYTE, LINK_FRAME); tx_sent = true; }
+    else if (tx_sent && q_count) {
+        memcpy(tx, queue[q_head], LINK_FRAME); q_head ^= 1; --q_count; tx_sent = false;
+    }
     armed = true;
     /* Re-arm. A DMA channel keeps DREQ credits across an abort; a stale one
        reads the empty RX FIFO as a zero byte (FDEBUG RXUNDER). The SM is
@@ -117,10 +133,13 @@ void port_init(void) {
 }
 void port_set_tx(const uint8_t *frame) {
     uint32_t save = save_and_disable_interrupts();
+    if (q_count == 2) { q_head ^= 1; --q_count; } /* after a stall only: oldest goes */
+    uint8_t *q = queue[(q_head + q_count) & 1];
+    ++q_count;
 #ifdef DATA1_OPEN_DRAIN
-    for (unsigned i = 0; i < LINK_FRAME; ++i) pending[i] = (uint8_t)~frame[i];
+    for (unsigned i = 0; i < LINK_FRAME; ++i) q[i] = (uint8_t)~frame[i];
 #else
-    memcpy(pending, frame, LINK_FRAME);
+    memcpy(q, frame, LINK_FRAME);
 #endif
     restore_interrupts(save);
 }

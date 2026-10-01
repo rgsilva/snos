@@ -29,6 +29,8 @@ int kbd_getchar_nonblock(void);
 int kbd_push(int c); /* inject a keystroke; 0 ok, -1 queue full */ /* ASCII, or -1 if nothing pending */
 int kbd_getchar(void);          /* blocks, keeping the screen and OSK alive */
 void kbd_idle(void);            /* one frame of housekeeping while waiting */
+/* The beam's scanline, low eight bits: 256-261 read as 0-5 (input.c). */
+uint8_t beam_line(void);
 
 /* Line editor. Returns the length; `buf` is NUL-terminated. Echoes as it goes
  * and shows an inverse-video caret. */

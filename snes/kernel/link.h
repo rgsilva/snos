@@ -40,9 +40,11 @@
 #include <stdint.h>
 
 /* 256 on the emulated mailbox. The hardware build (make LINK_HW=1) bit-bangs
- * every frame through the controller port at ~180 master cycles a bit, so it
- * takes 64: one exchange per vblank fits the NMI budget. The Pico firmware
- * (pico/link.h) carries the same constant; the two must agree. */
+ * every frame through the controller port at ~181 master cycles a bit, so it
+ * takes 64: an exchange is then 82 scanlines and fits the NMI with room for a
+ * second one in the foreground. 128 was measured and loses (one exchange of
+ * ~160 lines a frame, an NMI of 210; docs/link-throughput.md). The Pico
+ * firmware (pico/link.h) carries the same constant; the two must agree. */
 #ifdef LINK_HW
 #define LINK_FRAME 64
 #else
@@ -110,6 +112,8 @@
 void link_init(void);
 void link_reset(void);
 int link_present(void);
+/* The cable rather than the mailbox: only the cable can keep frames in flight. */
+int link_is_serial(void);
 
 /* A POLL IS TWO HALVES, AND THE GAP BETWEEN THEM IS WORTH A ROUND TRIP.
  *
@@ -154,6 +158,14 @@ void link_serial_init(void);
 int link_serial_present(void);
 int link_serial_recv(uint8_t *rx);
 void link_serial_send(const uint8_t *tx);
+/* More than one cable exchange a video frame (link_serial.c): may a foreground
+ * poll start on this scanline, and how many a frame at most (0 asks). */
+int link_serial_fg_fits(uint16_t line);
+int link_serial_exch(int value);
+/* Non-zero while HDMA runs (console.c, the keyboard's split): it takes
+ * cycles from every scanline, so an exchange spans more of them and
+ * link_serial.c's last-moment check must stop earlier. */
+extern volatile uint8_t link_serial_hdma;
 
 /* Move n bytes within WRAM bank $7E, as one MVN (kernel/netasm.s).
  *

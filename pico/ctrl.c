@@ -30,6 +30,7 @@ bool ctrl_error(const uint8_t *p) {
 }
 static void dispatch(void) {
     if (type == 0x04) { hello_pending = true; ctrl_poll(); }
+    else if (type == 0x0d && length >= 1) link_set_window(payload[0]); /* C2S_LINKWIN */
     else if ((type == 0x0b || type == 0x0c) && length >= 3) {
         uint8_t p[] = {payload[1], payload[2], payload[0]};
         bool ok;

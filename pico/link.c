@@ -9,8 +9,29 @@ typedef struct { uint8_t ch; size_t pos, len; uint8_t data[CHUNK_SIZE]; } chunk_
 static chunk_t pool[QUEUE_COUNT];
 static uint8_t order[QUEUE_COUNT];
 static size_t count;
-static bool awaiting, syn, peer_syn_seen, rx_resync, started;
-static uint8_t tx_seq, rx_next, inflight[LINK_FRAME];
+static bool syn, peer_syn_seen, rx_resync, started;
+/* After OUR restart, a console that did not restart with us is mid-stream:
+ * its frames already on the wire were cut for the Pico that is gone, and the
+ * first may be the middle of a datagram, which the empty IP assembler would
+ * read as a length prefix (restart_validation_test.py). Its sequence is
+ * adopted as before, but its IP records are dropped until it acks inside our
+ * window -- base - 1 included, "nothing of yours yet, but I have your
+ * sequence" -- on a frame after the first, whose ack can match by chance.
+ * By then it has seen our SYN and restarted its streams at a record (current
+ * consoles empty the frames in flight; older ones are stop-and-wait, and the
+ * one frame they had out is the first we saw). Nothing fresh is lost: a
+ * console sends IP only after a HELLO answered by this session, and the
+ * frame that carries it acks that answer. Control is not held: HELLO is how
+ * a console gets that far. */
+static bool ip_hold;
+/* The send window (docs/link-throughput.md). Frames base..tx_seq-1 are in
+ * flight, kept by sequence; cursor is the next of them to put on the wire
+ * again, or tx_seq when none is owed. A window of 1 is stop-and-wait, frame
+ * for frame what this file sent before windows existed, and it is what a
+ * console gets until it asks for more (C2S_LINKWIN, ctrl.c) -- an older
+ * console never asks, and every console restart returns it to 1. */
+#define WINDOW_MAX 8
+static uint8_t base, tx_seq, cursor, window, rx_next, frames[WINDOW_MAX][LINK_FRAME];
 static uint32_t resends, bad_sum;
 /* The IP stream crosses mode endpoints, but it belongs to this peer lifetime.
  * Keep the hook optional so LINK's standalone tests do not need NAT. */
@@ -33,8 +54,9 @@ void link_init(void) {
     critical_section_init(&queue_lock);
 #endif
     LOCK();
-    count = 0; awaiting = peer_syn_seen = started = false;
-    syn = rx_resync = true; tx_seq = rx_next = 0; resends = bad_sum = 0;
+    count = 0; peer_syn_seen = started = ip_hold = false;
+    syn = rx_resync = true; base = tx_seq = cursor = rx_next = 0; window = 1;
+    resends = bad_sum = 0;
     UNLOCK();
 }
 static bool enqueue(uint8_t ch, const uint8_t *data, size_t len, bool hello) {
@@ -70,12 +92,22 @@ link_rx_t link_on_rx(const uint8_t *f) {
     LOCK();
     if (f[3] != checksum(f)) { ++bad_sum; UNLOCK(); return result; }
     result.valid = true;
-    if (rx_resync) { rx_resync = false; rx_next = f[0]; }
-    if (awaiting && f[1] == tx_seq) { awaiting = false; ++tx_seq; syn = false; }
+    /* Cumulative: an ack covers every frame up to it. */
+    uint8_t acked = (uint8_t)(f[1] - base + 1), flying = (uint8_t)(tx_seq - base);
+    if (rx_resync) { rx_resync = false; rx_next = f[0]; ip_hold = !(f[2] & F_SYN); }
+    else if (ip_hold && acked <= flying) ip_hold = false;
+    if (acked && acked <= flying) {
+        base = (uint8_t)(f[1] + 1); syn = false;
+        if ((uint8_t)(cursor - base) > (uint8_t)(tx_seq - base)) cursor = base;
+    }
     if (f[2] & F_SYN) {
         if (!peer_syn_seen) {
+            /* What was in flight belongs to the old session, and so does
+             * the window it asked for. */
             peer_syn_seen = true; rx_next = f[0];
-            count = 0; started = awaiting = false; result.reset = true;
+            count = 0; started = false; tx_seq = cursor = base; window = 1;
+            ip_hold = false; /* its streams begin again too */
+            result.reset = true;
             if (ip_stream_reset)
                 ip_stream_reset();
         }
@@ -84,18 +116,28 @@ link_rx_t link_on_rx(const uint8_t *f) {
         for (size_t o = LINK_HDR; o + 2 <= LINK_FRAME;) {
             uint8_t ch = f[o], n = f[o + 1];
             if (ch == CH_PAD || o + 2 + n > LINK_FRAME) break;
-            result.records[result.count++] = (link_record_t){ch, n, f + o + 2};
+            if (ch != CH_IP || !ip_hold)
+                result.records[result.count++] = (link_record_t){ch, n, f + o + 2};
             o += 2 + n;
         }
         ++rx_next;
     }
     UNLOCK(); return result;
 }
+/* One frame per exchange. Go back to the oldest unacknowledged frame when
+ * the window is full or there is nothing new to say: the console takes
+ * frames strictly in order, so after a loss everything behind it must come
+ * again, and a repeat it already has costs nothing but the exchange. While
+ * our own SYN is unacknowledged the window is 1: the receiver adopts the
+ * first SYN frame it sees, so a second in flight could be adopted instead. */
 void link_next_out(uint8_t *f) {
     LOCK();
-    if (awaiting) {
-        ++resends; inflight[1] = rx_next - 1; inflight[3] = checksum(inflight);
-        memcpy(f, inflight, LINK_FRAME); UNLOCK(); return;
+    uint8_t flying = (uint8_t)(tx_seq - base), w = syn ? 1 : window;
+    if (cursor == tx_seq && flying && (flying >= w || !count)) cursor = base;
+    if (cursor != tx_seq) {
+        uint8_t *g = frames[cursor++ % WINDOW_MAX];
+        ++resends; g[1] = rx_next - 1; g[3] = checksum(g);
+        memcpy(f, g, LINK_FRAME); UNLOCK(); return;
     }
     memset(f, 0, LINK_HDR); f[0] = tx_seq; f[1] = rx_next - 1;
     size_t o = LINK_HDR;
@@ -114,9 +156,12 @@ void link_next_out(uint8_t *f) {
     if (syn) {
         f[2] |= F_SYN;
     }
-    f[3] = checksum(f); awaiting = (f[2] & F_DATA) != 0;
-    memcpy(inflight, f, LINK_FRAME);
+    f[3] = checksum(f);
+    if (f[2] & F_DATA) { memcpy(frames[tx_seq % WINDOW_MAX], f, LINK_FRAME); cursor = ++tx_seq; }
     UNLOCK();
+}
+void link_set_window(unsigned n) {
+    LOCK(); window = n < 1 ? 1 : n > WINDOW_MAX ? WINDOW_MAX : (uint8_t)n; UNLOCK();
 }
 size_t link_queued(uint8_t ch) {
     LOCK();
@@ -144,5 +189,5 @@ void link_purge(uint8_t ch) {
 }
 
 link_stats_t link_stats(void) {
-    LOCK(); link_stats_t s = {tx_seq, rx_next - 1, resends, bad_sum}; UNLOCK(); return s;
+    LOCK(); link_stats_t s = {base, rx_next - 1, resends, bad_sum, window}; UNLOCK(); return s;
 }

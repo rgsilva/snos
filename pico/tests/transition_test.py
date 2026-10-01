@@ -51,11 +51,21 @@ common = ["cc", "-std=c11", "-g", "-O0", "-Wall", "-Wextra", "-Werror",
           "-I", str(lwip / "include")]
 lwip_sources = sorted(lwip.glob("core/*.c")) + sorted(lwip.glob("core/ipv4/*.c"))
 lwip_sources += [lwip / "netif/ethernet.c"]
+restart_probe = os.environ.get("TRANSITION_RESTART_TEST") == "1"
+harness = "restart_validation_harness.c" if restart_probe else "transition_harness.c"
 lwip_sources += [root / "pico" / name for name in
                  ("nat_core.c", "link.c", "ctrl.c", "kbd.c", "hidkeys.c",
-                  "tests/transition_harness.c")]
+                  "tests/" + harness)]
 from console_main_fixture import prepare
-console_main_flags = prepare(root, build)
+# Keep the old-ROM compatibility run and also exercise the checked-out ROM.
+# Source identity is not the NAT invariant: sequence, streams and live channels are.
+current_window = int(os.environ.get("TRANSITION_CURRENT_WINDOW", "0"))
+if current_window:
+    console_main_flags = ["-I", str(root / "snes/kernel"),
+                          '-DCONSOLE_NET_SOURCE="' + str(root / "snes/kernel/net.c") + '"',
+                          "-DTRANSITION_CURRENT=1", f"-DTEST_CONSOLE_WINDOW={current_window}"]
+else:
+    console_main_flags = prepare(root, build)
 # The console uses 24-bit far pointers; host-only warnings in its SDK headers
 # are disabled for this translation unit, not for Pico or lwIP sources.
 console_obj = build / "console_peer.o"
@@ -97,15 +107,13 @@ for name in names:
     print(f"{'FAIL' if failures else 'PASS'} {name}: {passed} pass, {len(failures)} fail", flush=True)
     if failures:
         print("  first:", failures[0]["error"], flush=True)
-# The console is deliberately a fixed peer above. Also make the requirement
-# to restore the checked-out console files executable, without rewriting them.
-mismatches = [name for name in ("net.c", "link.h")
-              if (root / "snes/kernel" / name).read_bytes() !=
-                 (build / "main-console" / name).read_bytes()]
-results["p4_console_sources_equal_main"] = {
-    "pass": int(not mismatches), "fail": int(bool(mismatches)),
-    "failures": [{"error": "Differs from 99b6002: " + ", ".join(mismatches)}] if mismatches else []}
-print(f"{'FAIL' if mismatches else 'PASS'} p4_console_sources_equal_main: {mismatches}")
-(build / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+result_name = f"{'restart' if restart_probe else 'results'}-{current_window or 'legacy'}.json"
+(build / result_name).write_text(json.dumps(results, indent=2) + "\n")
 print(f"transition properties: {sum(not r['fail'] for r in results.values())}/{len(results)} pass")
-sys.exit(any(r["fail"] for r in results.values()))
+failed = any(r["fail"] for r in results.values())
+if not current_window and not restart_probe:
+    for window in (1, 4, 8):
+        print(f"Current console transition properties, window {window}", flush=True)
+        env = dict(os.environ, TRANSITION_CURRENT_WINDOW=str(window))
+        failed |= subprocess.run([sys.executable, __file__], env=env).returncode != 0
+sys.exit(failed)

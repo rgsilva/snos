@@ -68,6 +68,10 @@ typedef unsigned short uip_stats_t;
 #define UIP_CONF_STATISTICS 1
 #define UIP_CONF_LOGGING 0
 
+/* The IP, TCP and UDP checksums are kernel/ip.c's, over netasm.s's ip_sum:
+ * uip.c's C loop cost ten times as much and ran over every byte twice. */
+#define UIP_ARCH_CHKSUM 1
+
 /* Application hooks. The names are what uip.c calls; the bodies are in
  * kernel/ip.c. */
 void snos_tcp_appcall(void);

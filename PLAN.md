@@ -339,50 +339,65 @@ that no emulator surfaced. Do not schedule anything tight after it.
 
 Everything here is *after* first light. Ordered by what a demo notices.
 
-**1. Link throughput — the headline. ~1.4 KB/s today, and it should be ~10.**
-Two clean-room investigations (2026-09-29, published as
-`opus-link-analysis.md` / `codex-link-analysis.md`) agree on the model: one
-64-byte frame per vblank, 58 payload bytes after headers, and stop-and-wait
-at the LINK layer on both ends, so a fresh frame costs two exchanges and the
-ceiling is ~1.7 KB/s of IP stream per direction. A 511-byte TCP segment is 10
-frames; uIP sends one segment at a time; so TCP payload tops out near
-**1.4 KB/s** and a 146 KB `mc` join is ~2 minutes at best. The fixes, ranked:
+**1. Link throughput — the headline. ✅ in simulation, 2026-10-01; flash and
+measure.** Silicon measured 876 / 919 / 876 + 561 B/s (download, upload, both)
+with a clean wire. The work is logged step by step in
+[docs/link-throughput.md](docs/link-throughput.md); the short version:
 
-  a. **More exchanges per video frame (~3×).** `input.c`'s `fg_poll_fits()`
-     returns 0 unconditionally under `LINK_HW`, and the comment justifying it
-     is arithmetically WRONG: an exchange is ~68 scanlines of 262, the same
-     span the function already admits for the 256-byte mailbox poll. Two
-     extra exchanges fit per frame. Needs the stack-headroom guard
-     re-derived and the Pico's main loop to turn round in <5.5 ms.
-  b. **Link-layer sliding window (~2× on top, ~3× alone).** Removes the ack
-     turnaround from the cycle: 58 B *per exchange*. `net.c` already names
-     the spot; `pico/link.c`'s `inflight`/`awaiting` become a ring. Nothing
-     above `link_recv`/`link_send` changes. Subsumes (a)'s value rather than
-     adding to it if done alone.
-  c. **`LINK_FRAME` 128 on hardware (~2×).** One constant each side. But the
-     exchange doubles to ~8 ms, which competes with (a) for the frame; 256
-     does not fit at this bit rate.
-  d. **Bigger TCP segments (+7-15%).** The 511-byte segments are an artifact
-     of `NET_TXRING` being 512 (`net.c`), not of the MSS, which is already
-     1460. Costs WRAM; worth more once (b) exists.
-  e. **Priority in the Pico's send queue.** It is strict FIFO, so an 800-byte
-     position packet from a walking player sits in front of every ACK behind
-     it for half a second. This is the best candidate for the 18% of segments
-     the log showed being retransmitted after they had already been acked —
-     uIP's RTO is 1.5-2.5 s against a ~0.55 s round trip, so a too-eager
-     timer is NOT the explanation.
-  f. RTO tuning: **last**, and only if the loss counters come back zero.
+- **Two benches first.** The hardware ROM now runs under Mesen with a model of
+  the Pico on port 2 (`make LINK_HW=1 test-hwspeed`) and reproduces the
+  silicon run byte for byte; `pico/tests/linkbench.py` couples the real
+  console link/IP code to the real Pico link/NAT code through a cycle model of
+  the cable, and lands within ~10%.
+- **The third exchange per fresh frame was never link lag.** The vblank
+  auto-joypad read restarts the adapter before every NMI exchange, so its
+  reply is never an exchange late; the idle third was console CPU (the NMI
+  took 176 of 262 lines; uIP's checksum was C at ~494 cycles a byte) and a
+  receive window that only reopened on uIP's 30-frame tick.
+- **What moved it, on the hardware ROM:** the CPU out of the turnaround
+  (1314 / 1226 / 1314 + 510), a window of frames in flight on both ends (2336 /
+  1839 / 2172 + 817), a second exchange per frame with a last-moment vblank
+  check, a kick, and in-order staging on the Pico (2482 / 1941 / 2190 + 817),
+  1023-byte segments and uncapped writes (2425 / 2352 / 2044 + 1534), the
+  speedtest's own 512-byte buffer (2628 / 2557 / 2336 + 1738), a scheduler
+  tick without soft divides (3358 / 3068 / 3066 + 2250), and no frame built
+  just to be discarded (3650 / 3477 / 3066 + 2250). Then a uIP 1.0 bug the
+  window-reopen poll exposed -- a poll that sends nothing sent the previous
+  connection's length of stale bytes -- fixed in uip.c, and the speedtest's
+  upload made to wait for its GO's ack (**3650 / 3375 / 3066 + 2148**: 4.2x,
+  3.7x, 3.6x).
+- **`net tune [window 1..8 | exch 1..3]`** shows and sets the window (default
+  4) and exchanges per video frame (default 2) at runtime; `net tune window 1`
+  and `net tune exch 1` are the protocol and pace the hardware ran before, to
+  the byte.
+- Of the fixes this item proposed: (a) more exchanges per frame and (b) the
+  window are in; (c) 128-byte frames were measured and lose; (d) bigger
+  segments are in at 1023 (2048 does not fit); (e) acks first in the Pico's
+  queue was tried and does nothing, because the NAT never queues a second
+  datagram behind the first; (f) RTO tuning was not needed -- every counter
+  stayed at zero.
+- The three numbers this item called wrong are corrected where they lived:
+  `linkxfer.s` (a frame is 4.9 ms first to last clock, not ~2.5),
+  docs/pico-adapter.md (~3.5 KB/s was the raw frame rate; stop-and-wait made
+  it ~1.7 at most), and `input.c` (an exchange is 82 scanlines, not "most of
+  the way to the next vblank" -- what kept the foreground out was the C around
+  it and an NMI that ended too late).
 
-  **Read the counters first** (`net_stat_bad_sum`, `ip_stat_desync`,
-  `net_stat_refused`, `ip_stat_drop`, and the Pico's `stats` line). The
-  duplicate-segment episodes are a symptom of something dropping ACKs, and
-  every fix above that assumes otherwise is a trap.
+What is left is above the link and not its code: `con_flush` costs 28k
+cycles a pass with nothing to draw, an idle `ip_service` pass 39k, and every
+syscall ~12k of COP dispatch.
 
-  Also free, and worth doing while in here: three numbers in the tree are
-  wrong — `linkxfer.s`'s "~2.5 ms" for a 64-byte frame (it is ~4.1 ms),
-  `docs/pico-adapter.md`'s "~3.5 KB/s each way" (that is the raw frame rate;
-  the protocol's cycle makes it ~1.7), and `input.c`'s "most of the way to
-  the next vblank" above.
+Validation (2026-10-01, docs/link-throughput.md "After validation"): an
+adapter restart mid-upload poisoned the Pico's IP assembler with the stale
+middle of a datagram (inherited, not the window's) -- fixed without a link
+restart: the restarted end holds IP until the survivor acks inside its
+window, and the survivor empties its frames in flight. The foreground
+exchange's NMI mask outlived its last clock by up to 4.8 lines (more with
+the keyboard's HDMA split up), so the last-moment beam check moved from line
+135 to 131, and 128 under HDMA (worst case now 4 lines before vblank;
+`test-hwspeed`/`test-hwresponse` check it). The host bench's Pico now blocks
+for real; stalls to 20 ms cost nothing, 50 ms ones 6-17%. transition_test.py's
+source pin was replaced by its properties run on the current console.
 
 **2. `net reset` — restart the network stack. ✅** Fails every occupied
 channel, clears uIP and DNS state, re-probes both link backends and re-HELLOs.

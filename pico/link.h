@@ -19,7 +19,7 @@ typedef struct {
     bool reset;
     bool valid; /* the checksum matched: a peer is there */
 } link_rx_t;
-typedef struct { uint8_t seq, ack; uint32_t resends, bad_sum; } link_stats_t;
+typedef struct { uint8_t seq, ack; uint32_t resends, bad_sum; uint8_t window; } link_stats_t;
 void link_init(void);
 bool link_push(uint8_t ch, const uint8_t *data, size_t len);
 bool link_push_hello(const uint8_t *data, size_t len);
@@ -28,5 +28,7 @@ void link_next_out(uint8_t *frame);
 size_t link_queued(uint8_t ch);
 /* Drop unstarted queued output for one channel before a mode transition. */
 void link_purge(uint8_t ch);
+/* Frames in flight toward the console, 1..8; the console asks (ctrl.c). */
+void link_set_window(unsigned n);
 link_stats_t link_stats(void);
 #endif

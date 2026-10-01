@@ -32,6 +32,7 @@
 
 #define BANK0M 0x7E0000ul
 
+
 #define FRM_DB 1
 #define FRM_D 2
 #define FRM_Y 4
@@ -441,13 +442,10 @@ uint16_t snos_cop_c(uint16_t sp) {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1, ch = SNOS_ARGS.p2;
     const uint8_t __far *src =
         (const uint8_t __far *)(((uint32_t)bank << 16) | (uint32_t)off);
-    /* Copy through a local buffer: net_write takes a near pointer and the
-     * source is in the application's bank. */
-    uint8_t tmp[128];
-    uint16_t i, n = a;
-    if (n > sizeof tmp) n = sizeof tmp;
-    for (i = 0; i < n; i++) tmp[i] = src[i];
-    return (uint16_t)net_write((int)ch, tmp, (int)n);
+    /* Straight from the application's bank into the channel's ring. It went
+     * through a 128-byte local first, which capped every write at 128 bytes
+     * and copied every byte twice. */
+    return (uint16_t)net_write_far((int)ch, src, (int)a);
   }
 
   case SYS_NET_WSPACE:
