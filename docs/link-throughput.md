@@ -101,6 +101,9 @@ the host bench's, at that commit.
 | 2. the turnaround is CPU | 1314 | 1226 | 1314 + 510 | 1460 / 1277 / 1314 + 510 |
 | 3. link window (4) | 2336 | 1839 | 2172 + 817 | 2482 / 2043 / 2336 + 868 |
 | 4. two exchanges a frame | 2482 | 1941 | 2190 + 817 | 3212 / 2554 / 3066 + 1123 |
+| 5a. 1023-byte segments, writes uncapped | 2425 | 2352 | 2044 + 1534 | 3212 / 3068 / 2920 + 2148 |
+| 5b. the speedtest reads and writes 512 | 2628 | 2557 | 2336 + 1738 | 3555 / 3375 / 3358 + 2454 |
+| 5c. proc_tick without soft divides | 3358 | 3068 | 3066 + 2250 | 3606 / 3477 / 3358 + 2454 |
 
 ### 2. The turnaround is CPU
 
@@ -216,6 +219,43 @@ What would make it pay: an NMI handler that ends earlier. `proc_tick` alone is
 With a new ROM and **old** firmware (no window from the Pico, newest-wins
 staging), the bench says two exchanges a frame with the kick still helps
 (1460 / 2043 -> 1898 / 2554); without the kick it does nothing.
+
+### 5. What is left is above the link
+
+Three changes, each measured alone on the hardware ROM:
+
+- **5a. Bigger segments, uncapped writes.** `NET_TXRING` is the upload
+  segment size -- uIP keeps one segment in flight and fills it from the ring
+  -- so 512 meant 511-byte segments, each paying a whole round trip. 1024
+  doubles that for 4 KB of WRAM (2048 would reach the MSS and does not fit:
+  ~6 KB of HiRAM is left). And `SYS_NET_WRITE` copies straight from the
+  application's bank into the ring (`net_write_far`, far_copy) instead of
+  through a 128-byte stack buffer, which also capped every write at 128
+  bytes; `mc` now writes 1024 at a time. Upload 1941 -> 2352, duplex upload
+  817 -> 1534.
+- **5b. The measuring app's own buffer.** `apps/speedtest` read and wrote 128
+  bytes per call, and each pass round its loop is five syscalls at ~13k
+  cycles apiece: ~450 cycles a byte of pure overhead, and on a download it
+  is the drain time that holds the receive window shut. 512: +8-14% all
+  round. This is the instrument, not the link; it is listed separately so
+  the gain is not mistaken for one an application gets for free.
+- **5c. `proc_tick`.** The scheduler's tick runs in every NMI, and with one
+  process its round-robin "stay" cost 22k cycles -- three `% PROC_MAX` and
+  two `procs[n]` reads, each a soft divide or multiply at -O0 (no
+  `--target=snes`, docs/calypsi-interrupt-hazard.md). A compare and
+  constant indices: 3.6k. The NMI handler drops from 134 to 120 lines and
+  ends early enough that step 4's foreground exchange fits in a third of
+  the frames instead of one in twelve: +28% download, +20% upload, +30%
+  duplex. The fastest step of the lot, and not the link's code.
+
+Tried and dropped:
+
+- **Acknowledgements ahead of data in the Pico's queue.** In duplex the
+  console's next upload segment waits on the NAT's ack, queued behind a
+  1500-byte download segment -- or so it seemed. The NAT only emits a
+  datagram when the link queue holds no IP (`link_busy`), so an ack never
+  has an unbegun datagram in front of it, only the rest of the one in
+  flight, which it must not cut into. No effect in the bench; reverted.
 
 ## The one test this breaks
 

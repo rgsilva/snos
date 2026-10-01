@@ -56,7 +56,7 @@ static cost_t cost[] = {
      * includes the ~3% DRAM refresh steals. */
     {"nmi_entry", 1500},     /* shim, snos_frames++ */
     {"pad_latch", 300},      /* after the auto-read finished (4593 incl. the wait) */
-    {"nmi_tail", 24000},     /* proc_tick (21942), kill switch, shim exit */
+    {"nmi_tail", 6000},      /* proc_tick (3578; it was 21942), kill switch, shim exit */
     {"svc_fixed", 22000},    /* net_service's own C before the exchange, beyond what is
                               * charged below: entry to first clock is 41.7k (29-93k) */
     {"recv_copy", 0},        /* link_serial_recv: an MVN now, charged as one */
