@@ -40,9 +40,11 @@
 #include <stdint.h>
 
 /* 256 on the emulated mailbox. The hardware build (make LINK_HW=1) bit-bangs
- * every frame through the controller port at ~180 master cycles a bit, so it
- * takes 64: one exchange per vblank fits the NMI budget. The Pico firmware
- * (pico/link.h) carries the same constant; the two must agree. */
+ * every frame through the controller port at ~181 master cycles a bit, so it
+ * takes 64: an exchange is then 82 scanlines and fits the NMI with room for a
+ * second one in the foreground. 128 was measured and loses (one exchange of
+ * ~160 lines a frame, an NMI of 210; docs/link-throughput.md). The Pico
+ * firmware (pico/link.h) carries the same constant; the two must agree. */
 #ifdef LINK_HW
 #define LINK_FRAME 64
 #else

@@ -250,6 +250,16 @@ Three changes, each measured alone on the hardware ROM:
 
 Tried and dropped:
 
+- **128-byte frames on the cable.** One constant each end, half the
+  per-exchange overhead -- but an exchange is then ~160 lines, so it only
+  ever fits in the NMI, and the NMI handler grows to 210 lines on average.
+  Host bench, one exchange a frame: 3504 / 3119 / 3066 + 2250, below 64-byte
+  frames at two a frame. Hardware ROM: 3066 / 2557 / 1898 + 1431, with 141
+  exchanges still clocking at vblank (the longest NMIs overran into the next
+  frame). And it is a wire-format change with no runtime fallback: a new ROM
+  and an old Pico, or `apps/wire` and its firmware, would not talk at all.
+  Kept at 64.
+
 - **Acknowledgements ahead of data in the Pico's queue.** In duplex the
   console's next upload segment waits on the NAT's ack, queued behind a
   1500-byte download segment -- or so it seemed. The NAT only emits a
@@ -271,3 +281,83 @@ console against the new windowed Pico, which is the old-ROM/new-firmware
 pairing. Retiring the property, or re-pinning `console_main_fixture.MAIN`
 (which would also move the other harnesses to the new console), is the
 owner's call.
+
+## Defaults, and why
+
+| knob | default | range | 1 means |
+|---|---|---|---|
+| `net tune window` | 4 | 1..8 | stop-and-wait both ways, frame for frame the protocol before windows |
+| `net tune exch` | 2 | 1..3 | the NMI's exchange only, no kick, as the hardware build ran before |
+
+- **Window 4.** Two frames in flight already fill the pipe when an answer is
+  one exchange behind; it is two behind when the Pico's main loop misses a
+  kick or an auto-read restart, which needs three. Four is one spare, and
+  measured no different from 8. 8 slots of 64 bytes are what it costs.
+- **Two exchanges a frame.** Measured safe on the hardware ROM (no exchange
+  ever clocking at vblank, with the last-moment beam check) and worth +28%
+  download, +25% upload over one (2628 / 2454 / 2482 + 1841 at `exch 1` on
+  the final code). A third almost never fits: the NMI's exchange and one
+  foreground exchange are 230 of 262 lines.
+- The Pico's window is whatever the console asks for, and 1 until it asks.
+- Neither is saved: a console restart brings back the defaults, and the
+  console re-tells the Pico after every HELLO.
+
+## On the real machine
+
+Flash `pico/build/snos_pico.uf2`, boot `snes/build-hw/snos.sfc`, Pico in NAT
+mode as for the baseline, then at the console:
+
+```
+net tune                  -> window 4, exch 2
+net speedtest             -> the new numbers
+net tune exch 1
+net speedtest             -> the window alone
+net tune window 1
+net speedtest             -> the old link protocol, on the new CPU paths
+net tune window 4
+net tune exch 2
+```
+
+and on the Pico's USB console, `stats` during a phase (its line now ends in
+`win=`, the window the console asked for). Worth sending back: the three
+speedtest blocks with their counter lines, a few `stats` lines from each run,
+and anything odd. What Mesen printed for the same ROM, to compare against:
+3358 / 3068 / 3066 + 2250 at the defaults, 2628 / 2454 / 2482 + 1841 at
+`exch 1`, 1460 / 1431 / 1460 + 1125 at `exch 1` and window 1 -- the link
+protocol of 2026-10-01, but with the CPU, segment and scheduler gains still
+in. If silicon misbehaves,
+`net tune exch 1` takes out the kick and the foreground exchange first, and
+`net tune window 1` everything else; both are runtime, no reflash.
+
+## What only hardware can confirm
+
+- **The kick on the real adapter.** Eight clocks ~6 us apart and the gap
+  restart after them are checked against the assembled PIO program
+  (kick_test.py), not against the divider-fed GPIO and a real 5A22's read
+  strobe. The auto-read's burst, which the same mechanism already handles on
+  silicon every frame, is the reassurance.
+- **The Pico main loop's turnaround.** The bench varies it from 0.1 to 4 ms
+  and adds 5 ms stalls; in-order staging made every case safe and none of
+  them slow. The real figure is unmeasured; `stats` resends against fresh
+  frames is the tell.
+- **`port.c`'s in-order staging** is interrupt-context firmware with no host
+  test (the SDK's PIO/DMA would need faking); the bench models its policy, not
+  its code.
+- **Margins against vblank.** The last-moment check leaves ~4 scanlines of
+  margin at worst; Mesen's PPU and S-CPU timing are cycle-exact for these
+  paths, but it is the only check of them.
+- **WiFi.** The speedtest peer lives inside the Pico's NAT; a real remote
+  peer adds WiFi and lwIP to every round trip, which these numbers do not
+  include.
+
+## Not sure about
+
+- The host bench overestimates how often the foreground is free when the NMI
+  returns: at step 4 it put a foreground exchange in one frame in three where
+  Mesen saw one in twelve; after step 5c, 40% against 33%. It ranked every
+  change the same way Mesen did; for absolute numbers use Mesen.
+- A foreground link probe (`link_serial_present` with the link down, from
+  `net_up()` in the foreground) runs with NMI enabled, and the NMI's own poll
+  can probe too. That predates this work and only happens with no adapter
+  answering; the beam check now keeps it out of vblank, but an NMI can still
+  land inside one.

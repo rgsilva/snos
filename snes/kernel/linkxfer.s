@@ -16,7 +16,10 @@
 ;;; n in A. Both pointers are used through [dp],y, so any bank works. The
 ;;; scratch bytes are the pad bytes of the two pointer slots (_Dp+3, _Dp+7);
 ;;; nothing above _Dp+7 is touched. DB is set to $00 for the registers and
-;;; restored. ~26 CPU cycles a bit, ~8 us; a 64-byte frame is ~2.5 ms.
+;;; restored. 176 master cycles a bit plus the byte loop, ~181 with DRAM
+;;; refresh (~8.4 us): first to last clock of a 64-byte frame is 104,858
+;;; master cycles, 4.9 ms, and ~5.2 ms with the quiet lead-in -- measured on
+;;; the hardware ROM under Mesen (docs/link-throughput.md). This said ~2.5 ms.
 ;;;
 ;;; Shared verbatim by the kernel (link_serial.c) and apps/wire, which links
 ;;; its own copy through a symlink: an app is a separate link.

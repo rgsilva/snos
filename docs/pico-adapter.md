@@ -140,15 +140,20 @@ The kernel's link layer already defines a frame (`kernel/link.h`): header
 `[seq][ack][flags][sum]` then packed records `[channel][len][payload…]` padded
 with `$FF`. The emulated backend moves that frame through a WRAM mailbox; the
 serial backend moves the **same bytes** through the port. The Pico therefore
-speaks exactly what `tools/gateway.py` speaks — stop-and-wait, SYN on
-restart, checksum — and all of it is already tested against this kernel.
+speaks exactly what `tools/gateway.py` speaks — sequence, cumulative ack, SYN
+on restart, checksum — and all of it is already tested against this kernel.
+On the cable both ends may keep a window of frames in flight: the console
+asks the Pico for one (`C2S_LINKWIN`, `net tune window`), and until it does,
+and after every console restart, the Pico sends stop-and-wait exactly as
+gateway.py does (docs/link-throughput.md).
 
-**Frame size.** `LINK_FRAME` is 256 in the emulator build. A 65816 bit loop
-(§4) costs ~100 master cycles per bit, so 256 bytes is ~205k cycles: four
-vblanks' worth. The hardware build sets **`LINK_FRAME 64`**: 512 bits ≈ 51k
-cycles ≈ one vblank, which is the budget the NMI poll already lives in. PLAN.md
-records that flipping the constant is safe (both ends, one number each);
-the Pico takes it from the same constant. Re-measure on silicon before tuning.
+**Frame size.** `LINK_FRAME` is 256 in the emulator build. The hardware
+build sets **`LINK_FRAME 64`**. The 65816 bit loop (§4) costs ~181 master
+cycles a bit with DRAM refresh, so a 64-byte exchange is ~112k cycles with
+its quiet lead-in: 82 of a frame's 262 scanlines, measured on the hardware
+ROM under Mesen. 128 was measured too and loses -- one ~160-line exchange a
+frame and an NMI of 210 lines -- and it would change the wire for both ends
+at once (docs/link-throughput.md). The Pico takes it from the same constant.
 
 **Channels.** `LINK_CH_CTRL 0`, `LINK_CH_IP $10` as today, plus one new one:
 
@@ -214,14 +219,19 @@ There is no sync line. A frame boundary is a gap:
    of 16 clocks ~12 µs apart with LATCH held high: sixteen 1-bits, a short
    burst, dropped by count. Its own LATCH pulse is just data nobody keeps.
 3. **Checksum and sequence**, as on the emulated link. A burst that passes
-   the count but not the checksum is dropped and stop-and-wait resends.
+   the count but not the checksum is dropped and the sender resends.
 
 Failure cases fall out of that. Pico powered on mid-exchange: realigned at
 the next gap. Noise inside a burst: wrong count or bad checksum, resend. An
 exchange split by the auto-read: cannot happen, the NMI poll runs right
-after the auto-read finishes and never straddles the next vblank. Hardware
-builds keep the foreground poll off so an NMI can never land inside an
-exchange either.
+after the auto-read finishes and never straddles the next vblank, and a
+foreground exchange masks NMI and is only started where it ends before
+vblank -- link_serial.c checks the beam again just before the first clock.
+
+A foreground exchange that follows another in the same frame is preceded by
+a **kick**: eight bare clocks, a short burst like the auto-read's, so the
+adapter restarts and stages the answer it has computed by then
+(`link_serial_kick`, docs/link-throughput.md).
 
 Option kept in reserve: the hardware build could turn the auto-read off and
 read port 1 by hand in the NMI (one LATCH pulse, sixteen `$4016` reads,
@@ -241,11 +251,12 @@ before the console booted fed the menu phantom pad-2 presses.
 
 | item | value |
 |---|---|
-| bit loop, unrolled, FastROM | ~26 CPU cycles ≈ 8 µs |
-| 64-byte exchange | 512 bits ≈ 4 ms incl. the 300 µs quiet ≈ 60 scanlines |
-| Pico response to CLK edge (PIO at 16 MHz) | < 100 ns |
-| gap timeout (PIO countdown) | 40-100 µs |
-| frames per second at one exchange per NMI | 60 → ~3.5 KB/s payload each way |
+| bit loop, unrolled, FastROM | 176 master cycles, ~181 with DRAM refresh ≈ 8.4 µs |
+| 64-byte exchange | first to last clock 104,858 master cycles (4.9 ms); ~112k, 82 scanlines, with the ~300 µs quiet |
+| Pico response to CLK edge (PIO at 25 MHz) | < 160 ns |
+| gap timeout (PIO countdown) | 64 µs |
+| exchanges per second | 60 from the NMI, plus kbd_idle's where one fits (`net tune exch`) |
+| payload | 58 bytes a frame each way; with a window of frames in flight every exchange can carry a fresh one, so 60/s is ~3.5 KB/s of link stream each way at most. Stop-and-wait, which the link ran first, moved one fresh frame per two exchanges: ~1.7 KB/s at most, ~0.9 KB/s of TCP measured |
 
 ## 5. Firmware architecture (`pico/`)
 
@@ -254,10 +265,12 @@ before the console booted fed the menu phantom pad-2 presses.
    CMakeLists.txt        pico-sdk, PICO_BOARD=pico_w, lwIP (cyw43 threadsafe bg)
    snoslink.pio          the 4021-that-listens state machine
    port.c/.h             PIO + DMA + LATCH IRQ; hands complete RX frames up,
-                         takes the "current TX frame" from the link layer
+                         stages the link layer's replies in order, one per
+                         exchange
    link.c/.h             port of gateway.py's frame logic: seq/ack, SYN, checksum,
-                         record packing (greedy fill, CH_PAD), next_out()
-   ctrl.c/.h             the three control verbs: HELLO (v2), IPFWD, IPUNFWD
+                         record packing (greedy fill, CH_PAD), next_out(), and
+                         the window of frames in flight
+   ctrl.c/.h             the control verbs: HELLO (v2), IPFWD, IPUNFWD, LINKWIN
    kbd.c/.h              keyboard source; TEST MODE: "abcdef" every 5 s
    relay.c/.h            tier 1: TCP client to the host, carries IP datagrams
                          and forward requests; the host runs slirp.py
@@ -386,8 +399,9 @@ Changes, all done:
    `help\n` as a KBD record; the shell echo and the prompt after it are the
    verdict).
 4. `kernel/link.h`: `LINK_CH_KBD 0x11`; `LINK_FRAME` is 64 under `LINK_HW`.
-   `kernel/input.c`: the foreground link poll is off under `LINK_HW` (an
-   exchange never fits before the next vblank from the foreground).
+   `kernel/input.c`: under `LINK_HW` kbd_idle takes one foreground exchange
+   right after the NMI's, where it still fits before the next vblank
+   (`link_serial_fg_fits`, `net tune exch`; docs/link-throughput.md).
 5. `snes/Makefile`: `make LINK_HW=1` adds `-DLINK_HW=1` and builds into
    `build-hw/` so the emulator ROM is never overwritten.
 

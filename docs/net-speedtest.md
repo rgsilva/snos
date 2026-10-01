@@ -50,6 +50,19 @@ IP desync appear at the end. These are cumulative 16-bit counters, like
 `net status`, not reset by a run. Compare before/after counters modulo 65536.
 The console's frame deadlines also use unsigned subtraction across wrap.
 
+## Comparing link settings
+
+On the cable, `net tune` shows and sets the link's window and how many
+exchanges it may make per video frame (docs/link-throughput.md). Run the
+speedtest between `net tune` changes with the same duration to compare them;
+`net tune window 1` with `net tune exch 1` is the stop-and-wait, one exchange
+a frame link the hardware first shipped with. The emulator's mailbox always
+runs at a window of 1.
+
+The application reads and writes up to 512 bytes per call; it used 128 until
+that overhead -- five syscalls a pass -- became a measurable part of what it
+was measuring.
+
 ## Wire protocol
 
 Each connection starts with `D frames\n` or `U frames\n`, where frames is a

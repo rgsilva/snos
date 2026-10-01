@@ -4,12 +4,13 @@
  *
  * The console supplies the clock, so the peer can never push: every frame
  * moves because we asked for it, which is why the whole stack polls. One
- * link_serial_xfer() (kernel/netasm.s) is one exchange — LATCH, then
- * LINK_FRAME bytes out on IOBIT and in on DATA1, MSB first, one bit per
- * $4017 read — and it costs ~180 master cycles a bit, ~92k for a 64-byte
- * frame, a quarter of a video frame. That is why LINK_HW also sets
- * LINK_FRAME to 64 and turns the foreground poll off: the NMI's one exchange
- * per vblank is the budget (link.h, input.c).
+ * link_serial_xfer() (kernel/linkxfer.s) is one exchange — LATCH, then
+ * LINK_FRAME bytes out on LATCH and in on DATA1, MSB first, one bit per
+ * $4017 read — and it costs ~181 master cycles a bit with DRAM refresh:
+ * ~112k for a 64-byte frame with its quiet lead-in, 82 scanlines, a third of
+ * a video frame. The NMI takes one exchange every vblank; kbd_idle may add
+ * one more a frame where it still fits before the next (input.c, and
+ * link_serial_fg_fits below; docs/link-throughput.md).
  *
  * Presence is measured, not assumed. With nothing plugged in, $4017 reads a
  * constant and no frame ever checksums, so the backend probes once every

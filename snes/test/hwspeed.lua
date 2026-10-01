@@ -18,9 +18,10 @@ local P = dofile("test/hwport.lua")
 local CONFIG = {}
 -- @CONFIG@ (the Makefile inserts `CONFIG = {...}` here)
 local seconds = CONFIG.seconds or 10
-local gw = G.new{addr = "10.0.2.99", frame = 64, mss = 1460, rto_polls = 150,
+local gw = G.new{addr = "10.0.2.99", frame = CONFIG.frame or 64, mss = 1460, rto_polls = 150,
                  window = CONFIG.window or 1}
-local port = P.new(gw, {pico_us = CONFIG.pico_us or 300})
+local port = P.new(gw, {pico_us = CONFIG.pico_us or 300, frame = CONFIG.frame or 64,
+                        staging = CONFIG.staging})
 local r = L.new_report("hwspeed")
 
 -- The profiler (HWPROF=1): exec callbacks at each listed kernel function's
