@@ -115,6 +115,14 @@ desired Easy-Switch slot in pairing mode first: hold its Easy-Switch key for
 about three seconds until the light blinks quickly.
 `bt off`/`bt on` power the Bluetooth host stack down/up.
 
+LE discovery requests a 15 ms active scan window every 60 ms (25% configured
+duty); no over-the-air duty measurement has been made. The target record is
+written by the main loop as soon as it is known, under the CYW43 async-context
+lock shared with BTstack's TLV store. The target write, BTstack bond writes and
+flash-bank compaction are still synchronous while that lock is held; pairing's
+software ECC is also synchronous. RF coexistence and controller-port deadlines
+under those operations still require hardware timing measurement.
+
 `LINK_FRAME` is defined once in `link.h`, at 64 bytes. Each exchange is 512
 clocks, MSB first, about 8 us per bit. The console writes $4016 bit 0 onto
 LATCH before each $4017 read. DATA1 is sampled at the start of that read;
