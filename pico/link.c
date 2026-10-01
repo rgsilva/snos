@@ -10,7 +10,7 @@ static chunk_t pool[QUEUE_COUNT];
 static uint8_t order[QUEUE_COUNT];
 static size_t count;
 static bool awaiting, syn, peer_syn_seen, awaiting_peer_restart, rx_resync, started;
-static uint8_t tx_seq, rx_next, syn_seq, peer_syn_seq, inflight[LINK_FRAME];
+static uint8_t tx_seq, rx_next, syn_seq, restart_seq, inflight[LINK_FRAME];
 static uint32_t resends, bad_sum;
 #ifdef PICO_ON_DEVICE
 static critical_section_t queue_lock;
@@ -31,7 +31,7 @@ void link_init(void) {
 #endif
     LOCK();
     count = 0; awaiting = peer_syn_seen = awaiting_peer_restart = started = false;
-    syn = rx_resync = true; tx_seq = syn_seq = rx_next = peer_syn_seq = 0; resends = bad_sum = 0;
+    syn = rx_resync = true; tx_seq = syn_seq = restart_seq = rx_next = 0; resends = bad_sum = 0;
     UNLOCK();
 }
 static bool enqueue(uint8_t ch, const uint8_t *data, size_t len, bool hello) {
@@ -70,16 +70,19 @@ link_rx_t link_on_rx(const uint8_t *f) {
     if (rx_resync) { rx_resync = false; rx_next = f[0]; }
     if (awaiting && f[1] == tx_seq) { awaiting = false; ++tx_seq; syn = false; }
     if (f[2] & F_SYN) {
-        if (!peer_syn_seen && (!awaiting_peer_restart || f[0] != peer_syn_seq)) {
-            peer_syn_seen = true; peer_syn_seq = f[0]; rx_next = f[0];
-            if (awaiting_peer_restart) {
-                /* The console's SYN is the other half of our own restart.
-                 * Keep keyboard chunks that were still queued when the mode
-                 * changed; they belong to this new lifetime. */
+        if (awaiting_peer_restart) {
+            /* net.c adopts a peer SYN by setting rx_next to its sequence,
+             * then writes rx_next - 1 in its reply.  This is the first
+             * console SYN tied to our restart frame, irrespective of the
+             * console's own sequence base. */
+            if (f[1] == (uint8_t)(restart_seq - 1)) {
+                peer_syn_seen = true;
+                rx_next = f[0];
                 awaiting_peer_restart = false;
-            } else {
-                count = 0; started = awaiting = false; result.reset = true;
             }
+        } else if (!peer_syn_seen) {
+            peer_syn_seen = true; rx_next = f[0];
+            count = 0; started = awaiting = false; result.reset = true;
         }
     } else peer_syn_seen = false;
     /* After a local restart, old console output is from the abandoned
@@ -156,9 +159,17 @@ void link_restart(void) {
      * replayed: delivery is at-most-once across a user mode switch. */
     awaiting = false;
     awaiting_peer_restart = true;
+    /* Do not carry a previous SYN episode into the replacement lifetime.
+     * Old console ACKs can name tx_seq when its frame was abandoned.  Leave
+     * one sequence unused: net.c's reply to restart_seq names restart_seq -
+     * 1, which is therefore newer than every old ACK.  Stop-and-wait keeps
+     * that true across an 8-bit wrap, and the console sequence is irrelevant. */
+    peer_syn_seen = false;
+    ++tx_seq;
     ++tx_seq;
     if (tx_seq == syn_seq)
         ++tx_seq;
+    restart_seq = tx_seq;
     syn = true;
     started = count && pool[order[0]].pos != 0;
     UNLOCK();

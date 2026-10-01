@@ -1156,6 +1156,12 @@ void net_service(void) {
           txframe_ip = 0;
           tx_seq++;
           syn_out = 1;
+          /* The old control tail may have ended mid-record, so discard it
+           * with the old IP tail.  The new gateway still needs a HELLO now,
+           * rather than waiting for ip.c's paced retry.  net_service owns
+           * these queue indices while running in the NMI. */
+          txq_put(C2S_HELLO);
+          txq_put(0);
           iprx_mark = iprx_head;
           iprx_resync = 1;
         }
