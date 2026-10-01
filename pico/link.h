@@ -26,5 +26,7 @@ bool link_push_hello(const uint8_t *data, size_t len);
 link_rx_t link_on_rx(const uint8_t *frame);
 void link_next_out(uint8_t *frame);
 size_t link_queued(uint8_t ch);
+/* Drop unstarted queued output for one channel before a mode transition. */
+void link_purge(uint8_t ch);
 link_stats_t link_stats(void);
 #endif

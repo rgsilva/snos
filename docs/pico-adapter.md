@@ -3,9 +3,9 @@
 One Raspberry Pi Pico W on **controller port 2** carries both the network link
 and the keyboard. Nothing above `link_recv()/link_send()` changes; the keyboard
 is one more record channel on the same frames, feeding the same input ring the
-Mesen harness types into. This is PLAN.md M7, tier 1 first (the Pico relays
-frames to the host daemon over WiFi), with the tier-2 "Pico *is* the slirp box"
-step designed in but not built.
+Mesen harness types into. This is PLAN.md M7: tier 1 relays frames to the host
+daemon over WiFi, while tier 2 makes the Pico the slirp box when no relay host
+is configured.
 
 Status (2026-09-29, five-wire revision): **running on silicon.** The `wire` test passes console → Pico at 60 frames/s with zero errors; Pico → console needed the open-drain DATA1 and the inverted read described in §2.2.
 `pico/` builds to `snos_pico.uf2` (pico-sdk 2.1.1); `make LINK_HW=1` builds
@@ -294,14 +294,54 @@ Length-prefixed messages, little-endian, both directions:
 `output` callback wired to type-1 messages back to the Pico, `forward_add/del`
 for types 2/3. `gateway.py` and the file mailbox are not involved.
 
-### 5.2 Tier 2, designed, not built
+### 5.2 Tier 2: Pico NAT
 
-Replace `relay.c` with `nat.c`: a port of `slirp.py` onto lwIP's raw API
-(`tcp_new/tcp_connect`, `udp_new`, `raw_new` for ICMP). Same channel bytes,
-same control verbs; the Pico reports its own WiFi address in HELLO and opens
-forwards with `tcp_bind` on the Pico itself. The design constraint that shaped
-`slirp.py` — the console's receive window and the FIN grace for inbound
-forwards — carries over unchanged and is documented there.
+`nat_core.c` is the fixed-size, host-testable IPv4/TCP/UDP state machine and
+`nat.c` is its lwIP raw-API adapter. An empty relay host selects it; a saved
+host keeps tier-1 relay mode. Outbound TCP is spliced through `tcp_connect`;
+the core emits console-side SYN-ACK, ACK, data, FIN and RST packets. It keeps
+two-MSS receive chains per flow, sends only one console segment at a time,
+records uIP's advertised window, and calls `tcp_recved()` only
+after the console ACKs. RTO is 2.5 s, data retries 120, idle 300 s,
+TIME_WAIT 4 s, inbound FIN grace 750 ms and the per-port accept cap is 4,
+matching `slirp.py`.
+
+UDP has eight fixed flows and preserves the console-visible source address.
+`10.0.2.3` rotates the DHCP resolvers and falls back to 1.1.1.1 then 8.8.8.8;
+unchanged DHCP configuration keeps its retry cursor, and unspecified
+resolvers are ignored. Replies are restored to `10.0.2.3` and oversized
+replies are counted and dropped. Echoes to `10.0.2.2`
+and `10.0.2.3` are answered locally. External ICMP is not implemented yet:
+it needs a separate lwIP raw-ICMP request/reply demux.
+
+`IPFWD`/`IPUNFWD` bind/listen on the Pico and accepted sockets become inbound
+console SYNs. Accepted sockets take ownership callbacks before they are
+queued, and mode/reset tears down their listeners and PCBs. HELLO reports the
+DHCP IPv4 address. Foreground raw-API calls are under
+`cyw43_arch_lwip_begin/end`; callback output uses a four-packet handoff, and
+the link queue itself is spinlock protected for every producer. The fixed core
+is 35.0 KiB (eight TCP flows × two-MSS output buffers); its 40,000-byte store,
+receive scratch and callback handoff are static. `lwipopts.h` uses an 18 KiB
+heap, 2-MSS TCP windows, 16 pbufs, 32 TCP segments, 12 TCP PCBs, eight listen
+PCBs and 10 UDP PCBs. Packet scratch is static under the lwIP serialization;
+the ARM stack report's deepest NAT/link call chain is 296 bytes (1,032 bytes
+including `main`), and the firmware reserves
+8 KiB across the linked scratch banks for main, link and Bluetooth callbacks;
+this is a reservation, not a measured hardware stack high-water mark.
+
+Leaving NAT mode tears down its flows, forwards, listeners and advertised
+HELLO address. The mode switch never touches the link: its current frame and
+sequence state continue unchanged, and IP/control records already crossing
+the link finish whole. Only unstarted NAT or relay output is discarded. The
+incoming IP stream assembler survives the switch, so a packet completed after
+it is delivered to the newly selected mode. Keyboard records are delivered
+exactly once and in order across the transition.
+
+`pico/tests/nat_test.py` compiles the pure C core with a fake raw transport.
+It covers local ICMP, UDP and DNS source restoration, TCP state/data/FIN,
+stray/refused parsing, forwarding/cap, tuple reuse, oversize UDP,
+backpressure and garbage. WiFi association, DHCP, callback timing, loss and
+real inbound routing still require hardware.
 
 ## 6. The `wire` test, and the SNOS-side changes
 

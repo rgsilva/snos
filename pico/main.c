@@ -10,25 +10,31 @@
 #include "btkbd.h"
 #include "kbd.h"
 #include "relay.h"
+#include "nat.h"
 #include "log.h"
 static config_t settings;
 static bool wifi_ready, wifi_attempt;
 static int wifi_status = 99;
 static uint32_t wifi_retry_at, wifi_join_at;
 static const char *wifi_state = "starting";
+static bool nat_mode(void) { return settings.host[0] == '\0'; }
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
 static void print_stats(bool reply) {
     port_stats_t p = port_stats(); link_stats_t l = link_stats();
     (reply ? printf : log_printf)("gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
            " overrun=%"PRIu32" badsum=%"PRIu32" seq=%u ack=%u resends=%"PRIu32
-           " kbd=%u relay=%s wifi=%s host=%s\n", p.gaps, p.complete, p.short_frames,
+           " kbd=%u mode=%s %s wifi=%s host=%s\n", p.gaps, p.complete, p.short_frames,
            p.clocks, p.overruns, l.bad_sum, l.seq, l.ack, l.resends,
-           (unsigned)link_queued(CH_KBD), relay_state(), wifi_state,
+           (unsigned)link_queued(CH_KBD), nat_mode() ? "nat" : "relay",
+           nat_mode() ? "" : relay_state(), wifi_state,
            settings.host[0] ? settings.host : "(none)");
+    if (nat_mode()) { nat_stats_t n = nat_stats();
+        (reply ? printf : log_printf)("nat: in=%"PRIu32" out=%"PRIu32" drop=%"PRIu32" tcp=%u udp=%u fwd=%u\n",
+            n.in, n.out, n.drop, n.tcp, n.udp, n.forwards); }
 }
 static void wifi_changed(void) {
     if (wifi_ready) {
-        relay_configure(settings.host, false);
+        relay_configure(settings.host, false); nat_configure(false); ctrl_set_forwarder(NULL, NULL);
         cyw43_arch_lwip_begin();
         cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
         cyw43_arch_lwip_end();
@@ -48,13 +54,13 @@ static void wifi_poll(void) {
         }
         wifi_ready = true;
         btkbd_init();
-        cyw43_arch_enable_sta_mode(); relay_init();
+        cyw43_arch_enable_sta_mode(); relay_init(); nat_init();
         wifi_status = 99; wifi_retry_at = now;
     }
     if (!settings.ssid[0]) {
         if (wifi_status != 98) log_puts("wifi: not configured, type: wifi SSID|PASSWORD|HOST");
         wifi_status = 98; wifi_state = "unconfigured";
-        relay_configure(settings.host, false);
+        relay_configure(settings.host, false); nat_configure(false);
         wifi_retry_at = now + 10000;
         return;
     }
@@ -81,7 +87,8 @@ static void wifi_poll(void) {
             wifi_status = status;
         }
     }
-    relay_configure(settings.host, status == CYW43_LINK_UP);
+    if (nat_mode()) { relay_configure(settings.host, false); nat_configure(status == CYW43_LINK_UP); ctrl_set_forwarder(nat_forward_add, nat_forward_del); }
+    else { nat_configure(false); ctrl_set_forwarder(NULL, NULL); relay_configure(settings.host, status == CYW43_LINK_UP); }
     if (!wifi_attempt && status != CYW43_LINK_UP && (int32_t)(now - wifi_retry_at) >= 0) {
         int e = cyw43_arch_wifi_connect_async(settings.ssid, settings.pass,
                     settings.pass[0] ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN);
@@ -113,6 +120,17 @@ static void console_command(char *line) {
         printf("wifi: ssid=%s password=******** host=%s\n", settings.ssid, settings.host);
         return;
     }
+    if (!strcmp(line, "mode")) { puts(nat_mode() ? "mode: nat" : "mode: relay"); return; }
+    if (!strcmp(line, "mode nat")) {
+        config_t next = settings; next.host[0] = '\0';
+        if (!config_save(&next)) { puts("mode: flash save failed"); return; }
+        settings = next; wifi_changed(); puts("mode: nat"); return;
+    }
+    if (!strncmp(line, "mode relay ", 11) && line[11] && strlen(line + 11) <= 63 && !strchr(line + 11, ' ')) {
+        config_t next = settings; strcpy(next.host, line + 11);
+        if (!config_save(&next)) { puts("mode: flash save failed"); return; }
+        settings = next; wifi_changed(); puts("mode: relay"); return;
+    }
     if (!strcmp(line, "wifi clear")) {
         if (!config_clear()) { puts("wifi: flash erase failed"); return; }
         memset(&settings, 0, sizeof(settings)); wifi_changed();
@@ -123,7 +141,7 @@ static void console_command(char *line) {
         char *host = pass ? strchr(pass + 1, '|') : NULL;
         if (pass && host) {
             *pass++ = '\0'; *host++ = '\0';
-            if (*ssid && *host && strlen(ssid) <= 32 && strlen(pass) <= 64 &&
+            if (*ssid && strlen(ssid) <= 32 && strlen(pass) <= 64 &&
                 strlen(host) <= 63 && !strchr(host, '|') && !strchr(host, ' ')) {
                 config_t next = {0};
                 strcpy(next.ssid, ssid); strcpy(next.pass, pass); strcpy(next.host, host);
@@ -132,7 +150,7 @@ static void console_command(char *line) {
             }
         }
     }
-    puts("commands: wifi SSID|PASSWORD|HOST (max 32|64|63 bytes), wifi?, wifi clear, bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text> (send keystrokes + Enter), kbd test on|off");
+    puts("commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text>, kbd test on|off");
 }
 static void console_poll(void) {
     static char line[168];
@@ -171,14 +189,14 @@ int main(void) {
         if (moved) {
             link_rx_t result = link_on_rx(rx);
             if (result.valid) { last_valid_at = to_ms_since_boot(get_absolute_time()); port_set_idle(false); }
-            if (result.reset) { ctrl_reset(); relay_reset(); log_puts("link: SNES restarted"); }
+            if (result.reset) { ctrl_reset(); relay_reset(); nat_reset(); log_puts("link: SNES restarted"); }
             for (size_t i = 0; i < result.count; ++i) {
                 link_record_t *r = &result.records[i];
                 if (r->ch == CH_CTRL) ctrl_bytes(r->data, r->len);
-                else if (r->ch == CH_IP) relay_ip_bytes(r->data, r->len);
+                else if (r->ch == CH_IP) { if (nat_mode()) nat_ip_bytes(r->data, r->len); else relay_ip_bytes(r->data, r->len); }
             }
         }
-        kbd_poll(); btkbd_poll(); console_poll(); wifi_poll(); relay_poll();
+        kbd_poll(); btkbd_poll(); console_poll(); wifi_poll(); if (nat_mode()) nat_poll(); else relay_poll();
         if (moved) { link_next_out(tx); port_set_tx(tx); }
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (last_valid_at && (int32_t)(now - last_valid_at) > 2000) { last_valid_at = 0; port_set_idle(true); }

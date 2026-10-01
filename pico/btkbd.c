@@ -76,7 +76,9 @@ static void store_target(void) {
     if (!tlv) return;
     target_store_t rec = { TARGET_MAGIC, TARGET_VERSION, {0}, {0} };
     memcpy(rec.addr, target_addr, sizeof(rec.addr));
-    strncpy(rec.name, target_name, sizeof(rec.name) - 1);
+    size_t n = strlen(target_name);
+    if (n >= sizeof(rec.name)) n = sizeof(rec.name) - 1;
+    memcpy(rec.name, target_name, n);
     tlv->store_tag(ctx, TARGET_TAG, (const uint8_t *)&rec, sizeof(rec));
 }
 

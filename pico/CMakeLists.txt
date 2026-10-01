@@ -7,14 +7,15 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 project(snos_pico C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 pico_sdk_init()
-add_executable(snos_pico main.c port.c link.c ctrl.c kbd.c hidkeys.c btkbd.c relay.c config.c log.c)
+add_executable(snos_pico main.c port.c link.c ctrl.c kbd.c hidkeys.c btkbd.c relay.c nat.c nat_core.c config.c log.c)
 pico_generate_pio_header(snos_pico ${CMAKE_CURRENT_SOURCE_DIR}/snoslink.pio)
 target_include_directories(snos_pico PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(snos_pico PRIVATE
     DATA1_OPEN_DRAIN=1
     PICO_FLASH_BANK_STORAGE_OFFSET=0x1fd000
+    PICO_STACK_SIZE=0x2000
 )
-target_compile_options(snos_pico PRIVATE -Wall -Wextra)
+target_compile_options(snos_pico PRIVATE -Wall -Wextra -fstack-usage)
 target_link_libraries(snos_pico
     pico_stdlib hardware_pio hardware_dma hardware_flash
     pico_cyw43_arch_lwip_threadsafe_background
