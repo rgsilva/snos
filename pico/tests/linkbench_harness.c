@@ -58,8 +58,8 @@ static cost_t cost[] = {
     {"pad_latch", 300},      /* after the auto-read finished (4593 incl. the wait) */
     {"nmi_tail", 24000},     /* proc_tick (21942), kill switch, shim exit */
     {"svc_fixed", 6200},     /* net_service's own C, beyond what is charged below */
-    {"recv_copy", 33864},    /* link_serial_recv's byte loop, 64 bytes */
-    {"frame_ok", 47000},     /* link_serial_send after the exchange: the zero scan */
+    {"recv_copy", 0},        /* link_serial_recv: an MVN now, charged as one */
+    {"frame_ok", 3000},      /* link_serial_send after the exchange, checksum aside */
     {"checksum_byte", 47},   /* net_checksum, per byte */
     {"move_fixed", 400},     /* ring_move / link_mb_move call */
     {"move_byte", 46},       /* MVN */
@@ -71,12 +71,12 @@ static cost_t cost[] = {
     {"spin", 500},           /* one turn of kbd_idle's spin (net_fg_wanted 352) */
     {"after_spin", 29000},   /* osk_redraw + con_flush with nothing dirty (28035) */
     {"ips_fixed", 40000},    /* one ip_service pass, uip_process excluded */
-    {"uip_in_fixed", 30000}, /* uip_input on a datagram (52k for a 40-byte ACK)... */
-    {"uip_in_byte", 494},    /* ...and its C checksum per byte (838k for 1500, ring copy aside) */
-    {"uip_out_fixed", 20000},/* a segment out: header, ip_output... */
-    {"uip_out_byte", 525},   /* ...and checksum per payload byte (312k for 511) */
+    {"uip_in_fixed", 30000}, /* uip_input on a datagram (32k for a 40-byte ACK)... */
+    {"uip_in_byte", 7},      /* ...per byte beyond ip_sum and the ring copy (179k/1500) */
+    {"uip_out_fixed", 25000},/* a segment out: header, ip_output... */
+    {"uip_out_byte", 7},     /* ...per byte beyond ip_sum and the copy (79k for 511) */
     {"sys_fixed", 11800},    /* COP dispatch (SYS_FRAMES 12.7k, NET_STATE 12.3k) */
-    {"sys_write_byte", 840}, /* SYS_NET_WRITE's copy through tmp[128] */
+    {"sys_write_byte", 150}, /* SYS_NET_WRITE: far_copy into tmp[128] (43k for 128) */
     {"sys_read_fixed", 3000},/* net_read beyond the MVN */
     {"app_loop", 1000},      /* the app's own C per syscall */
     {"pico_us", 300},        /* Pico main loop: received frame to port_set_tx */

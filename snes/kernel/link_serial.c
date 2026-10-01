@@ -40,14 +40,15 @@ static uint16_t misses;
 static uint16_t probe_wait;
 
 /* An idle or absent adapter reads as all zeros, and 64 zero bytes checksum
- * to zero: a real frame always carries at least one non-zero byte (its pad
- * bytes are LINK_CH_PAD), so all-zero is "nobody there", never "valid". */
+ * to zero, so a frame that sums correctly is not yet a frame. Two bytes
+ * tell them apart: every peer puts a record or padding at LINK_HDR, and a
+ * record's channel may be 0 (control) but its length never is, while
+ * padding is LINK_CH_PAD. A real frame never has both zero; a dead line
+ * always does. This was a scan of all 64 bytes -- ~47k master cycles at
+ * -O0, inside the NMI, on every exchange (docs/link-throughput.md). */
 static int frame_ok(const uint8_t *f) {
-  uint16_t i;
-  uint8_t any = 0;
   if (f[LINK_SUM] != net_checksum(f, LINK_FRAME)) return 0;
-  for (i = 0; i < LINK_FRAME; i++) any |= f[i];
-  return any != 0;
+  return (f[LINK_HDR] | f[LINK_HDR + 1]) != 0;
 }
 
 void link_serial_init(void) {
@@ -79,11 +80,12 @@ int link_serial_present(void) {
   return 1;
 }
 
+/* One MVN: both frames are kernel far data in bank $7E (link.h). The byte
+ * loop it replaces cost 34k master cycles a poll, a tenth of a frame. */
 int link_serial_recv(uint8_t *rx) {
-  uint16_t i;
   if (!have_rx) return 0;
   have_rx = 0;
-  for (i = 0; i < LINK_FRAME; i++) rx[i] = last_rx[i];
+  link_mb_move(rx, last_rx, LINK_FRAME);
   return 1;
 }
 

@@ -89,3 +89,39 @@ nothing to send, and it comes from the console:
    cycles per 128 bytes, ~840 a byte, plus ~12k of COP dispatch per syscall.
 
 Then, under all of that, link stop-and-wait: two exchanges per fresh frame.
+
+## The steps
+
+Each row is Mesen's hardware-ROM run (`make LINK_HW=1 test-hwspeed`), then
+the host bench's, at that commit.
+
+| step | download | upload | both | bench |
+|---|---|---|---|---|
+| baseline (silicon: 876 / 919 / 876 + 561) | 876 | 919 | 876 + 561 | 1022 / 1021 / 876 + 612 |
+| 2. the turnaround is CPU | 1314 | 1226 | 1314 + 510 | 1460 / 1277 / 1314 + 510 |
+
+### 2. The turnaround is CPU
+
+Four changes, none of them to the protocol:
+
+- `link_serial_recv` hands the frame over with one MVN (34k -> 3.6k master
+  cycles a poll) and `frame_ok` tells a dead line from a frame by the two
+  bytes at `LINK_HDR` instead of scanning all 64 (~47k -> ~3k). The NMI
+  handler drops from 176 to 126 scanlines. Alone: 1314 / 1072 / 1168 + 459.
+- uIP's IP/TCP/UDP checksums run over `ip_sum` (`UIP_ARCH_CHKSUM`):
+  taking in a 1500-byte datagram 838k -> 179k, sending a 551-byte segment
+  312k -> 79k. Alone on top: upload 1072 -> 1175.
+- `ip_service` polls a connection whose receive window it closed as soon as
+  the ring has room again, so the window update leaves within a pass instead
+  of at the next 30-frame tick. No change at this step -- a segment now takes
+  as long to cross the link as the tick period, ~59 exchanges -- but every
+  later step needs it, because the tick would otherwise cap downloads at one
+  segment per half second.
+- `SYS_NET_WRITE` copies with `far_copy` (netasm.s), not a C loop: 126k ->
+  43k for 128 bytes. Upload 1175 -> 1226.
+
+What is left per frame: the NMI handler 172k of 357k master cycles (the
+exchange itself 112k, `proc_tick` 22k, the rest net_service's C), and in the
+foreground `con_flush` 28k and an idle `ip_service` pass 39k before the
+application runs. `proc_tick` and `con_flush` are not the link's and are
+left alone here.
