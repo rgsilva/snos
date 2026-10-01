@@ -265,6 +265,7 @@ emu.addEventCallback(function()
   print(string.format("hwspeed: %d exchanges in %d frames, %d kicks, first-to-last clock %.0f mc",
     port.exchanges, frame, port.kicks, (port.span_sum or 0) / math.max(port.exchanges, 1)))
   r.check(port.collisions == 0, port.collisions .. " exchanges were still running at vblank")
+  port.mask_report(r, "hwspeed", true)
   prof_report()
   r.finish()
 end, emu.eventType.endFrame)

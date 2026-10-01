@@ -162,6 +162,10 @@ void link_serial_send(const uint8_t *tx);
  * poll start on this scanline, and how many a frame at most (0 asks). */
 int link_serial_fg_fits(uint16_t line);
 int link_serial_exch(int value);
+/* Non-zero while HDMA runs (console.c, the keyboard's split): it takes
+ * cycles from every scanline, so an exchange spans more of them and
+ * link_serial.c's last-moment check must stop earlier. */
+extern volatile uint8_t link_serial_hdma;
 
 /* Move n bytes within WRAM bank $7E, as one MVN (kernel/netasm.s).
  *

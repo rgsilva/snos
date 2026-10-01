@@ -85,9 +85,17 @@ $(BUILD):
 
 # Mesen's Lua sandbox blocks dofile/require, so the shared harness is spliced
 # into each test at build time. See tools/mktest.py.
+#
+# test/hwport.lua judges the foreground poll's vblank margin against the gate
+# the ROM actually has, so link_serial.c's two last-moment lines are spliced
+# in too (@XFER_LAST@, @XFER_LAST_HDMA@).
+XFER_LAST := $(shell sed -n 's/^.define XFER_LAST \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
+XFER_LAST_HDMA := $(shell sed -n 's/^.define XFER_LAST_HDMA \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
 $(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua test/hwport.lua tools/mktest.py \
-                     | $(BUILD)
-	python3 tools/mktest.py $< test/lib.lua $@
+                     $(K)/link_serial.c | $(BUILD)
+	python3 tools/mktest.py $< test/lib.lua $@.tmp
+	sed 's/@XFER_LAST@/$(XFER_LAST)/; s/@XFER_LAST_HDMA@/$(XFER_LAST_HDMA)/' $@.tmp > $@
+	rm -f $@.tmp
 
 # Every object depends on every kernel header. Coarse, but the kernel is a
 # dozen files and a full rebuild is seconds — whereas NOT tracking headers

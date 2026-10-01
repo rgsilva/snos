@@ -19,6 +19,7 @@
  */
 #include <stdint.h>
 #include "console.h"
+#include "link.h" /* link_serial_hdma */
 #include "proc.h" /* proc_lock: the vblank window below is not preemptible */
 /* font8x8_basic.h is consumed by tools/mkfont.py at build time, not here. */
 
@@ -560,12 +561,14 @@ void con_split_enable(int panel_top_row) {
     hdma_channel(3, 0x01, 0x07, hdma_sc);
     hdma_channel(4, 0x02, 0x0E, hdma_v1);
     hdma_channel(5, 0x02, 0x10, hdma_v2);
+    link_serial_hdma = 1; /* before HDMA starts: the link's gate tightens */
     R8(0x420C) = 0x38; /* channels 3, 4, 5 */
 }
 
 void con_split_disable(void) {
     split_on = 0;
     R8(0x420C) = 0x00;
+    link_serial_hdma = 0; /* after it stops */
     con_set_text_rows(ROWS);
     /* HDMA left the registers wherever the last scanline put them. */
     R8(0x2107) = SC_TEXT_BG1;

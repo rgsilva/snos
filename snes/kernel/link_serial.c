@@ -27,6 +27,8 @@
 #include "snos.h"  /* snos_frames: which exchanges share a video frame */
 #include "input.h" /* beam_line */
 
+volatile uint8_t link_serial_hdma; /* link.h; written by console.c */
+
 #ifdef LINK_HW
 
 void link_serial_xfer(const uint8_t *tx, uint8_t *rx, uint16_t n);
@@ -56,15 +58,23 @@ static uint8_t xfer_count;
 
 /* Every exchange comes through here, and returns 0 if it did not happen.
  *
- * THE LAST WORD ON VBLANK. From the kick's first clock to the exchange's last
- * is ~85 lines and never varies; what comes before it -- net_service's C,
- * receiving and building -- does, up to ~40 lines. So whatever the early
- * gate (link_serial_fg_fits) allowed, an exchange that would still be
- * clocking at vblank -- the beam past XFER_LAST and short of 229 -- is not
- * started: NMI would be held off across vblank and the auto-joypad read's
- * clocks would land in the frame (input.c, fg_poll_fits). The frame built for
- * it is lost as if on the wire, and the window resends it. The NMI's own
- * exchange begins near line 230 and is never refused.
+ * THE LAST WORD ON VBLANK. What comes before this check -- net_service's C,
+ * receiving and building -- varies, up to ~40 lines; what comes after it
+ * does not: the kick, the quiet lead-in, the 512 clocks, then the receive
+ * check and the way back out of net_service to net_service_fg's unmask.
+ * NMI masked when vblank begins is the hazard (input.c, fg_poll_fits),
+ * clocks or none, so an exchange is not started past XFER_LAST (and short
+ * of 229). Traced on the hardware ROM (test/hwport.lua), check to unmask is
+ * 89.0 lines, 4.8 of them after the last clock -- and 91.9 while the
+ * keyboard's HDMA split takes its cycles from every line. So the gate is
+ * 131, or 128 under HDMA: checked anywhere on that line, the unmask lands by
+ * 221.0 or 220.9, four lines clear of 225, and test-hwspeed/-hwresponse fail
+ * under two. It was 135 while the margin was believed to end at the last
+ * clock, which unmasks as late as 224.9 (227.9 under HDMA). 131 cost the
+ * speedtest nothing; 128 for all would cost its duplex phase 5%, hence two.
+ * The frame built for a refused exchange is lost as if on the wire, and the
+ * window resends it. The NMI's own exchange begins near line 230 and is
+ * never refused.
  *
  * One that follows another in the same video frame has had no auto-joypad
  * read before it, and that read's short burst is what makes the adapter
@@ -72,10 +82,11 @@ static uint8_t xfer_count;
  * (pico/port.c); without it the answer waits for the exchange after. So such
  * an exchange is kicked first: a short burst of our own (linkxfer.s), which
  * the adapter takes exactly as it takes the auto-read. */
-#define XFER_LAST 135u
+#define XFER_LAST 131u
+#define XFER_LAST_HDMA 128u
 static int xfer(const uint8_t *tx) {
   uint8_t line = beam_line();
-  if (line > XFER_LAST && line < 229u) return 0;
+  if (line > (link_serial_hdma ? XFER_LAST_HDMA : XFER_LAST) && line < 229u) return 0;
   if (xfer_frame != snos_frames) {
     xfer_frame = snos_frames;
     xfer_count = 0;

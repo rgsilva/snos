@@ -124,6 +124,7 @@ emu.addEventCallback(function()
       print("--- console ---"); print(L.ring_text())
       r.check(L.status() ~= L.STATUS_PANIC, "kernel panicked")
       r.check(port.collisions == 0, port.collisions .. " exchanges were still running at vblank")
+      port.mask_report(r, "hwresponse", true)
       r.finish()
     elseif frame - at > 600 then
       print(L.ring_text()); r.check(false, "no net status after the kill"); r.finish()
