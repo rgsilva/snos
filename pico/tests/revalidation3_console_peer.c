@@ -3,7 +3,9 @@
 #include <string.h>
 #define __far
 #define __huge
+#ifndef TEST_EMULATED_LINK
 #define LINK_HW 1
+#endif
 #define SNES_MAILBOX_H
 #define MB_IN_RING_SIZE 512u
 #define MB_IN_WINDEX 0
@@ -18,11 +20,16 @@
 volatile uint16_t snos_frames;
 static uint8_t incoming[LINK_FRAME], outgoing[LINK_FRAME];
 static unsigned keys_received;
+static uint8_t key_values[4096];
 int console_link_present(void) { return 1; }
 int console_link_recv(uint8_t *rx) { memcpy(rx, incoming, LINK_FRAME); return 1; }
 void console_link_send(const uint8_t *tx) { memcpy(outgoing, tx, LINK_FRAME); }
 void ring_move(uint8_t *dst, const uint8_t *src, uint16_t n) { memcpy(dst, src, n); }
-int kbd_push(int c) { (void)c; ++keys_received; return 0; }
+int kbd_push(int c) {
+    if (keys_received < sizeof(key_values)) key_values[keys_received] = (uint8_t)c;
+    ++keys_received;
+    return 0;
+}
 unsigned console_peer_keys(void) { return keys_received; }
 void console_peer_init(void) { session_init(); net_ready = 1; keys_received = 0; }
 void console_peer_receive(const uint8_t *f, uint8_t *reply) {

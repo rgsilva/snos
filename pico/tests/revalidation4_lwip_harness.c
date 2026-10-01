@@ -5,6 +5,7 @@
 void console_peer_init(void);
 void console_peer_receive(const uint8_t *, uint8_t *);
 unsigned console_peer_keys(void);
+const uint8_t *console_peer_key_values(void);
 void console_peer_enable_ip(void);
 int console_peer_ip_write(const uint8_t *, int);
 void console_peer_open_channel(void);
@@ -39,13 +40,25 @@ static void t_restart_does_not_duplicate_delivered_keyboard(void) {
     fprintf(stderr, "key deliveries across restart: %u\n", console_peer_keys() - before);
     assert(console_peer_keys() == before + 1);
 }
-static void t_restart_replays_undelivered_keyboard(void) {
+static void t_restart_preserves_queued_keyboard_at_most_once(void) {
     sync_peer(); unsigned before = console_peer_keys();
     uint8_t f[LINK_FRAME], reply[LINK_FRAME];
     assert(link_push(CH_KBD, (const uint8_t *)"a", 1));
     link_next_out(f); /* This frame is lost. */
-    nat_configure(false); link_next_out(f); console_peer_receive(f, reply);
-    assert(console_peer_keys() == before + 1);
+    assert(link_push(CH_KBD, (const uint8_t *)"bcdef", 5));
+    nat_configure(false);
+    for (unsigned i = 0; i < 8; ++i) {
+        link_next_out(f); console_peer_receive(f, reply);
+        /* Deliberately lose one ACK and require duplicate suppression. */
+        if (i != 0) assert(link_on_rx(reply).valid);
+    }
+    unsigned delivered = console_peer_keys() - before;
+    const uint8_t *keys = console_peer_key_values() + before;
+    /* The abandoned key may be absent; queued bytes must arrive exactly
+     * once, in order, even when the replacement frame is retransmitted. */
+    assert(delivered == 5 || delivered == 6);
+    if (delivered == 6) assert(*keys++ == 'a');
+    assert(!memcmp(keys, "bcdef", 5));
 }
 static void t_restart_full_refilled_queue_preserves_queued_keys(void) {
     sync_peer(); unsigned before = console_peer_keys();
@@ -144,7 +157,7 @@ static void t_restart_discards_console_inflight_ip_tail(void) {
 }
 static const struct { const char *name; void (*run)(void); } cases[] = {
     TEST(t_restart_does_not_duplicate_delivered_keyboard),
-    TEST(t_restart_replays_undelivered_keyboard),
+    TEST(t_restart_preserves_queued_keyboard_at_most_once),
     TEST(t_restart_full_refilled_queue_preserves_queued_keys),
     TEST(t_normal_syn_ack_does_not_fail_live_channel),
     TEST(t_saved_connect_generation_is_rejected_after_reuse),
