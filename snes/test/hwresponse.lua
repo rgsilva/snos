@@ -11,7 +11,10 @@
 --   3. afterwards the link still answers (`net status` gets a HELLO back).
 --
 -- Each is timed in frames from the input to the console's reaction and the
--- verdict has a bound: the keyboard within 30 frames, the kill switch within
+-- verdict has a bound. The keyboard's is 40 frames: a key queues behind
+-- whatever is left of the one datagram the peer has on the link, up to a
+-- whole 1500-byte segment -- 26 frames on the wire, ~18 video frames at two
+-- exchanges a frame (it was ~52 at stop-and-wait). The kill switch's is
 -- SNOS_KILL_FRAMES (45) plus 30. `make LINK_HW=1 test-hwresponse`.
 local L = dofile("test/lib.lua")
 local G = dofile("test/gwip.lua")
@@ -81,7 +84,7 @@ emu.addEventCallback(function()
     if since():find("speedtest: cancelled", 1, true) then
       local took = frame - at
       print("hwresponse: a key from the adapter cancelled the download in " .. took .. " frames")
-      r.check(took <= 30, "keyboard took " .. took .. " frames to reach the application")
+      r.check(took <= 40, "keyboard took " .. took .. " frames to reach the application")
       step, at = 4, frame + 120
     elseif frame - at > 300 then
       r.check(false, "the key never cancelled the download")

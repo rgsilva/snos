@@ -359,8 +359,13 @@ with a clean wire. The work is logged step by step in
   1839 / 2172 + 817), a second exchange per frame with a last-moment vblank
   check, a kick, and in-order staging on the Pico (2482 / 1941 / 2190 + 817),
   1023-byte segments and uncapped writes (2425 / 2352 / 2044 + 1534), the
-  speedtest's own 512-byte buffer (2628 / 2557 / 2336 + 1738), and a scheduler
-  tick without soft divides (**3358 / 3068 / 3066 + 2250**: 3.8x, 3.3x, 3.7x).
+  speedtest's own 512-byte buffer (2628 / 2557 / 2336 + 1738), a scheduler
+  tick without soft divides (3358 / 3068 / 3066 + 2250), and no frame built
+  just to be discarded (3650 / 3477 / 3066 + 2250). Then a uIP 1.0 bug the
+  window-reopen poll exposed -- a poll that sends nothing sent the previous
+  connection's length of stale bytes -- fixed in uip.c, and the speedtest's
+  upload made to wait for its GO's ack (**3650 / 3375 / 3066 + 2148**: 4.2x,
+  3.7x, 3.6x).
 - **`net tune [window 1..8 | exch 1..3]`** shows and sets the window (default
   4) and exchanges per video frame (default 2) at runtime; `net tune window 1`
   and `net tune exch 1` are the protocol and pace the hardware ran before, to

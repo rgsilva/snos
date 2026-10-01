@@ -104,6 +104,8 @@ the host bench's, at that commit.
 | 5a. 1023-byte segments, writes uncapped | 2425 | 2352 | 2044 + 1534 | 3212 / 3068 / 2920 + 2148 |
 | 5b. the speedtest reads and writes 512 | 2628 | 2557 | 2336 + 1738 | 3555 / 3375 / 3358 + 2454 |
 | 5c. proc_tick without soft divides | 3358 | 3068 | 3066 + 2250 | 3606 / 3477 / 3358 + 2454 |
+| 5d. no frame built just to be thrown away | 3650 | 3477 | 3066 + 2250 | 3606 / 3477 / 3358 + 2454 |
+| 5e. uIP's stale poll fixed; upload waits for its GO's ack | **3650** | **3375** | **3066 + 2148** | 3606 / 3171 / 3504 + 2455 |
 
 ### 2. The turnaround is CPU
 
@@ -247,6 +249,32 @@ Three changes, each measured alone on the hardware ROM:
   ends early enough that step 4's foreground exchange fits in a third of
   the frames instead of one in twelve: +28% download, +20% upload, +30%
   duplex. The fastest step of the lot, and not the link's code.
+- **5d. No frame built just to be thrown away.** With frames in flight and
+  nothing new queued, `net_service` still built a frame, found it empty and
+  resent the oldest one instead -- ~11k cycles at the end of every burst,
+  inside the NMI or a foreground poll. It now checks the queues first. Window
+  1 never reaches that path (one frame in flight fills it). +9% download,
+  +13% upload; nothing at one exchange a frame, which says where the cycles
+  were going.
+- **5e. A uIP bug, and the GO that started each upload.** The emulator's
+  `test-speedtest` began failing after 5d: in the duplex phase of its short
+  run the download and upload windows no longer overlapped. With 5a and 5b
+  the speedtest wrote payload straight after the upload's "GO\n", and uIP sent
+  them together in one 1 KB segment, which reached the peer -- where that
+  window starts -- frames after the download's GO. Yielding once after GO
+  fixed that and exposed something worse: the duplex download stalled after
+  one segment. **uIP 1.0's poll path calls the application without clearing
+  `uip_slen`**, so an application that sends nothing on a poll inherits the
+  length of whatever the previous `uip_process` call sent, on another
+  connection, and appsend sends that many stale bytes. It was latent while
+  `ip.c` only polled connections with data to send; step 2's poll that only
+  reopens a receive window hit it whenever another connection had just sent.
+  uip.c now clears it as its timer and new-data paths do, and
+  `uip_poll_test.py` pins it. The speedtest now waits for the upload GO's
+  acknowledgement before writing payload -- GO travels alone, the duplex
+  windows start together, and the send ring stays aligned (the yield had left
+  it 3 bytes off, so every 1023-byte segment was followed by a 3-byte one).
+  It costs one round trip per upload phase: 3477 -> 3375.
 
 Tried and dropped:
 
@@ -309,8 +337,8 @@ numbers above is the console's own CPU and TCP's one segment in flight.
   kick or an auto-read restart, which needs three. Four is one spare, and
   measured no different from 8. 8 slots of 64 bytes are what it costs.
 - **Two exchanges a frame.** Measured safe on the hardware ROM (no exchange
-  ever clocking at vblank, with the last-moment beam check) and worth +28%
-  download, +25% upload over one (2628 / 2454 / 2482 + 1841 at `exch 1` on
+  ever clocking at vblank, with the last-moment beam check) and worth +39%
+  download, +43% upload over one (2628 / 2352 / 2482 + 1739 at `exch 1` on
   the final code). A third almost never fits: the NMI's exchange and one
   foreground exchange are 230 of 262 lines.
 - The Pico's window is whatever the console asks for, and 1 until it asks.
@@ -337,8 +365,8 @@ and on the Pico's USB console, `stats` during a phase (its line now ends in
 `win=`, the window the console asked for). Worth sending back: the three
 speedtest blocks with their counter lines, a few `stats` lines from each run,
 and anything odd. What Mesen printed for the same ROM, to compare against:
-3358 / 3068 / 3066 + 2250 at the defaults, 2628 / 2454 / 2482 + 1841 at
-`exch 1`, 1460 / 1431 / 1460 + 1125 at `exch 1` and window 1 -- the link
+3650 / 3375 / 3066 + 2148 at the defaults, 2628 / 2352 / 2482 + 1739 at
+`exch 1`, 1460 / 1329 / 1460 + 1023 at `exch 1` and window 1 -- the link
 protocol of 2026-10-01, but with the CPU, segment and scheduler gains still
 in. If silicon misbehaves,
 `net tune exch 1` takes out the kick and the foreground exchange first, and
