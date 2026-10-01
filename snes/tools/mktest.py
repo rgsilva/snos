@@ -12,8 +12,9 @@ is replaced by the whole library wrapped in an immediately-invoked function, so
 `L` ends up bound to exactly what lib.lua returns. Test sources stay readable
 and there is still one copy of the harness.
 
-The same splice serves test/gwip.lua (the shared v2 gateway + IP/TCP peer)
-through the optional line
+The same splice serves the other shared modules -- test/gwip.lua (the v2
+gateway + IP/TCP peer) and test/hwport.lua (the port-2 adapter model) --
+through optional lines of the same shape:
 
     local G = dofile("test/gwip.lua")
 
@@ -24,14 +25,14 @@ import re
 import sys
 
 MARKER = re.compile(r'^\s*local\s+L\s*=\s*dofile\(["\']test/lib\.lua["\']\)\s*$')
-GW_MARKER = re.compile(
-    r'^\s*local\s+G\s*=\s*dofile\(["\']test/gwip\.lua["\']\)\s*$')
+MODULE_MARKER = re.compile(
+    r'^\s*local\s+(\w+)\s*=\s*dofile\(["\']test/(\w+)\.lua["\']\)\s*$')
 
 
 def main(argv):
     test_path, lib_path, out_path = argv
     lib = open(lib_path).read()
-    gwip_path = os.path.join(os.path.dirname(lib_path), "gwip.lua")
+    test_dir = os.path.dirname(lib_path)
     lines = open(test_path).read().splitlines()
 
     out, spliced = [], False
@@ -43,10 +44,11 @@ def main(argv):
             out.append("end)()")
             out.append("-- <<< end of inlined library")
             spliced = True
-        elif GW_MARKER.match(line):
-            out.append("-- >>> inlined from test/gwip.lua by tools/mktest.py")
-            out.append("local G = (function()")
-            out.append(open(gwip_path).read())
+        elif MODULE_MARKER.match(line):
+            name, module = MODULE_MARKER.match(line).groups()
+            out.append(f"-- >>> inlined from test/{module}.lua by tools/mktest.py")
+            out.append(f"local {name} = (function()")
+            out.append(open(os.path.join(test_dir, module + ".lua")).read())
             out.append("end)()")
             out.append("-- <<< end of inlined library")
         else:

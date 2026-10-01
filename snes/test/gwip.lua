@@ -58,9 +58,9 @@ local function wb(o, v) emu.write(MB + o, v & 0xFF, WRAM) end
 local function ru16(o) return emu.read16(MB + o, WRAM) end
 local function wu16(o, v) emu.write16(MB + o, v & 0xFFFF, WRAM) end
 
-local function sum_of(f)
+local function sum_of(f, n)
   local s = 0
-  for i = 0, FRAME - 1 do
+  for i = 0, (n or FRAME) - 1 do
     if i ~= SUM then s = s + f[i] end
   end
   return s & 0xFF
@@ -104,6 +104,12 @@ end
 
 function G.new(opt)
   opt = opt or {}
+  -- The mailbox is 256-byte frames; the hardware-port model (test/hwport.lua)
+  -- asks for the cable's 64, a TCP peer shaped like the Pico's NAT (MSS 1460)
+  -- and a retransmission clock in exchanges rather than video frames.
+  local FR = opt.frame or FRAME
+  local mss = opt.mss or MSS
+  local rto_polls = opt.rto_polls or 60
   local gw = {
     -- transport
     tx_seq = 0, rx_next = 0, last_snes_seq = 0, out = {},
@@ -179,10 +185,10 @@ function G.new(opt)
 
   local function deliver(f)
     local o = HDR
-    while o + 2 <= FRAME do
+    while o + 2 <= FR do
       local ch, len = f[o], f[o + 1]
       if ch == CH_PAD then break end
-      if o + 2 + len > FRAME then break end
+      if o + 2 + len > FR then break end
       if ch == CH_CTRL then
         for i = 0, len - 1 do ctrl_byte(f[o + 2 + i]) end
       elseif ch == CH_IP then
@@ -196,15 +202,15 @@ function G.new(opt)
 
   local function build()
     local f = {}
-    for i = 0, FRAME - 1 do f[i] = 0 end
+    for i = 0, FR - 1 do f[i] = 0 end
     f[SEQ] = gw.tx_seq
     f[ACK] = (gw.rx_next - 1) & 0xFF
     f[FLAGS] = 0
     local o = HDR
     local any = false
-    while #gw.out > 0 and o + 2 < FRAME do
+    while #gw.out > 0 and o + 2 < FR do
       local item = gw.out[1]
-      local room = FRAME - o - 2
+      local room = FR - o - 2
       local left = #item.data - item.pos + 1
       local n = (left < room) and left or room
       if n <= 0 then break end
@@ -215,10 +221,10 @@ function G.new(opt)
       if item.pos > #item.data then table.remove(gw.out, 1) end
       any = true
     end
-    while o < FRAME do f[o] = CH_PAD; o = o + 1 end
+    while o < FR do f[o] = CH_PAD; o = o + 1 end
     if any then f[FLAGS] = f[FLAGS] | F_DATA end
     f[SUM] = 0
-    f[SUM] = sum_of(f)
+    f[SUM] = sum_of(f, FR)
     return f, any
   end
 
@@ -278,7 +284,7 @@ function G.new(opt)
     if self.done or not self.established then return end
     if self.unacked ~= "" then
       self.stall = self.stall + 1
-      if self.stall > 60 then           -- ~1 s of polls: retransmit
+      if self.stall > rto_polls then    -- ~1 s of polls: retransmit
         self.stall = 0
         self.rexmits = (self.rexmits or 0) + 1
         -- Bounded patience, mimicking the real daemon: a console whose
@@ -298,7 +304,7 @@ function G.new(opt)
       local wnd = self.wnd or 2048
       if wnd <= 0 then return end       -- closed window: wait for the update
       local n = #self.txq
-      if n > MSS then n = MSS end
+      if n > mss then n = mss end
       if n > wnd then n = wnd end
       self.unacked = self.txq:sub(1, n)
       self.txq = self.txq:sub(n + 1)
@@ -613,6 +619,91 @@ function G.new(opt)
       f[SUM] = sum_of(f)
       write_frame(f)
     end
+  end
+
+  -- ------------------------------------------------- the hardware exchange
+  -- One cable exchange, as the Pico takes it (pico/link.c): the console's
+  -- frame in, this peer's next frame out, every time. The receive half is
+  -- service()'s; the send half is the Pico's sender -- a window of
+  -- gw.hw_window frames (1 is stop-and-wait, frame for frame what the
+  -- firmware did before link windows), cumulative acks, and go-back-N from
+  -- the oldest unacknowledged frame whenever the window is full or there is
+  -- nothing new to say. SYN frames go one at a time: the receiver adopts the
+  -- first one it sees, so a second in flight could be adopted in its place.
+  gw.hw_window = opt.window or 1
+  gw.hw_frames = {}            -- seq -> frame, in flight
+  gw.hw_base, gw.hw_cursor = 0, 0
+  gw.hw_syn = true
+  gw.hw_resends = 0
+
+  local function hw_inflight() return (gw.tx_seq - gw.hw_base) & 0xFF end
+
+  function gw:exchange(f)
+    gw.frame = gw.frame + 1
+    if f[SUM] == sum_of(f, FR) then
+      if gw.rx_resync ~= false then
+        gw.rx_resync = false
+        gw.rx_next = f[SEQ]
+      end
+      local n = (f[ACK] - gw.hw_base + 1) & 0xFF
+      if n >= 1 and n <= hw_inflight() then
+        for _ = 1, n do
+          gw.hw_frames[gw.hw_base] = nil
+          gw.hw_base = (gw.hw_base + 1) & 0xFF
+        end
+        if ((gw.hw_cursor - gw.hw_base) & 0xFF) > hw_inflight() then
+          gw.hw_cursor = gw.hw_base
+        end
+        gw.hw_syn = false
+      end
+      if (f[FLAGS] & F_SYN) ~= 0 then
+        if not gw.peer_syn_seen then
+          gw.peer_syn_seen = true
+          gw.rx_next = f[SEQ]
+          gw.cmsg = { state = 0, typ = 0, len = 0, buf = {} }
+          gw.ipbuf, gw.out = "", {}
+          gw.socks = {}
+          gw.fwd_port, gw.fwd_ch = nil, nil
+          gw.hw_frames, gw.hw_base, gw.hw_cursor = {}, gw.tx_seq, gw.tx_seq
+        end
+      else
+        gw.peer_syn_seen = false
+      end
+      if (f[FLAGS] & F_DATA) ~= 0 and f[SEQ] == gw.rx_next then
+        deliver(f)
+        gw.rx_next = (gw.rx_next + 1) & 0xFF
+      end
+    end
+    ip_pump()
+    for _, t in pairs(gw.socks) do t:pump() end
+
+    local out
+    local window = gw.hw_syn and 1 or gw.hw_window
+    if gw.hw_cursor ~= gw.tx_seq then
+      out = gw.hw_frames[gw.hw_cursor]
+      gw.hw_cursor = (gw.hw_cursor + 1) & 0xFF
+      gw.hw_resends = gw.hw_resends + 1
+    elseif hw_inflight() < window and #gw.out > 0 then
+      local any
+      out, any = build()
+      if gw.hw_syn then out[FLAGS] = out[FLAGS] | F_SYN end
+      gw.hw_frames[gw.tx_seq] = out
+      gw.tx_seq = (gw.tx_seq + 1) & 0xFF
+      gw.hw_cursor = gw.tx_seq
+    elseif hw_inflight() > 0 then
+      out = gw.hw_frames[gw.hw_base]
+      gw.hw_cursor = (gw.hw_base + 1) & 0xFF
+      gw.hw_resends = gw.hw_resends + 1
+    else
+      out = build()
+      if gw.hw_syn then out[FLAGS] = out[FLAGS] | F_SYN end
+    end
+    out[ACK] = (gw.rx_next - 1) & 0xFF
+    out[SUM] = 0
+    out[SUM] = sum_of(out, FR)
+    local copy = {}
+    for i = 0, FR - 1 do copy[i] = out[i] end
+    return copy
   end
 
   return gw

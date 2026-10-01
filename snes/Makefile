@@ -72,7 +72,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-hwspeed clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -85,7 +85,7 @@ $(BUILD):
 
 # Mesen's Lua sandbox blocks dofile/require, so the shared harness is spliced
 # into each test at build time. See tools/mktest.py.
-$(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua tools/mktest.py | $(BUILD)
+$(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua test/hwport.lua tools/mktest.py | $(BUILD)
 	python3 tools/mktest.py $< test/lib.lua $@
 
 # Every object depends on every kernel header. Coarse, but the kernel is a
@@ -384,6 +384,26 @@ test-kbd: $(BUILD)/snos.sfc $(BUILD)/test/kbd.lua
 test-wire: $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
+
+# The LINK_HW ROM's real cable path (linkxfer.s, NMI timing, the foreground
+# poll gate) against a model of the Pico on port 2 -- `make LINK_HW=1
+# test-hwspeed`. Not in `test`: the suite runs the emulator ROM, and this
+# prints rates for docs/link-throughput.md rather than asserting them.
+# HWSPEED is a Lua table body, e.g.
+#   HWSPEED="seconds=5, window=4, tune={'net tune exch 2'}"
+# HWPROF=1 also times the kernel functions in HWPROF_FUNCS (tools/hwprof.py).
+HWPROF_FUNCS ?= snos_nmi_c net_service ip_service snos_cop_c kbd_idle uip_process \
+                net_read net_write link_serial_recv link_serial_send build_frame \
+                net_service_fg pad_latch proc_tick uip_len
+test-hwspeed: $(BUILD)/snos.sfc $(BUILD)/test/hwspeed.lua
+	$(call check_env)
+	@test -n "$(LINK_HW)" || { echo "test-hwspeed needs LINK_HW=1"; exit 1; }
+	sed 's|^-- @CONFIG@.*|CONFIG = {$(HWSPEED)}|' $(BUILD)/test/hwspeed.lua > $(BUILD)/test/hwspeed-run.lua
+	if [ -n "$(HWPROF)" ]; then \
+	  prof=$$(python3 tools/hwprof.py $(BUILD) $(HWPROF_FUNCS)) && \
+	  sed -i "s|^CONFIG = {\(.*\)}$$|CONFIG = {\1}; CONFIG.prof = $$prof|" $(BUILD)/test/hwspeed-run.lua; \
+	fi
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwspeed-run.lua
 
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)
