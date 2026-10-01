@@ -20,6 +20,11 @@ BUILD = ROOT / "build/ble_revalidation_test"
 #include <stdbool.h>
 bool btstack_cyw43_init(void *context);
 """)
+(BUILD / "pico/async_context.h").write_text("""
+typedef struct { unsigned depth; } async_context_t;
+void async_context_acquire_lock_blocking(async_context_t *context);
+void async_context_release_lock(async_context_t *context);
+""")
 (BUILD / "pico/cyw43_arch.h").write_text("""
 #include <stdint.h>
 void *cyw43_arch_async_context(void);
@@ -29,7 +34,7 @@ static inline uint32_t to_ms_since_boot(uint32_t t) { return t; }
 """)
 flags = ["cc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-Werror",
          "-fshort-enums", "-ffunction-sections", "-fdata-sections",
-         "-DENABLE_BLE", "-DENABLE_CLASSIC",
+         "-DENABLE_BLE", "-DENABLE_CLASSIC", "-DPICO_ON_DEVICE=1",
          "-I", str(BUILD), "-I", str(ROOT), "-I", str(BT / "src"),
          "-I", str(BT / "platform/embedded"), "-I", str(BT / "3rd-party/micro-ecc"),
          "-I", str(BT / "3rd-party/bluedroid/encoder/include"),

@@ -7,6 +7,37 @@
 #undef main
 
 uint32_t validation_now = 100;
+/* Model the device async context, including work run on outermost release.
+ * SDK async_context_threadsafe_background.c:107-130, 283-296: an IRQ that
+ * interrupts a foreground lock holder must defer its worker until release.
+ * The actual ARM build is checked separately; this is not a radio emulator.
+ */
+static async_context_t validation_context;
+static unsigned lock_acquires, lock_releases, deferred_workers;
+static void (*pending_worker)(void);
+void *cyw43_arch_async_context(void) { return &validation_context; }
+void async_context_acquire_lock_blocking(async_context_t *context) {
+    assert(context == &validation_context);
+    ++context->depth;
+    ++lock_acquires;
+}
+void async_context_release_lock(async_context_t *context) {
+    assert(context == &validation_context && context->depth);
+    if (context->depth == 1 && pending_worker) {
+        void (*worker)(void) = pending_worker;
+        pending_worker = NULL;
+        worker(); /* The SDK services workers before releasing the mutex. */
+    }
+    --context->depth;
+    ++lock_releases;
+}
+static void background_irq(void (*worker)(void)) {
+    if (validation_context.depth) {
+        assert(!pending_worker);
+        pending_worker = worker;
+        ++deferred_workers;
+    } else worker();
+}
 static unsigned pairing_requests, accepted_pairing_requests, resolving_reloads, br_connects;
 static bool sdk_pairing_request_ignored;
 void sm_request_pairing(hci_con_handle_t handle) {
@@ -303,6 +334,18 @@ static void test_report_fields_from_different_ids_are_rejected(void) {
 }
 
 static bool interrupt_bond_write;
+static unsigned bond_worker_calls;
+static uint32_t interrupted_write_offset;
+static void bond_write_worker(void) {
+    /* The foreground transaction must have committed and advanced its offset
+     * before the worker can use this same TLV context. */
+    assert(flash_context.write_offset > interrupted_write_offset);
+    ++bond_worker_calls;
+    sm_key_t ltk;
+    uint8_t random[8] = {2};
+    memset(ltk, 0xa5, sizeof(ltk));
+    le_device_db_encryption_set(0, 43, random, ltk, 16, 1, 1, 1);
+}
 static void interruptible_flash_write(void *ctx, int bank, uint32_t offset,
                                       const uint8_t *data, uint32_t size) {
     flash_write(ctx, bank, offset, data, size);
@@ -310,10 +353,10 @@ static void interruptible_flash_write(void *ctx, int bank, uint32_t offset,
      * between the foreground TLV value write and its entry-header write. */
     if (interrupt_bond_write) {
         interrupt_bond_write = false;
-        sm_key_t ltk;
-        uint8_t random[8] = {2};
-        memset(ltk, 0xa5, sizeof(ltk));
-        le_device_db_encryption_set(0, 43, random, ltk, 16, 1, 1, 1);
+        interrupted_write_offset = flash_context.write_offset;
+        assert(validation_context.depth == 1);
+        background_irq(bond_write_worker);
+        assert(bond_worker_calls == 0 && pending_worker);
     }
 }
 static const hal_flash_bank_t interruptible_flash_driver = {
@@ -323,17 +366,22 @@ static const hal_flash_bank_t interruptible_flash_driver = {
 static void test_deferred_target_write_survives_bond_write_interrupt(void) {
     populate_bond_store();
     flash_context.hal_flash_bank_impl = &interruptible_flash_driver;
+    strcpy(target_name, "locked target");
     schedule_target_store();
     validation_now += 1000;
     interrupt_bond_write = true;
     btkbd_poll();
     assert(!interrupt_bond_write);
+    assert(lock_acquires == 1 && lock_releases == 1);
+    assert(deferred_workers == 1 && bond_worker_calls == 1);
+    assert(!pending_worker && validation_context.depth == 0);
     reboot_target_state();
     sm_key_t ltk = {0};
     assert(le_device_db_count() == 1);
     le_device_db_encryption_get(0, NULL, NULL, ltk, NULL, NULL, NULL, NULL);
     for (unsigned i = 0; i < sizeof(ltk); ++i) assert(ltk[i] == 0xa5);
     assert(target_valid);
+    assert(strcmp(target_name, "locked target") == 0);
 }
 
 #define SECOND(name) {#name, test_##name}
@@ -361,6 +409,7 @@ static const struct { const char *name; void (*run)(void); } second[] = {
     SECOND(deferred_target_write_survives_bond_write_interrupt),
 };
 
+#ifndef BLE_REVALIDATION_NO_MAIN
 int main(int argc, char **argv) {
     assert(argc == 2);
     for (size_t i = 0; i < sizeof(second) / sizeof(second[0]); ++i) {
@@ -372,3 +421,4 @@ int main(int argc, char **argv) {
     }
     return strcmp(argv[1], "--list") == 0 ? 0 : 2;
 }
+#endif
