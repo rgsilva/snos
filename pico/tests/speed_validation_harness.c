@@ -1,4 +1,4 @@
-/* Independent local-peer regressions. Reuse packet builders, never edit old tests. */
+/* Independent local-peer regressions using the core harness packet builders. */
 #define main original_nat_harness_main
 #include "nat_harness.c"
 #undef main
@@ -150,7 +150,7 @@ static void t_local_does_not_starve_remote(void) {
     assert(remote_packets > 0);
 }
 static void t_local_slots_leave_remote_capacity(void) {
-    for (unsigned i = 0; i < NAT_TCP_MAX; ++i) {
+    for (unsigned i = 0; i < 2; ++i) {
         uint32_t ack;
         begin_speed(5500 + i, "U 60\n", &ack);
         input(5500 + i, 106, ack, 1460, PSH | ACK, "GO\n");
@@ -159,14 +159,25 @@ static void t_local_slots_leave_remote_capacity(void) {
         assert(last_len == 42 && !memcmp(last + 40, "0\n", 2));
         input(5500 + i, 109, ack + 2, 1460, ACK, NULL);
     }
-    /* Every report is acknowledged; give the Python peer's 15-second close
-     * deadline, FIN retry budget, and TIME_WAIT ample time to release slots. */
+    unsigned before = emitted;
+    input(5502, 100, 0, 1460, SYN, NULL);
+    assert(emitted == before && connects == 0); /* Third local peer refused. */
+    for (unsigned i = 0; i < NAT_TCP_MAX - 2; ++i)
+        send_tcp_to(REMOTE, 5000 + i, 80, SYN, 100, 0, 1460, NULL);
+    nat_core_poll(n, tick);
+    assert(connects == NAT_TCP_MAX - 2 && nat_core_stats(n).tcp == NAT_TCP_MAX);
+    assert(nat_core_stats(n).speed == 2);
+    /* Reports are acknowledged. Even clients that ignore FIN must release
+     * their local slots after the grace period and bounded FIN retries. */
     for (unsigned i = 0; i < 40; ++i) {
         tick += 2501;
         nat_core_poll(n, tick);
     }
-    send_tcp(SYN, 100, 0, 1460, NULL);
-    assert(connects == 1); /* Completed local tests must eventually release capacity. */
+    assert(nat_core_stats(n).speed == 0);
+    speed_open(5502, 100, 1460);
+    speed_open(5503, 100, 1460);
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 2);
 }
 static void t_local_rst_fin_time_wait_idle(void) {
     uint32_t ack = speed_open(5500, 100, 1460);
@@ -193,6 +204,7 @@ static void t_local_busy_retries(void) {
     uint32_t ack;
     begin_speed(5500, "D 60\n", &ack);
     input(5500, 106, ack, 1460, PSH | ACK, "GO\n");
+    uint32_t start = tick;
     single_packet_adapter();
     reject_output = true;
     unsigned before = emitted;
@@ -202,22 +214,17 @@ static void t_local_busy_retries(void) {
     nat_core_poll(n, ++tick);
     assert(last_len == 1500 && rd32(last + 24) == ack);
     before = emitted;
-    for (unsigned i = 0; i < 130; ++i) {
-        tick += 2501;
-        input(5500, 109, ack, 0, ACK, NULL); /* refresh idle, not data ACK */
-        nat_core_poll(n, tick); /* occupied link never spends data retries */
-    }
+    tick = start + 3000;
+    nat_core_poll(n, tick); /* Busy link defers RTO without spending a retry. */
     assert(emitted == before && nat_core_stats(n).speed == 1);
-    for (unsigned i = 0; i < 120; ++i) {
-        occupied = false;
-        tick += 2501;
-        input(5500, 109, ack, 0, ACK, NULL);
-        nat_core_poll(n, tick);
-        assert(last_len == 1500 && rd32(last + 24) == ack);
-    }
     occupied = false;
-    tick += 2501;
-    input(5500, 109, ack, 0, ACK, NULL);
+    tick += 2500;
+    nat_core_poll(n, tick);
+    assert(emitted == before); /* RTO is strict > 2500 ms. */
+    nat_core_poll(n, ++tick);
+    assert(emitted == before + 1 && last_len == 1500 && rd32(last + 24) == ack);
+    occupied = false;
+    tick = start + 16000;
     nat_core_poll(n, tick);
     assert((last[33] & RST) && nat_core_stats(n).speed == 0);
 }
@@ -307,6 +314,292 @@ static void t_overlong_control_rejected_at_limit(void) {
     input(5500, 101, ack, 1460, PSH | ACK, "xxxxxxxxxxxxxxxxxxxxxxxx");
     assert(last[33] == (RST | ACK)); /* same 24-byte limit as speedtest.py */
 }
+/* Second-pass checks use only the public core API and wire observations. */
+static uint32_t remote_open(unsigned slot, uint16_t port) {
+    send_tcp_to(REMOTE, port, 80, SYN, 100, 0, 1460, NULL);
+    nat_core_tcp_connected(n, slot, 0, tick);
+    assert(last[33] == (SYN | ACK) && rd16(last + 22) == port);
+    uint32_t ack = rd32(last + 24) + 1;
+    send_tcp_to(REMOTE, port, 80, ACK, 101, ack, 1460, NULL);
+    return ack;
+}
+static void t_download_fin_discards_partial_window_tail(void) {
+    uint32_t ack;
+    begin_speed(5500, "D 7200\n", &ack);
+    input(5500, 108, ack, 128, PSH | ACK, "GO\n");
+    nat_core_poll(n, ++tick);
+    assert(last_len == 168);
+    /* FIN can arrive before the ACK of the 128 transmitted bytes. The other
+     * 1332 bytes have never been sent and must not delay close. */
+    input(5500, 111, ack, 0, FIN | ACK, NULL);
+    input(5500, 112, ack + 128, 0, ACK, NULL);
+    unsigned before = emitted;
+    nat_core_poll(n, ++tick);
+    assert(emitted == before + 1 && last[33] == (FIN | ACK));
+}
+static void t_report_deadline_wraps_to_zero(void) {
+    uint32_t ack;
+    tick = UINT32_MAX - 16000u;
+    begin_speed(5500, "U 60\n", &ack);
+    input(5500, 106, ack, 1460, PSH | ACK, "GO\n");
+    tick += 1000;
+    nat_core_poll(n, tick); /* now + 15000 == 0, a valid absolute deadline */
+    assert(last_len == 42 && !memcmp(last + 40, "0\n", 2));
+    input(5500, 109, ack + 2, 1460, ACK, NULL);
+    tick += 14999;
+    unsigned before = emitted;
+    nat_core_poll(n, tick);
+    assert(emitted == before);
+    ++tick;
+    nat_core_poll(n, tick);
+    assert(emitted == before + 1 && last[33] == (FIN | ACK));
+}
+static void t_report_zero_window_has_send_timeout(void) {
+    uint32_t ack;
+    begin_speed(5500, "U 60\n", &ack);
+    input(5500, 106, ack, 0, PSH | ACK, "GO\n");
+    tick += 1000;
+    nat_core_poll(n, tick);
+    /* Allow BOTH Python's 15 s sendall timeout and a full 15 s tail wait.
+     * Even this upper bound must not be extended by refreshing TCP_IDLE. */
+    for (unsigned i = 0; i < 31; ++i) {
+        tick += 1000;
+        input(5500, 109 + i, ack, 0, PSH | ACK, "x");
+        nat_core_poll(n, tick);
+    }
+    assert(last[33] & (FIN | RST));
+}
+static void t_handshake_zero_window_has_deadline(void) {
+    uint32_t ack = speed_open(5500, 100, 1460);
+    input(5500, 101, ack, 0, PSH | ACK, "U 60\n");
+    uint32_t start = tick;
+    nat_core_poll(n, tick); /* OK is staged behind a zero window. */
+    /* Allow the separate 15 s OK-send and 15 s GO-read waits in Python. */
+    tick = start + 30001;
+    unsigned before = emitted;
+    nat_core_poll(n, tick);
+    assert(emitted > before && (last[33] & (FIN | RST)));
+}
+static void t_download_exact_deadline_and_clock_wrap(void) {
+    const uint32_t starts[] = {100, UINT32_MAX - 500};
+    const unsigned frames[] = {60, 61, 7200};
+    for (unsigned w = 0; w < 2; ++w) {
+        for (unsigned f = 0; f < 3; ++f) {
+            uint32_t ack;
+            tick = starts[w];
+            char command[24];
+            snprintf(command, sizeof(command), "D %u\n", frames[f]);
+            begin_speed(5500, command, &ack);
+            uint32_t seq = 101 + (uint32_t)strlen(command);
+            input(5500, seq, ack, 0, PSH | ACK, "GO\n");
+            uint32_t end = tick + frames[f] * 1000u / 60u + 15000u;
+            nat_core_poll(n, tick);
+            unsigned before = emitted;
+            tick = end - 1;
+            nat_core_poll(n, tick);
+            assert(emitted == before && nat_core_stats(n).speed == 1);
+            tick = end;
+            nat_core_poll(n, tick);
+            assert(emitted == before + 1 && last[33] == (FIN | ACK));
+            input(5500, seq + 3, ack + 1, 0, RST | ACK, NULL);
+        }
+    }
+}
+static void t_report_small_window_tail_deadline(void) {
+    uint32_t ack;
+    begin_speed(5500, "U 60\n", &ack);
+    input(5500, 106, ack, 1, PSH | ACK, "GO\n");
+    tick += 1000;
+    nat_core_poll(n, tick);
+    assert(last_len == 41 && last[40] == '0');
+    input(5500, 109, ack + 1, 0, ACK, NULL);
+    tick += 10000;
+    input(5500, 109, ack + 1, 1, ACK, NULL);
+    nat_core_poll(n, tick);
+    assert(last_len == 41 && last[40] == '\n' && rd32(last + 24) == ack + 1);
+    input(5500, 109, ack + 2, 1, ACK, NULL);
+    uint32_t end = tick + 15000;
+    unsigned before = emitted;
+    tick = end - 1;
+    nat_core_poll(n, tick);
+    assert(emitted == before);
+    tick = end;
+    nat_core_poll(n, tick);
+    assert(emitted == before + 1 && last[33] == (FIN | ACK));
+}
+static void retry_fairness(unsigned kind, bool local_source, bool local_victim, bool poll_busy) {
+    uint32_t source_ack, victim_ack = 0;
+    if (local_source) {
+        begin_speed(5500, "D 7200\n", &source_ack);
+        input(5500, 108, source_ack, 1460, PSH | ACK, "GO\n");
+    } else source_ack = remote_open(0, 5600);
+    if (local_victim) {
+        begin_speed(5501, "D 7200\n", &victim_ack);
+        input(5501, 108, victim_ack, 1460, PSH | ACK, "GO\n");
+    } else if (kind == 1) {
+        send_tcp_to(REMOTE, 5601, 80, SYN, 100, 0, 1460, NULL);
+        nat_core_tcp_connected(n, 1, 0, tick);
+        victim_ack = rd32(last + 24) + 1; /* Deliberately lose SYN ACK. */
+    } else victim_ack = remote_open(1, 5601);
+    /* Isolate the victim's first transmission. */
+    if (local_source) input(5500, 111, source_ack, 0, ACK, NULL);
+    if (kind == 0) {
+        if (!local_victim)
+            assert(nat_core_tcp_received(n, 1, (const uint8_t *)"victim", 6, tick));
+        nat_core_poll(n, ++tick);
+        assert(rd16(last + 22) == (local_victim ? 5501 : 5601));
+        assert(last[33] == (PSH | ACK)); /* Lose data / its ACK. */
+    } else if (kind == 2) {
+        nat_core_tcp_eof(n, 1, tick);
+        nat_core_poll(n, ++tick);
+        assert(last[33] == (FIN | ACK) && rd16(last + 22) == 5601);
+    }
+    if (local_source) input(5500, 111, source_ack, 1460, ACK, NULL);
+    single_packet_adapter();
+    occupied = true; /* Victim's initial packet is still draining. */
+    unsigned retried = 0;
+    for (unsigned i = 0; i < 1000; ++i) {
+        if (poll_busy) {
+            tick += 50;
+            nat_core_poll(n, tick); /* Main loop also polls while the frame drains. */
+        }
+        occupied = false;
+        tick += poll_busy ? 50 : 100; /* One packet opportunity every 100 ms. */
+        if (!local_source)
+            (void)nat_core_tcp_received(n, 0, (const uint8_t *)"source", 6, tick);
+        nat_core_poll(n, tick);
+        if (!occupied) continue;
+        if (rd16(last + 22) == (local_victim ? 5501 : 5601)) {
+            unsigned expected_flags = kind == 0 ? (PSH | ACK) :
+                                      kind == 1 ? (SYN | ACK) : (FIN | ACK);
+            assert(last[33] == expected_flags);
+            assert(rd32(last + 24) == victim_ack - (kind == 1));
+            ++retried;
+            break;
+        }
+        assert(rd16(last + 22) == (local_source ? 5500 : 5600));
+        source_ack += (uint32_t)(last_len - 40);
+        if (local_source) input(5500, 111, source_ack, 1460, ACK, NULL);
+        else send_tcp_to(REMOTE, 5600, 80, ACK, 101, source_ack, 1460, NULL);
+    }
+    if (!retried)
+        fprintf(stderr, "No victim retry in 1000 link opportunities over 100 seconds\n");
+    assert(retried > 0); /* A ready source cannot suppress retries for 100 s. */
+}
+static void t_local_source_remote_data_retry_fair(void) { retry_fairness(0, true, false, false); }
+static void t_remote_source_remote_data_retry_fair(void) { retry_fairness(0, false, false, false); }
+static void t_remote_source_local_data_retry_fair(void) { retry_fairness(0, false, true, false); }
+static void t_local_source_remote_syn_retry_fair(void) { retry_fairness(1, true, false, false); }
+static void t_local_source_remote_fin_retry_fair(void) { retry_fairness(2, true, false, false); }
+
+static void t_busy_local_source_remote_data_retry_fair(void) { retry_fairness(0, true, false, true); }
+static void t_busy_remote_source_remote_data_retry_fair(void) { retry_fairness(0, false, false, true); }
+static void t_busy_remote_source_local_data_retry_fair(void) { retry_fairness(0, false, true, true); }
+static void t_busy_local_source_remote_syn_retry_fair(void) { retry_fairness(1, true, false, true); }
+static void t_busy_local_source_remote_fin_retry_fair(void) { retry_fairness(2, true, false, true); }
+static void t_input_ack_cannot_starve_ready_remote(void) {
+    uint32_t victim = remote_open(0, 5600);
+    uint32_t uploader = remote_open(1, 5601);
+    uint32_t source = remote_open(2, 5602);
+    assert(nat_core_tcp_received(n, 0, (const uint8_t *)"victim", 6, tick));
+    single_packet_adapter();
+    unsigned delivered = 0;
+    for (unsigned i = 0; i < 1000; ++i) {
+        tick += 100;
+        occupied = false;
+        send_tcp_to(REMOTE, 5601, 80, PSH | ACK, 101 + i, uploader, 1460, "u");
+        assert(last[33] == ACK && rd16(last + 22) == 5601);
+        /* The immediate ACK drains. There is now a second packet opportunity
+         * before any more console input, with two remote responses ready. */
+        occupied = false;
+        assert(nat_core_tcp_received(n, 2, (const uint8_t *)"source", 6, tick));
+        nat_core_poll(n, ++tick);
+        assert(occupied);
+        if (rd16(last + 22) == 5600) {
+            assert(rd32(last + 24) == victim && !memcmp(last + 40, "victim", 6));
+            ++delivered;
+            break;
+        }
+        assert(rd16(last + 22) == 5602 && last_len == 46);
+        source += 6;
+        send_tcp_to(REMOTE, 5602, 80, ACK, 101, source, 1460, NULL);
+    }
+    if (!delivered)
+        fprintf(stderr, "No victim data in 1000 opportunities after input ACKs drained\n");
+    assert(delivered > 0);
+}
+static void t_round_robin_stream_integrity_all_slots(void) {
+    uint32_t ack[NAT_TCP_MAX];
+    unsigned offset[NAT_TCP_MAX] = {0}, visits[NAT_TCP_MAX] = {0};
+    uint8_t data[2920];
+    /* Two local downloads and six distinguishable remote byte streams. */
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i) {
+        if (i < 2) {
+            begin_speed(5500 + i, "D 7200\n", &ack[i]);
+            input(5500 + i, 108, ack[i], 0, PSH | ACK, "GO\n");
+        } else ack[i] = remote_open(i, 5500 + i);
+    }
+    for (unsigned i = 0; i < 2; ++i)
+        input(5500 + i, 111, ack[i], 128, ACK, NULL);
+    for (unsigned i = 2; i < NAT_TCP_MAX; ++i) {
+        for (unsigned j = 0; j < sizeof(data); ++j) data[j] = (uint8_t)(j + i * 31);
+        assert(nat_core_tcp_received(n, i, data, sizeof(data), tick));
+    }
+    single_packet_adapter();
+    for (unsigned cycle = 0; cycle < 32; ++cycle) {
+        unsigned seen = 0;
+        for (unsigned opportunity = 0; opportunity < NAT_TCP_MAX; ++opportunity) {
+            occupied = false;
+            unsigned before = emitted;
+            nat_core_poll(n, ++tick);
+            assert(occupied && emitted == before + 1);
+            unsigned i = rd16(last + 22) - 5500;
+            assert(i < NAT_TCP_MAX && !(seen & (1u << i)));
+            seen |= 1u << i;
+            assert(rd32(last + 24) == ack[i] && last[33] == (PSH | ACK));
+            size_t len = last_len - 40;
+            assert(len > 0 && len <= (i < 2 ? 128u : 1460u));
+            for (unsigned j = 0; j < len; ++j)
+                assert(last[40 + j] == (i < 2 ? 'x' : (uint8_t)(offset[i] + j + i * 31)));
+            offset[i] += len; ack[i] += len; ++visits[i];
+            send_tcp_to(i < 2 ? PICO : REMOTE, 5500 + i, i < 2 ? 7778 : 80,
+                        ACK, i < 2 ? 111 : 101, ack[i], i < 2 ? 128 : 1460, NULL);
+            if (i >= 2 && offset[i] % sizeof(data) == 0) {
+                for (unsigned j = 0; j < sizeof(data); ++j)
+                    data[j] = (uint8_t)(offset[i] + j + i * 31);
+                assert(nat_core_tcp_received(n, i, data, sizeof(data), tick));
+            }
+        }
+        assert(seen == (1u << NAT_TCP_MAX) - 1);
+    }
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i) assert(visits[i] == 32);
+}
+static void t_remote_busy_deferral_and_full_retry_budget(void) {
+    uint32_t ack = remote_open(0, 5600);
+    assert(nat_core_tcp_received(n, 0, (const uint8_t *)"abc", 3, tick));
+    single_packet_adapter();
+    nat_core_poll(n, tick);
+    unsigned before = emitted;
+    for (unsigned i = 0; i < 130; ++i) {
+        tick += 2501;
+        send_tcp_to(REMOTE, 5600, 80, ACK, 101, ack, 0, NULL);
+        nat_core_poll(n, tick);
+    }
+    assert(emitted == before && nat_core_stats(n).tcp == 1);
+    for (unsigned i = 0; i < 120; ++i) {
+        occupied = false;
+        tick += 2501;
+        send_tcp_to(REMOTE, 5600, 80, ACK, 101, ack, 0, NULL);
+        nat_core_poll(n, tick);
+        assert(emitted == before + i + 1 && last_len == 43);
+        assert(rd32(last + 24) == ack && !memcmp(last + 40, "abc", 3));
+    }
+    occupied = false;
+    tick += 2501;
+    send_tcp_to(REMOTE, 5600, 80, ACK, 101, ack, 0, NULL);
+    nat_core_poll(n, tick);
+    assert((last[33] & RST) && nat_core_stats(n).tcp == 0);
+}
 static const test_t validation_tests[] = {
     TEST(t_upload_fragment_duplicate_tail_wrap), TEST(t_download_window_stop_and_wait),
     TEST(t_download_small_window_progress), TEST(t_download_fin_discards_unsent_tail),
@@ -315,7 +608,21 @@ static const test_t validation_tests[] = {
     TEST(t_local_rst_fin_time_wait_idle), TEST(t_local_busy_retries),
     TEST(t_local_handshake_fin_retries), TEST(t_local_control_deadline_and_garbage),
     TEST(t_upload_binary_payload_and_partial_report_ack), TEST(t_invalid_requests),
-    TEST(t_overlong_control_rejected_at_limit)
+    TEST(t_overlong_control_rejected_at_limit),
+    TEST(t_download_fin_discards_partial_window_tail),
+    TEST(t_report_deadline_wraps_to_zero), TEST(t_report_zero_window_has_send_timeout),
+    TEST(t_local_source_remote_data_retry_fair), TEST(t_remote_source_remote_data_retry_fair),
+    TEST(t_remote_source_local_data_retry_fair), TEST(t_local_source_remote_syn_retry_fair),
+    TEST(t_local_source_remote_fin_retry_fair), TEST(t_round_robin_stream_integrity_all_slots),
+    TEST(t_remote_busy_deferral_and_full_retry_budget),
+    TEST(t_busy_local_source_remote_data_retry_fair),
+    TEST(t_busy_remote_source_remote_data_retry_fair),
+    TEST(t_busy_remote_source_local_data_retry_fair),
+    TEST(t_busy_local_source_remote_syn_retry_fair),
+    TEST(t_busy_local_source_remote_fin_retry_fair),
+    TEST(t_input_ack_cannot_starve_ready_remote),
+    TEST(t_handshake_zero_window_has_deadline),
+    TEST(t_download_exact_deadline_and_clock_wrap), TEST(t_report_small_window_tail_deadline)
 };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

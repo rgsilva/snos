@@ -367,6 +367,12 @@ static void t_speedtest_phases(void) {
     nat_core_poll(n, ++tick);
     assert(last[33] == (FIN | ACK));
 
+    /* Finish the first phase before opening the next one, as the app does.
+     * Exercise graceful release here; upload below exercises ip_close's RST. */
+    send_tcp_to(PICO, 5100, 7778, ACK, 110, download + 1464, 1460, NULL);
+    tick += 4001;
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 0);
     uint32_t upload = speed_open(5101, 200, 1460);
     speed_request(5101, 201, upload, "U 60\n");
     send_tcp_to(PICO, 5101, 7778, ACK, 206, upload + 3, 1460, NULL);
@@ -375,6 +381,9 @@ static void t_speedtest_phases(void) {
     nat_core_poll(n, tick);
     assert(last[33] == (PSH | ACK) && last_len == 42 && !memcmp(last + 40, "6\n", 2));
 
+    send_tcp_to(PICO, 5101, 7778, RST | ACK, 215, upload + 5, 1460, NULL);
+    nat_core_poll(n, tick);
+    assert(nat_core_stats(n).speed == 0);
     uint32_t both_download = speed_open(5102, 300, 1460);
     uint32_t both_upload = speed_open(5103, 400, 1460);
     speed_request(5102, 301, both_download, "D 60\n");
@@ -384,7 +393,7 @@ static void t_speedtest_phases(void) {
     send_tcp_to(PICO, 5102, 7778, PSH | ACK, 306, both_download + 3, 1460, "GO\n");
     send_tcp_to(PICO, 5103, 7778, PSH | ACK, 406, both_upload + 3, 1460, "GO\nxyz");
     nat_core_poll(n, ++tick);
-    assert(nat_core_stats(n).speed == 4); /* All four local flows remain active. */
+    assert(nat_core_stats(n).speed == 2); /* Duplex uses exactly two local peers. */
     tick += 1001;
     nat_core_poll(n, tick);
     assert(last_len == 42 && !memcmp(last + 40, "3\n", 2));
