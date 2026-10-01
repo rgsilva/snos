@@ -65,6 +65,7 @@ static hogp_keyboard_map_t le_map;
 static uint32_t reconnect_at;
 static bool target_store_pending;
 static uint32_t target_store_at, le_boot_wait_at, le_pairing_wait_at;
+static uint32_t target_store_generation;
 
 static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet,
                           uint16_t size);
@@ -72,6 +73,8 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
 /* The controller provides these when BTstack's full BLE stack is linked. */
 extern uint8_t gap_load_resolving_list_from_le_device_db(void) __attribute__((weak));
 extern void sm_request_pairing(hci_con_handle_t handle) __attribute__((weak));
+/* Older host fixtures do not link the controller's cancellation entry point. */
+extern uint8_t gap_connect_cancel(void) __attribute__((weak));
 
 static bool same_addr(const bd_addr_t a, const bd_addr_t b) { return bd_addr_cmp(a, b) == 0; }
 static const char *addr_str(const bd_addr_t addr) { return bd_addr_to_str(addr); }
@@ -136,6 +139,7 @@ static bool store_target(void) {
 
 /* Callbacks only mark the record dirty; btkbd_poll performs the flash write. */
 static void schedule_target_store(void) {
+    ++target_store_generation;
     target_store_pending = true;
     target_store_at = to_ms_since_boot(get_absolute_time());
 }
@@ -210,6 +214,26 @@ static void cancel_deferred_actions(void) {
     reset_le_session();
     le_prefer_report_mode = false;
     le_events_cancelled = true;
+}
+
+/* Locally retire a link before its asynchronous disconnect completion arrives. */
+static void disconnect_current_target(void) {
+    hci_con_handle_t old_le_handle = le_handle;
+    uint16_t old_hid_cid = hid_cid;
+    bool cancel_le_connect = target_transport == TRANSPORT_LE && connecting &&
+                             old_le_handle == HCI_CON_HANDLE_INVALID;
+
+    cancel_deferred_actions();
+    le_handle = HCI_CON_HANDLE_INVALID;
+    hid_cid = 0;
+    connected = connecting = descriptor_available = false;
+
+    if (target_transport == TRANSPORT_LE) {
+        if (old_le_handle != HCI_CON_HANDLE_INVALID) gap_disconnect(old_le_handle);
+        else if (cancel_le_connect && gap_connect_cancel != NULL) gap_connect_cancel();
+    } else if (old_hid_cid) {
+        hid_host_disconnect(old_hid_cid);
+    }
 }
 
 /* One slot is deliberate: replacing it also removes the old transport's key. */
@@ -374,9 +398,12 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
     (void)channel;
     (void)packet_type;
     if (size < 3 || hci_event_packet_get_type(packet) != HCI_EVENT_GATTSERVICE_META) return;
+    if (initialized && !radio_on) return;
+    if (le_events_cancelled) return;
     switch (hci_event_gattservice_meta_get_subevent_code(packet)) {
         case GATTSERVICE_SUBEVENT_HID_SERVICE_CONNECTED: {
-            if (le_events_cancelled) return;
+            uint16_t cid = gattservice_subevent_hid_service_connected_get_hids_cid(packet);
+            if (hids_cid && cid != hids_cid) return;
             uint8_t status = gattservice_subevent_hid_service_connected_get_status(packet);
             if (status != ERROR_CODE_SUCCESS && !le_report_mode) {
                 /* hids_client finalizes its live client after this callback returns. */
@@ -390,7 +417,7 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
                 gap_disconnect(le_handle);
                 return;
             }
-            hids_cid = gattservice_subevent_hid_service_connected_get_hids_cid(packet);
+            hids_cid = cid;
             if (le_report_mode) {
                 const uint8_t *map =
                     hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0);
@@ -414,7 +441,8 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
             break;
         }
         case GATTSERVICE_SUBEVENT_HID_REPORT:
-            if (le_events_cancelled) return;
+            if (hids_cid &&
+                gattservice_subevent_hid_report_get_hids_cid(packet) != hids_cid) return;
             if (le_boot_waiting) {
                 uint8_t report_id = gattservice_subevent_hid_report_get_report_id(packet);
                 const uint8_t *report = gattservice_subevent_hid_report_get_report(packet);
@@ -447,14 +475,27 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
     (void)channel;
     (void)size;
     if (packet_type != HCI_EVENT_PACKET) return;
+    if (initialized && !radio_on) return;
+    if (le_events_cancelled) return;
     switch (hci_event_packet_get_type(packet)) {
         case SM_EVENT_JUST_WORKS_REQUEST:
-            sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+            if (sm_event_just_works_request_get_handle(packet) != le_handle) break;
+            le_pairing_waiting = false;
+            sm_just_works_confirm(le_handle);
             log_puts("bt: LE pairing Just Works accepted");
             break;
         case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
+            if (sm_event_passkey_display_number_get_handle(packet) != le_handle) break;
+            /* This is protocol progress, not an unanswered pairing request. */
+            le_pairing_waiting = false;
             printf("bt: passkey %06" PRIu32 " - type this on the keyboard, then Enter\n",
                    sm_event_passkey_display_number_get_passkey(packet));
+            break;
+        case SM_EVENT_PAIRING_STARTED:
+            if (sm_event_pairing_started_get_handle(packet) != le_handle) break;
+            /* Let the Security Manager's own timeout govern an active exchange. */
+            le_pairing_waiting = false;
+            log_puts("bt: LE pairing started");
             break;
         case SM_EVENT_PAIRING_COMPLETE:
             if (sm_event_pairing_complete_get_handle(packet) != le_handle) break;
@@ -544,9 +585,11 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     (void)channel;
     (void)size;
     if (packet_type != HCI_EVENT_PACKET) return;
+    if (initialized && !radio_on) return;
     bd_addr_t addr;
     switch (hci_event_packet_get_type(packet)) {
         case BTSTACK_EVENT_STATE:
+            if (!radio_on) break;
             working = btstack_event_state_get_state(packet) == HCI_STATE_WORKING;
             if (working) {
                 load_target();
@@ -617,14 +660,20 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             log_puts("bt: pairing started");
             break;
         case GAP_EVENT_PAIRING_COMPLETE:
-            if (gap_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
+            if (!le_events_cancelled &&
+                gap_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
                 schedule_target_store();
             }
             break;
         case HCI_EVENT_META_GAP:
             if (hci_event_gap_meta_get_subevent_code(packet) ==
                     GAP_SUBEVENT_LE_CONNECTION_COMPLETE &&
-                target_valid && target_transport == TRANSPORT_LE) {
+                radio_on && target_valid && target_transport == TRANSPORT_LE && connecting) {
+                if (gap_subevent_le_connection_complete_get_status(packet) != ERROR_CODE_SUCCESS) {
+                    connecting = false;
+                    connect_target(5000);
+                    break;
+                }
                 le_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
                 le_events_cancelled = false;
                 connecting = false;
@@ -635,7 +684,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             }
             break;
         case HCI_EVENT_DISCONNECTION_COMPLETE:
-            if (target_transport == TRANSPORT_LE && le_handle != HCI_CON_HANDLE_INVALID) {
+            if (target_transport == TRANSPORT_LE &&
+                hci_event_disconnection_complete_get_connection_handle(packet) == le_handle) {
                 le_handle = HCI_CON_HANDLE_INVALID;
                 connected = connecting = false;
                 reset_le_session();
@@ -729,7 +779,11 @@ void btkbd_poll(void) {
     }
     if (target_store_pending &&
         (int32_t)(to_ms_since_boot(get_absolute_time()) - target_store_at) >= 0) {
-        if (store_target_locked()) target_store_pending = false;
+        uint32_t generation = target_store_generation;
+        if (store_target_locked()) {
+            /* Releasing the device lock may run a callback that dirties this record. */
+            if (target_store_generation == generation) target_store_pending = false;
+        }
         else target_store_at = to_ms_since_boot(get_absolute_time()) + 1000;
     }
     if (le_boot_waiting &&
@@ -826,15 +880,13 @@ static void pair_target(const char *arg) {
         scanning = false;
         scan_print_pending = false;
     }
-    if (connected && target_transport == TRANSPORT_BR && hid_cid) hid_host_disconnect(hid_cid);
-    if (connected && target_transport == TRANSPORT_LE && le_handle != HCI_CON_HANDLE_INVALID) gap_disconnect(le_handle);
+    disconnect_current_target();
     drop_target_bond();
     memcpy(target_addr, entry.addr, sizeof(target_addr));
     target_addr_type = entry.addr_type;
     target_transport = entry.transport;
     copy_text(target_name, sizeof(target_name), entry.name);
     target_valid = true;
-    connected = connecting = false;
     reconnect_at = 0;
     try_connect_now();
     puts("bt: pairing/connecting");
@@ -845,11 +897,8 @@ static void forget(void) {
         puts("bt: radio not ready");
         return;
     }
+    disconnect_current_target();
     drop_target_bond();
-    if (hid_cid) hid_host_disconnect(hid_cid);
-    if (le_handle != HCI_CON_HANDLE_INVALID) gap_disconnect(le_handle);
-    le_handle = HCI_CON_HANDLE_INVALID;
-    cancel_deferred_actions();
     clear_target();
     connected = connecting = false;
     puts("bt: forgotten");
@@ -861,10 +910,15 @@ bool btkbd_command(const char *line) {
     if (strncmp(line, "bt pair ", 8) == 0) { pair_target(line + 8); return true; }
     if (strcmp(line, "bt forget") == 0) { forget(); return true; }
     if (strcmp(line, "bt off") == 0) {
-        if (initialized) hci_power_control(HCI_POWER_OFF);
+        if (scanning) {
+            gap_inquiry_stop();
+            gap_stop_scan();
+        }
+        scanning = scan_print_pending = false;
         le_handle = HCI_CON_HANDLE_INVALID;
         cancel_deferred_actions();
         radio_on = working = connected = connecting = false;
+        if (initialized) hci_power_control(HCI_POWER_OFF);
         puts("bt: off");
         return true;
     }
