@@ -118,7 +118,7 @@ static void counters(void) {
 }
 
 static int phase(uint16_t which) {
-  uint16_t start, n, room, moved, i;
+  uint16_t start, n, room, moved, i, empty = 0;
   int ok = 0;
   down = up = SYS_ERR;
   received = sent = remote = 0;
@@ -130,8 +130,23 @@ static int phase(uint16_t which) {
     up = prepare(1);
     if (up == SYS_ERR) goto done;
   }
-  if (up != SYS_ERR && !send_text(up, "GO\n")) goto done;
+  if (up != SYS_ERR) {
+    empty = sys_net_wspace(up);
+    if (!send_text(up, "GO\n")) goto done;
+  }
   if (down != SYS_ERR && !send_text(down, "GO\n")) goto done;
+  /* No upload payload until the upload's GO is acknowledged (its ring has its
+   * room back). The stack sends whatever a connection's ring holds, so payload
+   * written straight after GO left in the same 1 KB segment, and reached the
+   * peer -- which starts that direction's window on it -- frames after the
+   * download's GO: the two windows of the duplex phase began apart. */
+  if (up != SYS_ERR) {
+    start = sys_frames();
+    while (sys_net_wspace(up) < empty) {
+      if (!alive(up) || expired(start, WAIT) || cancelled()) goto done;
+      sys_yield();
+    }
+  }
   start = sys_frames();
   while (!expired(start, duration)) {
     moved = 0;
