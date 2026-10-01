@@ -56,19 +56,21 @@ Each connection starts with `D frames\n` or `U frames\n`, where frames is a
 decimal duration from 60 through 7200. The server replies `OK\n` and waits for
 `GO\n`. No payload is exchanged while the other duplex socket is preparing.
 
-* D: the server sends raw bytes until the console closes at its deadline.
-  There is no drain: pending bytes are discarded. The host log labels its
-  send count **download queued**, because that number is not a measurement of
-  delivery to the console.
+* D: the server sends raw bytes until the console closes, with a 15-second
+  grace period after the requested duration. There is no drain: pending bytes
+  are discarded. The host log labels its send count **download queued**,
+  because that number is not a measurement of delivery to the console.
 * U: the server starts its receive window on GO, counts raw bytes until its
   deadline, and sends `count\n`. It then discards any late tail until close.
-  The console stops enqueueing at its own frame deadline and reads that count.
+  The tail-discard period lasts at most 15 seconds. The console stops
+  enqueueing at its own frame deadline and reads that count.
 
 The client currently sends `x` bytes, but U treats the payload as opaque. The
 Pico peer uses the NAT's normal console-facing TCP flow, including its advertised
 window, one-segment output, retry and FIN behavior; it does not open a socket to
-its own WiFi address. Connections close after each phase, including cancellation
-and failure.
+its own WiFi address. It allows two local speedtest flows at a time, leaving TCP
+slots available for ordinary NAT traffic. Connections close after each phase,
+including cancellation and failure.
 There is no fixed payload size, and no acknowledgment protocol above TCP.
 
 `test-speedtest` uses a separate implementation in Lua over `gwip.lua`, with

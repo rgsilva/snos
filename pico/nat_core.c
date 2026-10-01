@@ -26,6 +26,7 @@
 #define SPEED_PORT 7778u
 #define SPEED_LINE 24u
 #define SPEED_TIMEOUT 15000u
+#define SPEED_TCP_MAX 2u
 typedef enum { FREE, CONNECTING, SYN_RCVD, SYN_SENT, EST, FIN_SENT, DONE } state_t;
 typedef enum { SPEED_REQUEST, SPEED_GO, SPEED_DOWNLOAD, SPEED_UPLOAD, SPEED_REPORT } speed_t;
 typedef struct {
@@ -68,7 +69,7 @@ struct nat {
     fwd_t fwd[NAT_TCP_MAX];
     uint32_t ident, iss, local_address, resolver[6];
     uint16_t next_eport;
-    uint8_t resolver_count, resolver_next;
+    uint8_t resolver_count, resolver_next, tcp_next;
     nat_stats_t stat;
 };
 /* The core is entered under the lwIP lock. emit copies before returning, so these
@@ -153,6 +154,9 @@ static bool emit(nat_t *n, uint32_t src, uint8_t proto, const uint8_t *body, siz
     ++n->stat.drop;
     return false;
 }
+static unsigned tcp_slot(const nat_t *n, const tcp_t *t) {
+    return (unsigned)(t - n->tcp);
+}
 static bool tcp_out(nat_t *n, tcp_t *t, uint8_t flags, const uint8_t *data, size_t len,
                     uint32_t seq) {
     uint8_t *b = tcp_scratch;
@@ -173,7 +177,10 @@ static bool tcp_out(nat_t *n, tcp_t *t, uint8_t flags, const uint8_t *data, size
     if (len)
         memcpy(b + h, data, len);
     wr16(b + 16, pseudo(t->dip, SNES, TCP, b, h + len));
-    return emit(n, t->dip, TCP, b, h + len);
+    bool sent = emit(n, t->dip, TCP, b, h + len);
+    if (sent)
+        n->tcp_next = (uint8_t)((tcp_slot(n, t) + 1) % NAT_TCP_MAX);
+    return sent;
 }
 static void rst(nat_t *n, uint32_t dip, uint16_t sport, uint16_t dport, uint32_t next,
                 uint32_t ack, bool had_ack) {
@@ -201,6 +208,13 @@ static int free_tcp(nat_t *n) {
             return (int)i;
     return -1;
 }
+static unsigned local_tcp_count(const nat_t *n) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+        if (n->tcp[i].state != FREE && n->tcp[i].local)
+            ++count;
+    return count;
+}
 static void close_tcp(nat_t *n, unsigned i) {
     if (n->tcp[i].state != FREE && !n->tcp[i].local)
         n->op.tcp_abort(n->op.arg, i);
@@ -220,8 +234,11 @@ static bool speed_line(tcp_t *t, const uint8_t *data, size_t len, uint32_t now) 
             return false;
         t->speed_line[t->speed_line_len++] = *data++;
         --len;
-        if (t->speed_line[t->speed_line_len - 1] != '\n')
+        if (t->speed_line[t->speed_line_len - 1] != '\n') {
+            if (t->speed_line_len == SPEED_LINE)
+                return false;
             continue;
+        }
         if (t->speed_state == SPEED_REQUEST) {
             uint8_t kind = t->speed_line[0];
             uint32_t frames = 0;
@@ -251,6 +268,8 @@ static bool speed_line(tcp_t *t, const uint8_t *data, size_t len, uint32_t now) 
                 return false;
             t->speed_state = t->speed_upload ? SPEED_UPLOAD : SPEED_DOWNLOAD;
             t->speed_end = now + (uint32_t)t->speed_frames * 1000u / 60u;
+            if (!t->speed_upload)
+                t->speed_deadline = t->speed_end + SPEED_TIMEOUT;
         }
         t->speed_line_len = 0;
     }
@@ -282,9 +301,17 @@ static bool speed_received(tcp_t *t, const uint8_t *data, size_t len, uint32_t n
         t->speed_count += (uint32_t)len;
     return true;
 }
-static void speed_poll(tcp_t *t, uint32_t now) {
+/* Return true when a download's hard deadline must discard in-flight data. */
+static bool speed_poll(tcp_t *t, uint32_t now) {
     if ((t->speed_state == SPEED_REQUEST || t->speed_state == SPEED_GO) &&
         reached(now, t->speed_deadline)) {
+        t->sock_eof = true;
+        t->eof_at = now;
+    }
+    if (t->speed_state == SPEED_DOWNLOAD && reached(now, t->speed_deadline)) {
+        if (t->unacked)
+            return true;
+        t->out_len = 0;
         t->sock_eof = true;
         t->eof_at = now;
     }
@@ -292,12 +319,19 @@ static void speed_poll(tcp_t *t, uint32_t now) {
         !t->out_len && !t->unacked) {
         speed_report(t);
         t->speed_state = SPEED_REPORT;
+        t->speed_deadline = 0;
     }
     if (t->speed_state == SPEED_DOWNLOAD && !t->peer_fin && !t->out_len &&
-        !t->unacked) {
+        !t->unacked && !t->sock_eof) {
         memset(t->out, 'x', MSS);
         t->out_len = MSS;
     }
+    if (t->speed_state == SPEED_REPORT && t->speed_deadline &&
+        reached(now, t->speed_deadline)) {
+        t->sock_eof = true;
+        t->eof_at = now;
+    }
+    return false;
 }
 static bool try_write(nat_t *n, unsigned i, uint32_t now) {
     tcp_t *t = &n->tcp[i];
@@ -345,6 +379,11 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
     }
     if (slot < 0) {
         if (flags & SYN) {
+            bool local_speed = dip == n->local_address && dport == SPEED_PORT;
+            if (local_speed && local_tcp_count(n) >= SPEED_TCP_MAX) {
+                ++n->stat.drop;
+                return;
+            }
             slot = free_tcp(n);
             if (slot < 0) {
                 ++n->stat.drop;
@@ -360,7 +399,7 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
             t->snd_nxt = t->snd_una = t->iss;
             t->rcv_nxt = seq + 1;
             t->touched = now;
-            if (dip == n->local_address && dport == SPEED_PORT) {
+            if (local_speed) {
                 t->local = true;
                 t->speed_state = SPEED_REQUEST;
                 t->state = SYN_RCVD;
@@ -445,6 +484,8 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
             } else if (!t->local)
                 t->close_write = true;
             if (t->local) {
+                if (t->speed_state == SPEED_DOWNLOAD && !t->unacked)
+                    t->out_len = 0;
                 t->sock_eof = true;
                 t->eof_at = now;
             }
@@ -734,16 +775,22 @@ static void poll_tcp_data(nat_t *n, unsigned i, uint32_t now) {
     tcp_t *t = &n->tcp[i];
     if (!try_write(n, i, now))
         return;
-    if (t->local)
-        speed_poll(t, now);
+    if (t->local && speed_poll(t, now)) {
+        tcp_reset(n, i);
+        return;
+    }
     if (t->out_len && t->unacked == 0) {
         size_t send_len = t->out_len > MSS ? MSS : t->out_len;
-        if (t->peer_wnd >= send_len && !busy(n) &&
+        if (t->local && t->peer_wnd < send_len)
+            send_len = t->peer_wnd;
+        if (send_len && t->peer_wnd >= send_len && !busy(n) &&
             tcp_out(n, t, PSH | ACK, t->out, send_len, t->snd_una)) {
             t->unacked = (uint16_t)send_len;
             t->snd_nxt = t->snd_una + (uint32_t)send_len;
             t->sent_at = now;
             t->retries = 0;
+            if (t->local && t->speed_state == SPEED_REPORT && send_len == t->out_len)
+                t->speed_deadline = now + SPEED_TIMEOUT;
         }
     } else if (t->unacked) {
         if (busy(n)) {
@@ -814,8 +861,11 @@ static void poll_udp(nat_t *n, uint32_t now) {
 }
 
 void nat_core_poll(nat_t *n, uint32_t now) {
-    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+    unsigned start = n->tcp_next;
+    for (unsigned offset = 0; offset < NAT_TCP_MAX; ++offset) {
+        unsigned i = (start + offset) % NAT_TCP_MAX;
         poll_tcp_slot(n, i, now);
+    }
     poll_udp(n, now);
     count(n);
 }
