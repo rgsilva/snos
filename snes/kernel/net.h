@@ -142,4 +142,13 @@ int net_ip_write(const uint8_t *src, int n);
 int net_ip_write2(const uint8_t *a, int na, const uint8_t *b, int nb);
 int net_ip_wspace(void);
 
+/* `net tune` (docs/link-throughput.md): the link's runtime knobs. Out of range
+ * is clamped; set returns what is now in force, get -1 for an unknown knob. */
+#define NET_TUNE_WINDOW 0 /* frames in flight each way on the cable, 1..8 */
+int net_tune_get(int what);
+int net_tune_set(int what, int value);
+/* Foreground, every ip_service pass: tells the peer the window when it has
+ * not heard it since its last HELLO reply. */
+void net_tune_announce(void);
+
 #endif

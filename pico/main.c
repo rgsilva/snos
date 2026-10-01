@@ -22,9 +22,9 @@ static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
 static void print_stats(bool reply) {
     port_stats_t p = port_stats(); link_stats_t l = link_stats();
     (reply ? printf : log_printf)("gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
-           " overrun=%"PRIu32" badsum=%"PRIu32" seq=%u ack=%u resends=%"PRIu32
+           " overrun=%"PRIu32" badsum=%"PRIu32" seq=%u ack=%u resends=%"PRIu32" win=%u"
            " kbd=%u mode=%s %s wifi=%s host=%s\n", p.gaps, p.complete, p.short_frames,
-           p.clocks, p.overruns, l.bad_sum, l.seq, l.ack, l.resends,
+           p.clocks, p.overruns, l.bad_sum, l.seq, l.ack, l.resends, l.window,
            (unsigned)link_queued(CH_KBD), nat_mode() ? "nat" : "relay",
            nat_mode() ? "" : relay_state(), wifi_state,
            settings.host[0] ? settings.host : "(none)");

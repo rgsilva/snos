@@ -1060,6 +1060,7 @@ void ip_service(void) {
   res_service();
   pend_service();
   net_unfwd_retry();
+  net_tune_announce();
 
   if ((uint16_t)(snos_frames - tick_last) >= IP_TICK_FRAMES) {
     tick_last = snos_frames;

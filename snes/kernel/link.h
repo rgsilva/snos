@@ -110,6 +110,8 @@
 void link_init(void);
 void link_reset(void);
 int link_present(void);
+/* The cable rather than the mailbox: only the cable can keep frames in flight. */
+int link_is_serial(void);
 
 /* A POLL IS TWO HALVES, AND THE GAP BETWEEN THEM IS WORTH A ROUND TRIP.
  *

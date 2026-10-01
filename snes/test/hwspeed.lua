@@ -7,7 +7,7 @@
 --
 -- Build and run with `make LINK_HW=1 test-hwspeed`; HWSPEED="..." sets the
 -- options below (see the Makefile), for instance
---   make LINK_HW=1 test-hwspeed HWSPEED="seconds=5 window=4 tune='net tune exch 2'"
+--   make LINK_HW=1 test-hwspeed HWSPEED="seconds=5, tune={[[net tune window 1]]}"
 -- The verdict is that all three phases complete with intact byte counts, no
 -- checksum failures and no panic; the rates are printed for the bench
 -- (docs/link-throughput.md), not asserted.

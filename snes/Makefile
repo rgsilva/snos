@@ -390,7 +390,7 @@ test-wire: $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
 # test-hwspeed`. Not in `test`: the suite runs the emulator ROM, and this
 # prints rates for docs/link-throughput.md rather than asserting them.
 # HWSPEED is a Lua table body, e.g.
-#   HWSPEED="seconds=5, window=4, tune={'net tune exch 2'}"
+#   HWSPEED="seconds=5, tune={[[net tune window 1]]}"
 # HWPROF=1 also times the kernel functions in HWPROF_FUNCS (tools/hwprof.py).
 HWPROF_FUNCS ?= snos_nmi_c net_service ip_service snos_cop_c kbd_idle uip_process \
                 net_read net_write link_serial_recv link_serial_send build_frame \

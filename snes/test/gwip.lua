@@ -48,6 +48,7 @@ local WRAM = emu.memType.snesWorkRam
 
 local C2S_HELLO = 0x04
 local C2S_IPFWD, C2S_IPUNFWD = 0x0B, 0x0C
+local C2S_LINKWIN = 0x0D
 local S2C_ERR, S2C_HELLO = 0x83, 0x84
 
 local SNES_IP = "10.0.2.15"
@@ -180,6 +181,11 @@ function G.new(opt)
       end
     elseif c.typ == C2S_IPUNFWD and #c.buf >= 3 then
       gw.unfwds = gw.unfwds + 1
+    elseif c.typ == C2S_LINKWIN and #c.buf >= 1 then
+      -- The console's window request, as pico/ctrl.c takes it. Only the
+      -- exchange-driven sender (gw:exchange) has a window to set; the
+      -- mailbox console never sends this.
+      gw.hw_window = math.max(1, math.min(8, c.buf[1]))
     end
   end
 
@@ -665,6 +671,7 @@ function G.new(opt)
           gw.socks = {}
           gw.fwd_port, gw.fwd_ch = nil, nil
           gw.hw_frames, gw.hw_base, gw.hw_cursor = {}, gw.tx_seq, gw.tx_seq
+          gw.hw_window = 1
         end
       else
         gw.peer_syn_seen = false

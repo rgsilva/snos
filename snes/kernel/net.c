@@ -16,21 +16,18 @@
  * of its own — and a checksummed, retransmitting link is also what M7's real
  * cable needs regardless of what is inside the frames.
  *
- * So: checksum, sequence number, retransmit. Stop-and-wait, which is the
- * simplest thing that is actually correct.
+ * So: checksum, sequence number, retransmit, and a window of frames in flight.
  *
- * WHAT STOP-AND-WAIT COSTS, precisely: the real link is a synchronous exchange
- * — bits shift out while other bits shift in — so a frame's acknowledgement
- * cannot possibly ride in the same exchange that carried it. The round trip is
- * intrinsically two polls, and a sender that will not advance without an ack
- * therefore moves one frame every two polls: ~30/second, ~1.7 KB/s. That is a
- * property of the wire, not of this code.
- *
- * A send window of 2 restores the full ~3.5 KB/s; 4 also absorbs a single lost
- * frame without stalling. The place to add it is tx_seq/awaiting_ack below,
- * which would become a small circular array of pending frames. Deliberately not
- * done yet: correctness first, and the real error rate is unmeasured until
- * there is a real cable to measure it on.
+ * WHY A WINDOW: the real link is a synchronous exchange — bits shift out while
+ * other bits shift in — so a frame's acknowledgement cannot ride in the
+ * exchange that carried it. The round trip is at least two polls, and a
+ * stop-and-wait sender moves one fresh frame every two: half the wire. With
+ * frames kept in flight every exchange can carry a fresh one, and the receivers
+ * were always ready for that: every peer takes frames strictly in order and
+ * acknowledges cumulatively. A window of 1 is stop-and-wait exactly as this
+ * file did it for its first two years; the mailbox backend always runs at 1,
+ * and `net tune window` puts the hardware back there
+ * (docs/link-throughput.md).
  *
  * --------------------------------------------------- who touches what, when
  *
@@ -82,6 +79,10 @@
  * use" surfaces through the path applications already handle. */
 #define C2S_IPFWD 0x0B   /* [3][ch][port lo][port hi] */
 #define C2S_IPUNFWD 0x0C /* [3][ch][port lo][port hi] */
+/* How many frames the peer may keep in flight toward us: [1][window]. A Pico
+ * that has not been asked, or an older one that does not know the verb, sends
+ * stop-and-wait; so does every peer after a console restart. */
+#define C2S_LINKWIN 0x0D
 #define S2C_ERR 0x83   /* [2][ch][code] */
 #define S2C_HELLO 0x84   /* [n][version][gateway ip as text...] */
 
@@ -199,7 +200,6 @@ static uint16_t iprx_tail; /* foreground writes */
 static uint8_t iptx[IP_TXRING];
 static uint16_t iptx_head; /* foreground writes */
 static uint16_t iptx_tail; /* NMI writes */
-static uint16_t txframe_ip; /* iptx bytes in the frame in flight */
 /* Set from the HELLO reply (version >= 2). Cleared on a peer restart: the new
  * gateway process must claim IP support again before we send it packets. */
 static volatile uint8_t ip_mode;
@@ -219,26 +219,54 @@ static uint8_t cmsg_type;
 static uint8_t cmsg_len;
 static uint8_t cmsg_state; /* 0 want type, 1 want len, 2 collecting */
 
-/* First byte beyond the previous frame's records. Everything at and past this
- * offset is already LINK_CH_PAD — net_init establishes it, every build_frame
- * restores it — so padding only has to cover the span the last frame's
- * records dirtied. The old full-width pad loop was ~35 cycles a byte through
- * `sta long`, ~4,200 cycles for the ~120 pad bytes of a receive-mostly frame,
- * i.e. nearly all of build_frame's measured cost, inside NMI, every poll. */
-static uint16_t txframe_fill;
+/* ------------------------------------------------------- the send window
+ *
+ * Frames tx_base..tx_next-1 are in flight, each in its own slot of txwin
+ * (sequence & NET_WINDOW_MASK); tx_cursor is the next of them to put on the
+ * wire again, or tx_next when none is owed. Each slot records how many control
+ * and IP bytes its frame carried, because an acknowledgement releases exactly
+ * those: recomputing from the queues' occupancy at ack time would be wrong, the
+ * foreground enqueues more while frames are in flight and the queues would be
+ * advanced past bytes never sent. txq_out and iptx_out are the bytes framed and
+ * not yet acknowledged -- where the next frame starts reading.
+ *
+ * txwin_fill is each slot's first byte beyond its last frame's records.
+ * Everything at and past it is already LINK_CH_PAD -- session_init establishes
+ * it, every build_frame restores it -- so padding only covers the span the last
+ * frame dirtied. The full-width pad loop it replaced was ~4,200 cycles a poll,
+ * nearly all of build_frame's cost, inside NMI.
+ *
+ * Only the hardware build keeps more than one slot: the emulator build only
+ * ever has the mailbox, which holds one frame per direction. */
+#ifdef LINK_HW
+#define NET_WINDOW_MAX 8
+#define NET_WINDOW_DEFAULT 4
+#else
+#define NET_WINDOW_MAX 1
+#define NET_WINDOW_DEFAULT 1
+#endif
+#define NET_WINDOW_MASK (NET_WINDOW_MAX - 1)
+typedef char net_window_power_of_two[(NET_WINDOW_MAX & NET_WINDOW_MASK) == 0 ? 1 : -1];
+static uint8_t txwin[NET_WINDOW_MAX][LINK_FRAME];
+static uint16_t txwin_fill[NET_WINDOW_MAX];
+static uint16_t txwin_ctrl[NET_WINDOW_MAX];
+static uint16_t txwin_ip[NET_WINDOW_MAX];
+static uint16_t txq_out, iptx_out;
+static uint8_t tx_base, tx_next, tx_cursor;
 static uint8_t peer_syn_seen;
 static uint8_t syn_out;
 static uint8_t rx_resync;
-static uint8_t txframe[LINK_FRAME];
 static uint8_t rxframe[LINK_FRAME];
-static uint8_t tx_seq;      /* sequence of the frame currently in flight */
 static uint8_t rx_next;     /* the sequence we are waiting to receive */
-static uint8_t awaiting_ack;
-/* How many control bytes the frame in flight carried. Recomputing this at ack
- * time from the queue's current occupancy would be wrong: the foreground can
- * enqueue more while the frame is in flight, and the queue would then be
- * advanced past bytes that were never sent. */
-static uint16_t txframe_bytes;
+
+/* `net tune` (shell.c): the window this end keeps in flight on the cable and
+ * asks the peer to keep toward it (C2S_LINKWIN, sent from the foreground by
+ * net_tune_announce). One byte, stored by the foreground and read by the NMI,
+ * so there is no torn value to guard against. window_told is net_stat_hello as
+ * of the last announcement: every HELLO reply is a peer that may have
+ * restarted, and a restarted Pico is back at a window of 1. */
+static volatile uint8_t net_window = NET_WINDOW_DEFAULT;
+static uint16_t window_told;
 
 /* The NMI handler calls net_service() from the moment interrupts are enabled,
  * which is before net_init() has run. Until then the link mailbox is still
@@ -258,7 +286,6 @@ static volatile uint8_t net_ready;
 #define NET_HOT_FRAMES 3u
 static volatile uint16_t net_hot_until;
 
-static void build_frame(void);
 
 /* kernel/netasm.s. The 8-bit sum of every frame byte except f[LINK_SUM], which
  * is what the C loop this replaces computed:
@@ -297,26 +324,32 @@ typedef char net_checksum_needs_16_byte_frames[(LINK_FRAME % 16) == 0 ? 1 : -1];
 extern void ring_move(uint8_t __far *dst, const uint8_t *src, uint16_t n);
 
 static void session_init(void) {
-  int j;
+  int j, k;
   txq_head = 0;
   txq_tail = 0;
   iprx_head = 0;
   iprx_tail = 0;
   iptx_head = 0;
   iptx_tail = 0;
-  txframe_ip = 0;
   ip_mode = 0;
   iprx_resync = 0;
   /* Establish the pad invariant build_frame relies on: everything at and
-   * beyond txframe_fill is LINK_CH_PAD. Statics are zeroed, and zero is a
+   * beyond each slot's fill is LINK_CH_PAD. Statics are zeroed, and zero is a
    * valid channel number, not PAD. */
-  for (j = 0; j < LINK_FRAME; j++) txframe[j] = LINK_CH_PAD;
-  txframe_fill = LINK_HDR;
+  for (k = 0; k < NET_WINDOW_MAX; k++) {
+    for (j = 0; j < LINK_FRAME; j++) txwin[k][j] = LINK_CH_PAD;
+    txwin_fill[k] = LINK_HDR;
+    txwin_ctrl[k] = 0;
+    txwin_ip[k] = 0;
+  }
+  txq_out = 0;
+  iptx_out = 0;
   cmsg_got = 0;
   cmsg_state = 0;
-  tx_seq = 0;
+  tx_base = 0;
+  tx_next = 0;
+  tx_cursor = 0;
   rx_next = 0;
-  awaiting_ack = 0;
   peer_syn_seen = 0;
   /* Announce our own restart until the peer acknowledges a frame. On the
    * emulated backend the gateway also notices the bridge truncating its files,
@@ -330,7 +363,7 @@ static void session_init(void) {
    * counter we just zeroed. Announce and adopt are both needed — each alone
    * fixes one direction and leaves the other deadlocked. */
   rx_resync = 1;
-  txframe_bytes = 0;
+  window_told = 0xFFFFu; /* tell the peer once it has answered a HELLO */
   net_stat_rx_frames = 0;
   net_stat_hello = 0;
   net_text[0] = 0;
@@ -338,14 +371,13 @@ static void session_init(void) {
   net_stat_bad_sum = 0;
   net_stat_resent = 0;
   net_stat_refused = 0;
-  /* rxframe only: txframe was JUST filled with LINK_CH_PAD to establish the
+  /* rxframe only: txwin was JUST filled with LINK_CH_PAD to establish the
    * pad invariant, and zeroing it here silently defeated that — unused frame
    * bytes went out as 0x00, which both parsers happen to read as empty
    * control records rather than stopping at PAD. Benign by luck, wrong by
    * the invariant this file documents. */
   for (j = 0; j < LINK_FRAME; j++) rxframe[j] = 0;
   net_hot_until = snos_frames;
-  build_frame();
 }
 
 void net_init(void) {
@@ -1001,78 +1033,120 @@ static void frame_deliver(const uint8_t *f) {
   }
 }
 
-/* Build the next outgoing frame from whatever is queued. */
-static void build_frame(void) {
+/* Build the frame with sequence tx_next into its slot, from whatever is queued
+ * beyond the bytes already in flight. Returns 1 if it carries records. It is
+ * not in flight until the caller commits it. */
+static int build_frame(uint8_t *f, uint8_t k) {
   int o = LINK_HDR;
   int n;
 
-  txframe[LINK_SEQ] = tx_seq;
-  txframe[LINK_ACK] = (uint8_t)(rx_next - 1);
-  txframe[LINK_FLAGS] = syn_out ? LINK_F_SYN : 0;
+  f[LINK_SEQ] = tx_next;
+  f[LINK_ACK] = (uint8_t)(rx_next - 1);
+  f[LINK_FLAGS] = syn_out ? LINK_F_SYN : 0;
 
   /* Control first, then IP, greedily until the frame is full. Control goes
    * first on purpose: a forward-withdrawal queued behind a datagram backlog
    * would leave the daemon's socket alive after the listener died. */
-  n = (int)((txq_head - txq_tail) & (TXQ_SIZE - 1));
+  n = (int)((txq_head - txq_tail - txq_out) & (TXQ_SIZE - 1));
   if (n > 0) {
     int room = LINK_FRAME - o - 2;
+    uint16_t at = (uint16_t)((txq_tail + txq_out) & (TXQ_SIZE - 1));
     uint16_t first;
     if (n > room) n = room;
     if (n > 255) n = 255;
-    txframe[o++] = LINK_CH_CTRL;
-    txframe[o++] = (uint8_t)n;
+    f[o++] = LINK_CH_CTRL;
+    f[o++] = (uint8_t)n;
     /* Block moves, split at the ring wrap — this runs inside NMI, and the
      * per-byte loop it replaces rebuilt a ring address every iteration at
      * the ~230-cycles/byte cost this file has already measured twice. */
-    first = (uint16_t)(TXQ_SIZE - txq_tail);
+    first = (uint16_t)(TXQ_SIZE - at);
     if (first > (uint16_t)n) first = (uint16_t)n;
-    ring_move(&txframe[o], &txq[txq_tail], first);
+    ring_move(&f[o], &txq[at], first);
     if (first < (uint16_t)n)
-      ring_move(&txframe[o + first], &txq[0], (uint16_t)((uint16_t)n - first));
+      ring_move(&f[o + first], &txq[0], (uint16_t)((uint16_t)n - first));
     o += n;
-    txframe[LINK_FLAGS] |= LINK_F_DATA;
+    f[LINK_FLAGS] |= LINK_F_DATA;
   }
-  txframe_bytes = (uint16_t)(n > 0 ? n : 0);
+  txwin_ctrl[k] = (uint16_t)(n > 0 ? n : 0);
 
   /* Then IP — which is everything except control now. The channel txrings
    * never reach this function: uIP consumes them in the foreground and what
    * leaves the wire is the resulting datagrams. */
   {
-    int have = (int)((iptx_head - iptx_tail) & (IP_TXRING - 1));
+    int have = (int)((iptx_head - iptx_tail - iptx_out) & (IP_TXRING - 1));
     int room = LINK_FRAME - o - 2;
+    uint16_t at = (uint16_t)((iptx_tail + iptx_out) & (IP_TXRING - 1));
     uint16_t first;
-    txframe_ip = 0;
+    txwin_ip[k] = 0;
     if (ip_mode && have > 0 && room > 0) {
       if (have > room) have = room;
       if (have > 255) have = 255;
-      txframe[o++] = LINK_CH_IP;
-      txframe[o++] = (uint8_t)have;
+      f[o++] = LINK_CH_IP;
+      f[o++] = (uint8_t)have;
       /* Same block-move discipline as the control copy above; since the
        * cutover EVERY payload byte on the wire passes through here, so
        * this is the frame builder's whole variable cost. */
-      first = (uint16_t)(IP_TXRING - iptx_tail);
+      first = (uint16_t)(IP_TXRING - at);
       if (first > (uint16_t)have) first = (uint16_t)have;
-      ring_move(&txframe[o], &iptx[iptx_tail], first);
+      ring_move(&f[o], &iptx[at], first);
       if (first < (uint16_t)have)
-        ring_move(&txframe[o + first], &iptx[0],
-                  (uint16_t)((uint16_t)have - first));
+        ring_move(&f[o + first], &iptx[0], (uint16_t)((uint16_t)have - first));
       o += have;
-      txframe_ip = (uint16_t)have;
-      txframe[LINK_FLAGS] |= LINK_F_DATA;
+      txwin_ip[k] = (uint16_t)have;
+      f[LINK_FLAGS] |= LINK_F_DATA;
     }
   }
 
-  /* Re-pad only what the previous frame's records covered (see txframe_fill);
+  /* Re-pad only what this slot's previous frame covered (see txwin_fill);
    * the checksum still sums the whole frame, so a hole in the invariant would
    * fail loudly on the far side rather than corrupt silently. */
   {
-    uint16_t end = txframe_fill;
+    uint16_t end = txwin_fill[k];
     uint16_t rec_end = (uint16_t)o;
-    while (o < (int)end) txframe[o++] = LINK_CH_PAD;
-    txframe_fill = rec_end;
+    while (o < (int)end) f[o++] = LINK_CH_PAD;
+    txwin_fill[k] = rec_end;
   }
-  txframe[LINK_SUM] = 0;
-  txframe[LINK_SUM] = net_checksum(txframe, LINK_FRAME);
+  f[LINK_SUM] = 0;
+  f[LINK_SUM] = net_checksum(f, LINK_FRAME);
+  return (f[LINK_FLAGS] & LINK_F_DATA) != 0;
+}
+
+/* The mailbox holds one frame per direction: a second fresh frame before the
+ * bridge has read the first would overwrite it unread. */
+static uint8_t net_window_now(void) {
+  return link_is_serial() ? net_window : 1;
+}
+
+int net_tune_get(int what) {
+  if (what == NET_TUNE_WINDOW) return net_window;
+  return -1;
+}
+
+int net_tune_set(int what, int value) {
+  if (what == NET_TUNE_WINDOW) {
+    if (value < 1) value = 1;
+    if (value > NET_WINDOW_MAX) value = NET_WINDOW_MAX;
+    net_window = (uint8_t)value;
+    window_told = 0xFFFFu; /* tell the peer on the next pass */
+    return value;
+  }
+  return -1;
+}
+
+/* Ask the peer for the window we keep (C2S_LINKWIN), from the foreground
+ * because txq's head is foreground-owned. Once per HELLO reply: a peer that
+ * restarted has forgotten, and comes back answering HELLO. Only on the cable:
+ * the emulator's gateways have no window to set. */
+void net_tune_announce(void) {
+  if (!link_is_serial() || net_gw_version == 0 || window_told == net_stat_hello) return;
+  proc_lock();
+  if (txq_space() >= 3) {
+    txq_put(C2S_LINKWIN);
+    txq_put(1);
+    txq_put(net_window);
+    window_told = net_stat_hello;
+  }
+  proc_unlock();
 }
 
 /* One poll: take what arrived, act on it, build the answer, put it on the wire.
@@ -1088,6 +1162,7 @@ static void build_frame(void) {
  * Receive strictly before send is still an invariant, not a preference — see
  * link.h. Nothing may touch the link mailbox between the two calls. */
 void net_service(void) {
+  uint8_t n, k, flying, w;
   if (!net_ready || !net_up()) return;
 
   if (link_recv(rxframe)) {
@@ -1103,22 +1178,30 @@ void net_service(void) {
         rx_next = rxframe[LINK_SEQ];
       }
 
-      /* An ack for the frame in flight releases it. Both sources the frame
-       * drew from advance by what THAT frame carried, recorded when it was
-       * built — recomputing from current occupancy would be wrong, because
-       * the foreground can enqueue more while the frame is in flight. */
-      if (awaiting_ack && rxframe[LINK_ACK] == tx_seq) {
-        txq_tail = (uint16_t)((txq_tail + txframe_bytes) & (TXQ_SIZE - 1));
-        txframe_bytes = 0;
-        iptx_tail = (uint16_t)((iptx_tail + txframe_ip) & (IP_TXRING - 1));
-        txframe_ip = 0;
-        awaiting_ack = 0;
-        tx_seq++;
-        syn_out = 0; /* it acked us, so it has our sequence base */
-        /* The peer just acknowledged us: it is alive and mid-conversation,
-         * so keep the foreground polling — the next frame we build (more of
-         * this transfer, usually) should not wait for an NMI. */
-        net_hot_until = (uint16_t)(snos_frames + NET_HOT_FRAMES);
+      /* An ack releases every frame up to it — acknowledgements are
+       * cumulative on every peer. Both sources a frame drew from advance by
+       * what THAT frame carried, recorded when it was built. */
+      {
+        uint8_t n = (uint8_t)(rxframe[LINK_ACK] - tx_base + 1);
+        if (n != 0 && n <= (uint8_t)(tx_next - tx_base)) {
+          do {
+            uint8_t k = (uint8_t)(tx_base & NET_WINDOW_MASK);
+            txq_tail = (uint16_t)((txq_tail + txwin_ctrl[k]) & (TXQ_SIZE - 1));
+            txq_out = (uint16_t)(txq_out - txwin_ctrl[k]);
+            iptx_tail = (uint16_t)((iptx_tail + txwin_ip[k]) & (IP_TXRING - 1));
+            iptx_out = (uint16_t)(iptx_out - txwin_ip[k]);
+            txwin_ctrl[k] = 0;
+            txwin_ip[k] = 0;
+            tx_base++;
+          } while (--n != 0);
+          if ((uint8_t)(tx_cursor - tx_base) > (uint8_t)(tx_next - tx_base))
+            tx_cursor = tx_base;
+          syn_out = 0; /* it acked us, so it has our sequence base */
+          /* The peer just acknowledged us: it is alive and mid-conversation,
+           * so keep the foreground polling — the next frame we build (more of
+           * this transfer, usually) should not wait for an NMI. */
+          net_hot_until = (uint16_t)(snos_frames + NET_HOT_FRAMES);
+        }
       }
       /* The peer restarted. Adopt its sequence base, once, and fail every
        * channel: whatever sockets those represented died with it, so an app
@@ -1146,7 +1229,8 @@ void net_service(void) {
           cmsg_state = 0;
           cmsg_got = 0;
           iptx_tail = iptx_head;
-          txframe_ip = 0;
+          iptx_out = 0;
+          for (n = 0; n < NET_WINDOW_MAX; n++) txwin_ip[n] = 0;
           iprx_mark = iprx_head;
           iprx_resync = 1;
         }
@@ -1178,10 +1262,23 @@ void net_service(void) {
     }
   }
 
-  if (!awaiting_ack) {
-    build_frame();
-    if ((txframe[LINK_FLAGS] & LINK_F_DATA) != 0) {
-      awaiting_ack = 1;
+  /* A fresh frame if the window has room and there is something to say;
+   * otherwise go back to the oldest unacknowledged frame and resend from
+   * there. Receivers take frames strictly in order, so after a loss
+   * everything behind it must come again; a repeat the peer already has costs
+   * only the exchange. At a window of 1 this is stop-and-wait exactly: build
+   * when nothing is in flight, resend the one frame when something is. While
+   * our SYN is unacknowledged the window is 1 — the receiver adopts the first
+   * SYN frame it sees, and a second in flight could be adopted instead. */
+  flying = (uint8_t)(tx_next - tx_base);
+  w = syn_out ? 1 : net_window_now();
+  if (tx_cursor == tx_next && flying < w) {
+    k = (uint8_t)(tx_next & NET_WINDOW_MASK);
+    if (build_frame(txwin[k], k)) {
+      txq_out = (uint16_t)(txq_out + txwin_ctrl[k]);
+      iptx_out = (uint16_t)(iptx_out + txwin_ip[k]);
+      tx_next++;
+      tx_cursor = tx_next;
       /* We just put fresh data on the wire; poll for the ack rather than
        * waiting a frame for it. Deliberately NOT stamped on the resend path
        * below: against a dead peer the resends would otherwise keep the
@@ -1191,18 +1288,26 @@ void net_service(void) {
        * NET_HOT_FRAMES, and retransmission falls back to the NMI's 60 Hz —
        * exactly the rate it has always run at. */
       net_hot_until = (uint16_t)(snos_frames + NET_HOT_FRAMES);
+      link_send(txwin[k]);
+      return;
     }
-  } else {
-    /* Still unacknowledged: resend the identical frame, but refresh the ack
-     * field so a retransmission also carries our latest receive state. */
-    net_stat_resent++;
-    txframe[LINK_ACK] = (uint8_t)(rx_next - 1);
-    txframe[LINK_SUM] = 0;
-    txframe[LINK_SUM] = net_checksum(txframe, LINK_FRAME);
+    if (flying == 0) {
+      link_send(txwin[k]); /* nothing to say and nothing owed: the ack alone */
+      return;
+    }
   }
+  if (tx_cursor == tx_next) tx_cursor = tx_base;
+  /* Resend, with the ack field refreshed so a retransmission also carries our
+   * latest receive state. */
+  k = (uint8_t)(tx_cursor & NET_WINDOW_MASK);
+  tx_cursor++;
+  net_stat_resent++;
+  txwin[k][LINK_ACK] = (uint8_t)(rx_next - 1);
+  txwin[k][LINK_SUM] = 0;
+  txwin[k][LINK_SUM] = net_checksum(txwin[k], LINK_FRAME);
 
   /* Last, and only now: the frame above carries this poll's ack. */
-  link_send(txframe);
+  link_send(txwin[k]);
 }
 
 /* ------------------------------------------------- foreground extra polls

@@ -99,6 +99,7 @@ the host bench's, at that commit.
 |---|---|---|---|---|
 | baseline (silicon: 876 / 919 / 876 + 561) | 876 | 919 | 876 + 561 | 1022 / 1021 / 876 + 612 |
 | 2. the turnaround is CPU | 1314 | 1226 | 1314 + 510 | 1460 / 1277 / 1314 + 510 |
+| 3. link window (4) | 2336 | 1839 | 2172 + 817 | 2482 / 2043 / 2336 + 868 |
 
 ### 2. The turnaround is CPU
 
@@ -125,3 +126,34 @@ exchange itself 112k, `proc_tick` 22k, the rest net_service's C), and in the
 foreground `con_flush` 28k and an idle `ip_service` pass 39k before the
 application runs. `proc_tick` and `con_flush` are not the link's and are
 left alone here.
+
+### 3. A link window
+
+Both senders keep frames in flight: `net.c`'s txwin slots on the console,
+`pico/link.c`'s frames[] on the Pico. Acks are cumulative; a full window, or
+nothing new to say, goes back to the oldest unacknowledged frame. Nothing
+about the frame changed, and no receiver did: every peer already took frames
+strictly in order and acknowledged cumulatively (gwip.lua has pipelined
+toward the console with go-back-N since M6).
+
+Window 1 is stop-and-wait frame for frame -- `link_test.py`'s 10,000-exchange
+differential against gateway.py's sender still passes, and on the hardware
+ROM `net tune window 1` reproduces step 2 to the byte. The console asks the
+Pico for its window with a new control verb, `C2S_LINKWIN` (0x0D, `[1][n]`),
+after every HELLO reply; the Pico starts at 1 and goes back to 1 whenever the
+console restarts, so an old ROM never gets anything but today's protocol, and
+an old Pico ignores the verb (ctrl.c has always skipped unknown types). The
+mailbox backend always runs at 1: it holds one frame per direction. While a
+sender's own SYN is unacknowledged its window is 1, because the receiver
+adopts the first SYN frame it sees.
+
+At one exchange a frame a window of 2 is all it takes: the reply to exchange
+k is on the wire at k+1 (the auto-read restage), so two frames in flight keep
+every exchange fresh; 3, 4 and 8 measure the same. The default is 4, because
+the next step makes the reply latency two exchanges on some of them.
+
+`pico/tests/window_test.py` runs the real console `net.c` against the real
+`pico/link.c` over a channel that loses, corrupts, repeats, skips and delays
+frames both ways while the console stops reading for stretches: every pair
+of windows 1..8, exactly-once in-order delivery of IP both ways and keyboard
+records, 64/64.
