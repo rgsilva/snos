@@ -23,16 +23,27 @@
 #define FIN_GRACE 750u /* slirp.py FIN_GRACE */
 #define INBOUND_CAP 4u /* slirp.py INBOUND_CAP */
 #define TCP_RX (2 * MSS)
+#define SPEED_PORT 7778u
+#define SPEED_LINE 24u
+#define SPEED_TIMEOUT 15000u
+#define SPEED_TCP_MAX 2u
 typedef enum { FREE, CONNECTING, SYN_RCVD, SYN_SENT, EST, FIN_SENT, DONE } state_t;
+typedef enum { SPEED_REQUEST, SPEED_GO, SPEED_DOWNLOAD, SPEED_UPLOAD, SPEED_REPORT } speed_t;
 typedef struct {
     state_t state;
     uint16_t sport, dport;
     uint32_t dip, iss, snd_nxt, snd_una, rcv_nxt;
     uint16_t peer_wnd, unacked, out_len, in_len;
     uint8_t retries;
-    bool peer_fin, sock_eof, fin_sent, inbound, close_write, unsent;
-    uint32_t touched, sent_at, eof_at, last_console, closed_at;
+    bool peer_fin, sock_eof, fin_sent, inbound, close_write, unsent, local, speed_upload;
+    bool retry_busy_early;
+    bool speed_deadline_set, local_deadline_set;
+    uint32_t touched, sent_at, eof_at, last_console, closed_at, local_deadline;
+    uint32_t speed_deadline, speed_end, speed_count;
+    uint16_t speed_frames;
+    uint8_t speed_state, speed_line_len;
     uint8_t out[TCP_RX], in[MSS];
+    uint8_t speed_line[SPEED_LINE];
 } tcp_t;
 typedef struct {
     bool used;
@@ -58,9 +69,9 @@ struct nat {
     tcp_t tcp[NAT_TCP_MAX];
     udp_t udp[NAT_UDP_MAX];
     fwd_t fwd[NAT_TCP_MAX];
-    uint32_t ident, iss, resolver[6];
+    uint32_t ident, iss, local_address, resolver[6];
     uint16_t next_eport;
-    uint8_t resolver_count, resolver_next;
+    uint8_t resolver_count, resolver_next, tcp_next;
     nat_stats_t stat;
 };
 /* The core is entered under the lwIP lock. emit copies before returning, so these
@@ -99,14 +110,20 @@ static uint16_t pseudo(uint32_t src, uint32_t dst, uint8_t proto, const uint8_t 
 static bool expired(uint32_t now, uint32_t then, uint32_t span) {
     return (uint32_t)(now - then) > span;
 }
+static bool reached(uint32_t now, uint32_t deadline) {
+    return (int32_t)(now - deadline) >= 0;
+}
 static bool busy(nat_t *n) {
     return n->adapter.link_busy && n->adapter.link_busy(n->op.arg);
 }
 static void count(nat_t *n) {
-    n->stat.tcp = n->stat.udp = n->stat.forwards = 0;
+    n->stat.tcp = n->stat.udp = n->stat.forwards = n->stat.speed = 0;
     for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
-        if (n->tcp[i].state != FREE)
+        if (n->tcp[i].state != FREE) {
             ++n->stat.tcp;
+            if (n->tcp[i].local)
+                ++n->stat.speed;
+        }
     for (unsigned i = 0; i < NAT_UDP_MAX; ++i)
         if (n->udp[i].used)
             ++n->stat.udp;
@@ -138,6 +155,18 @@ static bool emit(nat_t *n, uint32_t src, uint8_t proto, const uint8_t *body, siz
     }
     ++n->stat.drop;
     return false;
+}
+static void tcp_served(nat_t *n, unsigned i) {
+    n->tcp_next = (uint8_t)((i + 1) % NAT_TCP_MAX);
+}
+/* Preserve the old one-shot deferral when an already-due retry first finds a
+ * busy link.  Once a flow has seen the link busy during its RTO, however, do
+ * not move that RTO again: repeated busy/clear polling must not starve it. */
+static void defer_retry(tcp_t *t, uint32_t now) {
+    if (!expired(now, t->sent_at, RTO))
+        t->retry_busy_early = true;
+    else if (!t->retry_busy_early)
+        t->sent_at = now;
 }
 static bool tcp_out(nat_t *n, tcp_t *t, uint8_t flags, const uint8_t *data, size_t len,
                     uint32_t seq) {
@@ -187,8 +216,15 @@ static int free_tcp(nat_t *n) {
             return (int)i;
     return -1;
 }
+static unsigned local_tcp_count(const nat_t *n) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+        if (n->tcp[i].state != FREE && n->tcp[i].local)
+            ++count;
+    return count;
+}
 static void close_tcp(nat_t *n, unsigned i) {
-    if (n->tcp[i].state != FREE)
+    if (n->tcp[i].state != FREE && !n->tcp[i].local)
         n->op.tcp_abort(n->op.arg, i);
     memset(&n->tcp[i], 0, sizeof(n->tcp[i]));
 }
@@ -199,19 +235,152 @@ static void tcp_reset(nat_t *n, unsigned i) {
 }
 /* A queued lwIP write is accepted on the next poll.  Leaving the console
  * segment pending until then means a reset cannot leave its ACK on the link. */
-static void try_write(nat_t *n, unsigned i) {
+/* The local peer uses the NAT's console-facing TCP flow, not an lwIP socket. */
+static bool speed_line(tcp_t *t, const uint8_t *data, size_t len, uint32_t now) {
+    while (len && (t->speed_state == SPEED_REQUEST || t->speed_state == SPEED_GO)) {
+        if (t->speed_line_len == SPEED_LINE)
+            return false;
+        t->speed_line[t->speed_line_len++] = *data++;
+        --len;
+        if (t->speed_line[t->speed_line_len - 1] != '\n') {
+            if (t->speed_line_len == SPEED_LINE)
+                return false;
+            continue;
+        }
+        if (t->speed_state == SPEED_REQUEST) {
+            uint8_t kind = t->speed_line[0];
+            uint32_t frames = 0;
+            if (t->speed_line_len < 5 || (kind != 'D' && kind != 'U') ||
+                t->speed_line[1] != ' ')
+                return false;
+            for (unsigned i = 2; i + 1 < t->speed_line_len; ++i) {
+                uint8_t c = t->speed_line[i];
+                if (c < '0' || c > '9')
+                    return false;
+                frames = frames * 10u + c - '0';
+                if (frames > 7200u)
+                    return false;
+            }
+            if (frames < 60u)
+                return false;
+            t->speed_frames = (uint16_t)frames;
+            t->speed_upload = kind == 'U';
+            t->speed_state = SPEED_GO;
+            t->speed_deadline = now + SPEED_TIMEOUT;
+            t->speed_deadline_set = true;
+            t->out[0] = 'O';
+            t->out[1] = 'K';
+            t->out[2] = '\n';
+            t->out_len = 3;
+        } else if (t->speed_state == SPEED_GO) {
+            if (t->speed_line_len != 3 || memcmp(t->speed_line, "GO\n", 3))
+                return false;
+            t->speed_state = t->speed_upload ? SPEED_UPLOAD : SPEED_DOWNLOAD;
+            t->speed_end = now + (uint32_t)t->speed_frames * 1000u / 60u;
+            if (!t->speed_upload) {
+                t->speed_deadline = t->speed_end + SPEED_TIMEOUT;
+                t->speed_deadline_set = true;
+            }
+        }
+        t->speed_line_len = 0;
+    }
+    if (t->speed_state == SPEED_DOWNLOAD && len)
+        return false;
+    if (t->speed_state == SPEED_UPLOAD && !reached(now, t->speed_end))
+        t->speed_count += (uint32_t)len;
+    return true;
+}
+static void speed_report(tcp_t *t) {
+    uint8_t digits[10];
+    unsigned n = 0;
+    uint32_t value = t->speed_count;
+    do {
+        digits[n++] = (uint8_t)('0' + value % 10u);
+        value /= 10u;
+    } while (value);
+    for (unsigned i = 0; i < n; ++i)
+        t->out[i] = digits[n - 1 - i];
+    t->out[n] = '\n';
+    t->out_len = (uint16_t)(n + 1);
+}
+static bool speed_received(tcp_t *t, const uint8_t *data, size_t len, uint32_t now) {
+    if (t->speed_state == SPEED_REQUEST || t->speed_state == SPEED_GO)
+        return speed_line(t, data, len, now);
+    if (t->speed_state == SPEED_DOWNLOAD)
+        return false;
+    if (t->speed_state == SPEED_UPLOAD && !reached(now, t->speed_end))
+        t->speed_count += (uint32_t)len;
+    return true;
+}
+/* Return true when a download's hard deadline must discard in-flight data. */
+static bool speed_poll(tcp_t *t, uint32_t now) {
+    if ((t->speed_state == SPEED_REQUEST || t->speed_state == SPEED_GO) &&
+        t->speed_deadline_set && reached(now, t->speed_deadline)) {
+        if (t->out_len || t->unacked)
+            return true;
+        if (!t->sock_eof) {
+            t->sock_eof = true;
+            t->eof_at = now;
+            t->local_deadline = now + 2 * SPEED_TIMEOUT;
+            t->local_deadline_set = true;
+        }
+    }
+    if (t->speed_state == SPEED_DOWNLOAD && t->speed_deadline_set &&
+        reached(now, t->speed_deadline)) {
+        if (t->unacked)
+            return true;
+        t->out_len = 0;
+        if (!t->sock_eof) {
+            t->sock_eof = true;
+            t->eof_at = now;
+            t->local_deadline = now + 2 * SPEED_TIMEOUT;
+            t->local_deadline_set = true;
+        }
+    }
+    if (t->speed_state == SPEED_UPLOAD && reached(now, t->speed_end) &&
+        !t->out_len && !t->unacked) {
+        speed_report(t);
+        t->speed_state = SPEED_REPORT;
+        t->speed_deadline = now + SPEED_TIMEOUT;
+        t->speed_deadline_set = true;
+    }
+    if (t->speed_state == SPEED_DOWNLOAD && !t->peer_fin && !t->out_len &&
+        !t->unacked && !t->sock_eof) {
+        memset(t->out, 'x', MSS);
+        t->out_len = MSS;
+    }
+    if (t->speed_state == SPEED_REPORT && t->speed_deadline_set &&
+        reached(now, t->speed_deadline)) {
+        if (t->out_len || t->unacked)
+            return true;
+        if (!t->sock_eof) {
+            t->sock_eof = true;
+            t->eof_at = now;
+            t->local_deadline = now + 2 * SPEED_TIMEOUT;
+            t->local_deadline_set = true;
+        }
+    }
+    return false;
+}
+static bool try_write(nat_t *n, unsigned i, uint32_t now) {
     tcp_t *t = &n->tcp[i];
     if (!t->in_len)
-        return;
-    if (!n->op.tcp_write(n->op.arg, i, t->in, t->in_len))
-        return;
+        return true;
+    if (t->local) {
+        if (!speed_received(t, t->in, t->in_len, now)) {
+            tcp_reset(n, i);
+            return false;
+        }
+    } else if (!n->op.tcp_write(n->op.arg, i, t->in, t->in_len))
+        return true;
     t->rcv_nxt += t->in_len;
     t->in_len = 0;
     (void)tcp_out(n, t, ACK, NULL, 0, t->snd_nxt);
-    if (t->close_write) {
+    if (t->close_write && !t->local) {
         n->op.tcp_shutdown(n->op.arg, i);
         t->close_write = false;
     }
+    return true;
 }
 /* TCP is intentionally stop-and-wait at the adapter boundary.  In particular,
  * the peer window is recorded on every segment and gates new output in poll. */
@@ -239,6 +408,11 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
     }
     if (slot < 0) {
         if (flags & SYN) {
+            bool local_speed = dip == n->local_address && dport == SPEED_PORT;
+            if (local_speed && local_tcp_count(n) >= SPEED_TCP_MAX) {
+                ++n->stat.drop;
+                return;
+            }
             slot = free_tcp(n);
             if (slot < 0) {
                 ++n->stat.drop;
@@ -254,7 +428,16 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
             t->snd_nxt = t->snd_una = t->iss;
             t->rcv_nxt = seq + 1;
             t->touched = now;
-            if (!n->op.tcp_connect(n->op.arg, slot, dip, dport))
+            if (local_speed) {
+                t->local = true;
+                t->speed_state = SPEED_REQUEST;
+                t->state = SYN_RCVD;
+                t->local_deadline = now + 2 * SPEED_TIMEOUT;
+                t->local_deadline_set = true;
+                t->unsent = !tcp_out(n, t, SYN | ACK, NULL, 0, t->iss);
+                t->snd_nxt = t->iss + 1;
+                t->sent_at = now;
+            } else if (!n->op.tcp_connect(n->op.arg, slot, dip, dport))
                 tcp_reset(n, slot);
         } else if (!(flags & RST))
             rst(n, dip, sport, dport, seq + (uint32_t)dn + ((flags & FIN) ? 1 : 0), ack,
@@ -275,6 +458,11 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
             return;
         t->state = EST;
         t->snd_una = ack;
+        if (t->local) {
+            t->speed_deadline = now + SPEED_TIMEOUT;
+            t->speed_deadline_set = true;
+            t->local_deadline_set = false;
+        }
     }
     if (t->state == SYN_SENT) {
         if ((flags & (SYN | ACK)) == (SYN | ACK) && ack == t->iss + 1) {
@@ -313,7 +501,8 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
             memcpy(t->in, data, dn);
             t->in_len = dn;
             t->last_console = now;
-            try_write(n, (unsigned)slot);
+            if (!try_write(n, (unsigned)slot, now))
+                return;
         } else
             (void)tcp_out(n, t, ACK, NULL, 0, t->snd_nxt);
     }
@@ -323,10 +512,19 @@ static void in_tcp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
             t->rcv_nxt++;
             t->peer_fin = true;
             (void)tcp_out(n, t, ACK, NULL, 0, t->snd_nxt);
-            if (!t->in_len)
-                n->op.tcp_shutdown(n->op.arg, (unsigned)slot);
-            else
+            if (!t->in_len) {
+                if (!t->local)
+                    n->op.tcp_shutdown(n->op.arg, (unsigned)slot);
+            } else if (!t->local)
                 t->close_write = true;
+            if (t->local) {
+                if (t->speed_state == SPEED_DOWNLOAD)
+                    t->out_len = t->unacked;
+                t->sock_eof = true;
+                t->eof_at = now;
+                t->local_deadline = now + 2 * SPEED_TIMEOUT;
+                t->local_deadline_set = true;
+            }
         } else if (t->peer_fin && fs + 1 == t->rcv_nxt)
             (void)tcp_out(n, t, ACK, NULL, 0, t->snd_nxt);
     }
@@ -411,6 +609,9 @@ void nat_core_set_resolvers(nat_t *n, const uint32_t *a, size_t count) {
     memcpy(n->resolver, resolvers, valid * sizeof(*a));
     n->resolver_count = (uint8_t)valid;
     n->resolver_next = 0;
+}
+void nat_core_set_local_address(nat_t *n, uint32_t address) {
+    n->local_address = address;
 }
 void nat_core_set_adapter(nat_t *n, bool (*emit_try)(void *, const uint8_t *, size_t),
                           bool (*link_busy)(void *), void (*udp_close)(void *, unsigned),
@@ -581,13 +782,13 @@ void nat_core_forward_del(nat_t *n, uint16_t port, uint8_t ch) {
             return;
         }
 }
-/* Handshake RTOs wait for a clear link.  Otherwise a full outbound queue
- * would spend retries even though the segment was never deliverable. */
+/* A busy link defers handshake retries without moving their deadline.  This
+ * lets the next clear output opportunity serve an already-due flow. */
 static void poll_handshake(nat_t *n, unsigned i, uint32_t now) {
     tcp_t *t = &n->tcp[i];
     if (busy(n)) {
-        /* The RTO starts when the link can carry the segment again. */
-        t->sent_at = now;
+        if (!t->unsent)
+            defer_retry(t, now);
         return;
     }
     if (!t->unsent && !expired(now, t->sent_at, RTO))
@@ -601,6 +802,8 @@ static void poll_handshake(nat_t *n, unsigned i, uint32_t now) {
             ++t->retries;
         t->unsent = false;
         t->sent_at = now;
+        t->retry_busy_early = false;
+        tcp_served(n, i);
     }
 }
 
@@ -608,19 +811,32 @@ static void poll_handshake(nat_t *n, unsigned i, uint32_t now) {
  * only after output drains, and applies FIN_GRACE only to inbound flows. */
 static void poll_tcp_data(nat_t *n, unsigned i, uint32_t now) {
     tcp_t *t = &n->tcp[i];
-    try_write(n, i);
+    if (!try_write(n, i, now))
+        return;
+    if (t->local && speed_poll(t, now)) {
+        tcp_reset(n, i);
+        return;
+    }
     if (t->out_len && t->unacked == 0) {
         size_t send_len = t->out_len > MSS ? MSS : t->out_len;
-        if (t->peer_wnd >= send_len && !busy(n) &&
+        if (t->local && t->peer_wnd < send_len)
+            send_len = t->peer_wnd;
+        if (send_len && t->peer_wnd >= send_len && !busy(n) &&
             tcp_out(n, t, PSH | ACK, t->out, send_len, t->snd_una)) {
             t->unacked = (uint16_t)send_len;
             t->snd_nxt = t->snd_una + (uint32_t)send_len;
             t->sent_at = now;
             t->retries = 0;
+            t->retry_busy_early = false;
+            if (t->local && t->speed_state == SPEED_REPORT && send_len == t->out_len) {
+                t->speed_deadline = now + SPEED_TIMEOUT;
+                t->speed_deadline_set = true;
+            }
+            tcp_served(n, i);
         }
     } else if (t->unacked) {
         if (busy(n)) {
-            t->sent_at = now;
+            defer_retry(t, now);
         } else if (expired(now, t->sent_at, RTO)) {
             if (t->retries >= DATA_RETRIES) {
                 tcp_reset(n, i);
@@ -629,6 +845,8 @@ static void poll_tcp_data(nat_t *n, unsigned i, uint32_t now) {
             if (tcp_out(n, t, PSH | ACK, t->out, t->unacked, t->snd_una)) {
                 ++t->retries;
                 t->sent_at = now;
+                t->retry_busy_early = false;
+                tcp_served(n, i);
             }
         }
     } else if (t->sock_eof && !t->fin_sent && !t->out_len &&
@@ -639,9 +857,11 @@ static void poll_tcp_data(nat_t *n, unsigned i, uint32_t now) {
         t->snd_nxt++;
         t->sent_at = now;
         t->retries = 0;
+        t->retry_busy_early = false;
+        tcp_served(n, i);
     } else if (t->fin_sent) {
         if (busy(n)) {
-            t->sent_at = now;
+            defer_retry(t, now);
         } else if (expired(now, t->sent_at, RTO)) {
             if (t->retries >= MAX_RETRIES) {
                 close_tcp(n, i);
@@ -650,6 +870,8 @@ static void poll_tcp_data(nat_t *n, unsigned i, uint32_t now) {
             if (tcp_out(n, t, FIN | ACK, NULL, 0, t->snd_nxt - 1)) {
                 ++t->retries;
                 t->sent_at = now;
+                t->retry_busy_early = false;
+                tcp_served(n, i);
             }
         }
     }
@@ -661,6 +883,10 @@ static void poll_tcp_slot(nat_t *n, unsigned i, uint32_t now) {
     tcp_t *t = &n->tcp[i];
     if (t->state == FREE)
         return;
+    if (t->local && t->local_deadline_set && reached(now, t->local_deadline)) {
+        tcp_reset(n, i);
+        return;
+    }
     if (t->state == DONE) {
         if (expired(now, t->closed_at, TIME_WAIT))
             close_tcp(n, i);
@@ -687,8 +913,11 @@ static void poll_udp(nat_t *n, uint32_t now) {
 }
 
 void nat_core_poll(nat_t *n, uint32_t now) {
-    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+    unsigned start = n->tcp_next;
+    for (unsigned offset = 0; offset < NAT_TCP_MAX; ++offset) {
+        unsigned i = (start + offset) % NAT_TCP_MAX;
         poll_tcp_slot(n, i, now);
+    }
     poll_udp(n, now);
     count(n);
 }

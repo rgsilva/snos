@@ -457,6 +457,7 @@ void nat_configure(bool wifi_up) {
     uint32_t v = ip4_number(a);
     uint8_t b[] = {v >> 24, v >> 16, v >> 8, v};
     ctrl_address(b);
+    nat_core_set_local_address(core, v);
     uint32_t resolvers[6], fallback[] = {0x01010101u, 0x08080808u};
     size_t n = 0;
     for (unsigned i = 0; i < DNS_MAX_SERVERS && n < sizeof(resolvers) / sizeof(*resolvers); ++i) {
@@ -549,6 +550,6 @@ nat_stats_t nat_stats(void) {
     cyw43_arch_lwip_begin();
     nat_stats_t s = nat_core_stats(core);
     cyw43_arch_lwip_end();
-    r = (nat_stats_t){s.in, s.out, s.drop, s.tcp, s.udp, s.forwards};
+    r = (nat_stats_t){s.in, s.out, s.drop, s.tcp, s.udp, s.forwards, s.speed};
     return r;
 }

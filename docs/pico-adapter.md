@@ -306,6 +306,14 @@ after the console ACKs. RTO is 2.5 s, data retries 120, idle 300 s,
 TIME_WAIT 4 s, inbound FIN grace 750 ms and the per-port accept cap is 4,
 matching `slirp.py`.
 
+Port 7778 at the DHCP address reported in HELLO is a local speedtest peer.
+It is a NAT-core flow, not a loopback lwIP socket: its protocol source/sink
+therefore follows the same console window, one-segment output, busy-link
+deferral, retry and FIN rules as an external TCP flow. `net speedtest` with no
+argument measures the console-to-Pico link in tier 2; an explicit host and port
+continues to use a remote peer, and tier 1 remains the PC `speedtest.py` path.
+The `nat:` status line reports active local peers as `speed=`.
+
 UDP has eight fixed flows and preserves the console-visible source address.
 `10.0.2.3` rotates the DHCP resolvers and falls back to 1.1.1.1 then 8.8.8.8;
 unchanged DHCP configuration keeps its retry cursor, and unspecified
@@ -320,7 +328,7 @@ queued, and mode/reset tears down their listeners and PCBs. HELLO reports the
 DHCP IPv4 address. Foreground raw-API calls are under
 `cyw43_arch_lwip_begin/end`; callback output uses a four-packet handoff, and
 the link queue itself is spinlock protected for every producer. The fixed core
-is 35.0 KiB (eight TCP flows × two-MSS output buffers); its 40,000-byte store,
+is 35.4 KiB (eight TCP flows × two-MSS output buffers); its 40,000-byte store,
 receive scratch and callback handoff are static. `lwipopts.h` uses an 18 KiB
 heap, 2-MSS TCP windows, 16 pbufs, 32 TCP segments, 12 TCP PCBs, eight listen
 PCBs and 10 UDP PCBs. Packet scratch is static under the lwIP serialization;
@@ -340,8 +348,10 @@ exactly once and in order across the transition.
 `pico/tests/nat_test.py` compiles the pure C core with a fake raw transport.
 It covers local ICMP, UDP and DNS source restoration, TCP state/data/FIN,
 stray/refused parsing, forwarding/cap, tuple reuse, oversize UDP,
-backpressure and garbage. WiFi association, DHCP, callback timing, loss and
-real inbound routing still require hardware.
+backpressure and garbage, plus all speedtest phases, duplex flows, zero-window
+deferral, RST and FIN. The lwIP adapter test confirms that the configured DHCP
+address selects that local peer. WiFi association, DHCP, callback timing, loss
+and real inbound routing still require hardware.
 
 ## 6. The `wire` test, and the SNOS-side changes
 
