@@ -67,8 +67,7 @@ static void emit(void *arg, const uint8_t *p, size_t len) {
 }
 extern size_t link_queued(uint8_t) __attribute__((weak));
 extern void link_purge(uint8_t) __attribute__((weak));
-extern void link_restart(void) __attribute__((weak));
-extern void ctrl_reset(void) __attribute__((weak));
+extern void ctrl_clear_address(void) __attribute__((weak));
 static bool link_busy(void *arg) {
     (void)arg;
     return out_head != out_tail || (link_queued && link_queued(CH_IP) != 0);
@@ -431,7 +430,6 @@ void nat_reset(void) {
         invalidate_tcp_slot(i);
     out_head = out_tail = 0;
     cyw43_arch_lwip_end();
-    ipused = 0;
 }
 static uint32_t ip4_number(const ip4_addr_t *a) {
     return ((uint32_t)ip4_addr1(a) << 24) | ((uint32_t)ip4_addr2(a) << 16) |
@@ -441,17 +439,14 @@ void nat_configure(bool wifi_up) {
     if (!ready)
         return;
     if (!wifi_up) {
+        if (ctrl_clear_address)
+            ctrl_clear_address();
         if (up) {
             nat_reset();
-            /* Start a new link lifetime after dropping old NAT/control output. */
             if (link_purge) {
                 link_purge(CH_IP);
                 link_purge(CH_CTRL);
             }
-            if (link_restart)
-                link_restart();
-            if (ctrl_reset)
-                ctrl_reset();
         }
         up = false;
         return;
@@ -483,10 +478,7 @@ void nat_configure(bool wifi_up) {
     nat_core_set_resolvers(core, resolvers, n);
     cyw43_arch_lwip_end();
 }
-void nat_ip_bytes(const uint8_t *data, size_t len) {
-    if (!ready || !up)
-        return;
-    cyw43_arch_lwip_begin();
+void ip_stream_bytes(const uint8_t *data, size_t len, ip_stream_consumer_t consume) {
     for (size_t i = 0; i < len; ++i) {
         ipbuf[ipused++] = data[i];
         if (ipused < 2)
@@ -498,10 +490,19 @@ void nat_ip_bytes(const uint8_t *data, size_t len) {
             break;
         }
         if (ipused == n + 2) {
-            nat_core_input(core, ipbuf + 2, n, now());
+            consume(ipbuf + 2, n);
             ipused = 0;
         }
     }
+}
+static void nat_input(const uint8_t *packet, size_t len) {
+    nat_core_input(core, packet, len, now());
+}
+void nat_ip_bytes(const uint8_t *data, size_t len) {
+    if (!ready || !up)
+        return;
+    cyw43_arch_lwip_begin();
+    ip_stream_bytes(data, len, nat_input);
     cyw43_arch_lwip_end();
 }
 void nat_poll(void) {

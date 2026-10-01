@@ -9,8 +9,8 @@ typedef struct { uint8_t ch; size_t pos, len; uint8_t data[CHUNK_SIZE]; } chunk_
 static chunk_t pool[QUEUE_COUNT];
 static uint8_t order[QUEUE_COUNT];
 static size_t count;
-static bool awaiting, syn, peer_syn_seen, awaiting_peer_restart, rx_resync, started;
-static uint8_t tx_seq, rx_next, syn_seq, restart_seq, inflight[LINK_FRAME];
+static bool awaiting, syn, peer_syn_seen, rx_resync, started;
+static uint8_t tx_seq, rx_next, syn_seq, inflight[LINK_FRAME];
 static uint32_t resends, bad_sum;
 #ifdef PICO_ON_DEVICE
 static critical_section_t queue_lock;
@@ -30,8 +30,8 @@ void link_init(void) {
     critical_section_init(&queue_lock);
 #endif
     LOCK();
-    count = 0; awaiting = peer_syn_seen = awaiting_peer_restart = started = false;
-    syn = rx_resync = true; tx_seq = syn_seq = restart_seq = rx_next = 0; resends = bad_sum = 0;
+    count = 0; awaiting = peer_syn_seen = started = false;
+    syn = rx_resync = true; tx_seq = syn_seq = rx_next = 0; resends = bad_sum = 0;
     UNLOCK();
 }
 static bool enqueue(uint8_t ch, const uint8_t *data, size_t len, bool hello) {
@@ -70,25 +70,12 @@ link_rx_t link_on_rx(const uint8_t *f) {
     if (rx_resync) { rx_resync = false; rx_next = f[0]; }
     if (awaiting && f[1] == tx_seq) { awaiting = false; ++tx_seq; syn = false; }
     if (f[2] & F_SYN) {
-        if (awaiting_peer_restart) {
-            /* net.c adopts a peer SYN by setting rx_next to its sequence,
-             * then writes rx_next - 1 in its reply.  This is the first
-             * console SYN tied to our restart frame, irrespective of the
-             * console's own sequence base. */
-            if (f[1] == (uint8_t)(restart_seq - 1)) {
-                peer_syn_seen = true;
-                rx_next = f[0];
-                awaiting_peer_restart = false;
-            }
-        } else if (!peer_syn_seen) {
+        if (!peer_syn_seen) {
             peer_syn_seen = true; rx_next = f[0];
             count = 0; started = awaiting = false; result.reset = true;
         }
     } else peer_syn_seen = false;
-    /* After a local restart, old console output is from the abandoned
-     * lifetime. Keep it out of the IP assembler until the console's SYN
-     * establishes its replacement lifetime. */
-    if (!awaiting_peer_restart && (f[2] & F_DATA) && f[0] == rx_next) {
+    if ((f[2] & F_DATA) && f[0] == rx_next) {
         for (size_t o = LINK_HDR; o + 2 <= LINK_FRAME;) {
             uint8_t ch = f[o], n = f[o + 1];
             if (ch == CH_PAD || o + 2 + n > LINK_FRAME) break;
@@ -139,7 +126,9 @@ size_t link_queued(uint8_t ch) {
 void link_purge(uint8_t ch) {
     LOCK();
     for (size_t i = 0; i < count;) {
-        if (pool[order[i]].ch != ch) {
+        /* A chunk whose prefix has entered a port-owned frame must finish.
+         * Mode changes discard only complete chunks that are still queued. */
+        if (pool[order[i]].ch != ch || pool[order[i]].pos != 0) {
             ++i;
             continue;
         }
@@ -150,30 +139,6 @@ void link_purge(uint8_t ch) {
     UNLOCK();
 }
 
-void link_restart(void) {
-    LOCK();
-    /* A delayed ACK for the abandoned frame must not acknowledge fresh data.
-     * Do not reuse the prior SYN base either: the console accepts a changed
-     * SYN sequence as a distinct restart even if the old SYN was its last
-     * received frame. Records already placed in the abandoned frame are not
-     * replayed: delivery is at-most-once across a user mode switch. */
-    awaiting = false;
-    awaiting_peer_restart = true;
-    /* Do not carry a previous SYN episode into the replacement lifetime.
-     * Old console ACKs can name tx_seq when its frame was abandoned.  Leave
-     * one sequence unused: net.c's reply to restart_seq names restart_seq -
-     * 1, which is therefore newer than every old ACK.  Stop-and-wait keeps
-     * that true across an 8-bit wrap, and the console sequence is irrelevant. */
-    peer_syn_seen = false;
-    ++tx_seq;
-    ++tx_seq;
-    if (tx_seq == syn_seq)
-        ++tx_seq;
-    restart_seq = tx_seq;
-    syn = true;
-    started = count && pool[order[0]].pos != 0;
-    UNLOCK();
-}
 link_stats_t link_stats(void) {
     LOCK(); link_stats_t s = {tx_seq, rx_next - 1, resends, bad_sum}; UNLOCK(); return s;
 }

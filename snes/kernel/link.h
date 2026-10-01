@@ -67,9 +67,9 @@
  * recovers. Reproduced exactly: start gateway (works), stop it, start it again
  * (dead forever, including across a reload of the bridge script).
  *
- * The receiver adopts the sender's sequence once per base. A repeated SYN at
- * that base is a retransmission; a changed base is a new restart, even if the
- * previous SYN was the last frame received. */
+ * The receiver adopts the sender's sequence ONCE per episode — a flag that is
+ * honoured on every frame would re-deliver retransmissions as duplicates, since
+ * the ordinary seq check is what discards those. */
 #define LINK_F_SYN 0x02u
 
 #define LINK_CH_CTRL 0  /* commands and their replies */

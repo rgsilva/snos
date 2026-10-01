@@ -329,14 +329,13 @@ including `main`), and the firmware reserves
 8 KiB across the linked scratch banks for main, link and Bluetooth callbacks;
 this is a reservation, not a measured hardware stack high-water mark.
 
-Leaving NAT mode or losing WiFi drops queued `CH_IP` and `CH_CTRL` records,
-discards a partly assembled incoming IP packet, and clears the advertised
-HELLO address. The Pico abandons any current frame, advances to a distinct
-link sequence base, and sends `F_SYN`; the console treats that changed base as
-a new peer lifetime and discards partial IP/control input. Keyboard records
-still queued behind the abandoned frame are retained in order; a key typed at
-the instant of a mode switch may be lost. Stale IP/control output is therefore
-discarded as part of the adapter restart, never spliced into the new stream.
+Leaving NAT mode tears down its flows, forwards, listeners and advertised
+HELLO address. The mode switch never touches the link: its current frame and
+sequence state continue unchanged, and IP/control records already crossing
+the link finish whole. Only unstarted NAT or relay output is discarded. The
+incoming IP stream assembler survives the switch, so a packet completed after
+it is delivered to the newly selected mode. Keyboard records are delivered
+exactly once and in order across the transition.
 
 `pico/tests/nat_test.py` compiles the pure C core with a fake raw transport.
 It covers local ICMP, UDP and DNS source restoration, TCP state/data/FIN,

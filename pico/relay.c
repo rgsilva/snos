@@ -1,5 +1,6 @@
 #include "relay.h"
 #include "ctrl.h"
+#include "nat.h"
 #include "log.h"
 #include "pico/cyw43_arch.h"
 #include "lwip/tcp.h"
@@ -8,8 +9,8 @@
 #include <string.h>
 #define BUFFER_SIZE 16384
 static struct tcp_pcb *pcb;
-static uint8_t input[BUFFER_SIZE], output[BUFFER_SIZE], ipbuf[LINK_MTU + 2];
-static size_t in_len, out_len, ip_used;
+static uint8_t input[BUFFER_SIZE], output[BUFFER_SIZE];
+static size_t in_len, out_len;
 static bool connected, failed, resolving, resolved;
 static ip_addr_t host;
 static char hostname[64];
@@ -42,7 +43,7 @@ static void dns_cb(const char *name, const ip_addr_t *addr, void *arg) {
 static void disconnect(void) {
     if (pcb) { tcp_arg(pcb, NULL); tcp_err(pcb, NULL); tcp_recv(pcb, NULL); tcp_abort(pcb); }
     pcb = NULL; connected = false; failed = false;
-    in_len = out_len = ip_used = 0;
+    in_len = out_len = 0;
     retry_at = now_ms() + backoff;
     if (backoff < 30000) backoff = backoff > 15000 ? 30000 : backoff * 2;
 }
@@ -51,6 +52,9 @@ void relay_configure(const char *name, bool wifi_up) {
     cyw43_arch_lwip_begin();
     if (strcmp(hostname, name) || network_up != wifi_up) {
         disconnect();
+        link_purge(CH_IP);
+        link_purge(CH_CTRL);
+        ctrl_clear_address();
         ++dns_generation;
         resolving = resolved = false;
         snprintf(hostname, sizeof(hostname), "%s", name);
@@ -73,17 +77,12 @@ bool relay_send(uint8_t type, const uint8_t *data, size_t len) {
     }
     cyw43_arch_lwip_end(); return ok;
 }
+static void relay_input(const uint8_t *packet, size_t len) {
+    if (!relay_send(1, packet, len))
+        log_puts("relay: IP output queue full");
+}
 void relay_ip_bytes(const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-        ipbuf[ip_used++] = data[i];
-        if (ip_used < 2) continue;
-        size_t n = ipbuf[0] | ((size_t)ipbuf[1] << 8);
-        if (!n || n > LINK_MTU) { log_puts("relay: IP stream desync"); ip_used = 0; return; }
-        if (ip_used == n + 2) {
-            if (!relay_send(1, ipbuf + 2, n)) log_puts("relay: IP output queue full");
-            ip_used = 0;
-        }
-    }
+    ip_stream_bytes(data, len, relay_input);
 }
 void relay_poll(void) {
     if (!ready) { ctrl_poll(); return; }

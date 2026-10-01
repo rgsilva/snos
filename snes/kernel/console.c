@@ -22,7 +22,7 @@
 #include "proc.h" /* proc_lock: the vblank window below is not preemptible */
 /* font8x8_basic.h is consumed by tools/mkfont.py at build time, not here. */
 
-#define R8(a) (*(volatile uint8_t *)(a))
+#define R8(a) (*(volatile uint8_t *)(uintptr_t)(a))
 
 #define COLS 64
 #define ROWS 28

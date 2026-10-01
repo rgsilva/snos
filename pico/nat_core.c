@@ -561,6 +561,7 @@ bool nat_core_forward_add(nat_t *n, uint16_t port, uint8_t ch) {
             if (!n->op.forward_add(n->op.arg, port))
                 return false;
             n->fwd[i] = (fwd_t){true, port, (uint8_t)(1u << (ch & 7))};
+            count(n);
             return true;
         }
     return false;
@@ -572,6 +573,7 @@ void nat_core_forward_del(nat_t *n, uint16_t port, uint8_t ch) {
             if (!n->fwd[i].owners) {
                 n->op.forward_del(n->op.arg, port);
                 n->fwd[i].used = false;
+                count(n);
             }
             return;
         }
