@@ -60,6 +60,8 @@ static void emit(void *arg, const uint8_t *p, size_t len) {
     (void)emit_try(arg, p, len);
 }
 extern size_t link_queued(uint8_t) __attribute__((weak));
+extern void link_purge(uint8_t) __attribute__((weak));
+extern void ctrl_reset(void) __attribute__((weak));
 static bool link_busy(void *arg) {
     (void)arg;
     return out_head != out_tail || (link_queued && link_queued(CH_IP) != 0);
@@ -91,11 +93,15 @@ static void process_pending_tcp(void) {
 }
 static void nat_tcp_err(void *arg, err_t e) {
     unsigned i = (unsigned)(uintptr_t)arg;
-    (void)e;
     tcp_pcbs[i] = NULL;
+    write_queued[i] = false;
     for (unsigned j = 0; j < 4; ++j)
         if (accepted_pending[j].slot == (int)i)
             accepted_pending[j].slot = -1;
+    /* lwIP reports a completed LAST_ACK as ERR_CLSD.  Its console-side
+     * segment may still need delivery, so only transport failures reset it. */
+    if (e == ERR_CLSD)
+        return;
     callback_active = true;
     nat_core_tcp_error(core, i);
     callback_active = false;
@@ -182,6 +188,7 @@ static void op_tcp_shutdown(void *arg, unsigned i) {
 }
 static void op_tcp_abort(void *arg, unsigned i) {
     (void)arg;
+    write_queued[i] = false;
     if (tcp_pcbs[i]) {
         struct tcp_pcb *p = tcp_pcbs[i];
         tcp_pcbs[i] = NULL;
@@ -291,8 +298,17 @@ static void udp_close(void *arg, unsigned i) {
     }
 }
 static void ops_init(void) {
-    nat_ops_t o = {emit,        op_tcp_connect, op_tcp_write,   op_tcp_shutdown, op_tcp_abort,
-                   op_udp_send, op_forward_add, op_forward_del, op_tcp_recved,   NULL};
+    nat_ops_t o = {
+        .emit = emit,
+        .tcp_connect = op_tcp_connect,
+        .tcp_write = op_tcp_write,
+        .tcp_shutdown = op_tcp_shutdown,
+        .tcp_abort = op_tcp_abort,
+        .udp_send = op_udp_send,
+        .forward_add = op_forward_add,
+        .forward_del = op_forward_del,
+        .tcp_recved = op_tcp_recved,
+    };
     nat_core_init(core, &o);
     nat_core_set_adapter(core, emit_try, link_busy, udp_close, tcp_queued);
 }
@@ -331,8 +347,16 @@ void nat_configure(bool wifi_up) {
     if (!ready)
         return;
     if (!wifi_up) {
-        if (up)
+        if (up) {
             nat_reset();
+            /* Mode/WiFi transitions abandon the old IP stream and HELLO state. */
+            if (link_purge) {
+                link_purge(CH_IP);
+                link_purge(CH_CTRL);
+            }
+            if (ctrl_reset)
+                ctrl_reset();
+        }
         up = false;
         return;
     }
@@ -344,10 +368,13 @@ void nat_configure(bool wifi_up) {
     ctrl_address(b);
     uint32_t resolvers[6], fallback[] = {0x01010101u, 0x08080808u};
     size_t n = 0;
-    for (unsigned i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < DNS_MAX_SERVERS && n < sizeof(resolvers) / sizeof(*resolvers); ++i) {
         const ip_addr_t *d = dns_getserver(i);
-        if (IP_IS_V4(d))
-            resolvers[n++] = ip4_number(ip_2_ip4(d));
+        if (IP_IS_V4(d)) {
+            uint32_t resolver = ip4_number(ip_2_ip4(d));
+            if (resolver)
+                resolvers[n++] = resolver;
+        }
     }
     for (unsigned i = 0; i < 2; ++i) {
         bool seen = false;

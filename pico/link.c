@@ -120,6 +120,33 @@ size_t link_queued(uint8_t ch) {
     }
     UNLOCK(); return n;
 }
+void link_purge(uint8_t ch) {
+    bool in_flight = false;
+    LOCK();
+    for (size_t o = LINK_HDR; awaiting && o + 2 <= LINK_FRAME;) {
+        uint8_t frame_ch = inflight[o++], n = inflight[o++];
+        if (frame_ch == CH_PAD || o + n > LINK_FRAME)
+            break;
+        if (frame_ch == ch)
+            in_flight = true;
+        o += n;
+    }
+    for (size_t i = 0; i < count;) {
+        if (pool[order[i]].ch != ch) {
+            ++i;
+            continue;
+        }
+        --count;
+        memmove(order + i, order + i + 1, count - i);
+    }
+    if (in_flight) {
+        /* The frame cannot be edited after transmission.  Re-sync instead. */
+        awaiting = false;
+        syn = true;
+    }
+    started = count && pool[order[0]].pos != 0;
+    UNLOCK();
+}
 link_stats_t link_stats(void) {
     LOCK(); link_stats_t s = {tx_seq, rx_next - 1, resends, bad_sum}; UNLOCK(); return s;
 }

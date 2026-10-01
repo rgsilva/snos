@@ -44,8 +44,17 @@ typedef struct {
     uint16_t port;
     uint8_t owners;
 } fwd_t;
+/* These callbacks describe the adapter rather than a flow.  Reset keeps the
+ * whole group intact, so a new hook cannot be accidentally left behind. */
+typedef struct {
+    bool (*emit_try)(void *, const uint8_t *, size_t);
+    bool (*link_busy)(void *);
+    void (*udp_close)(void *, unsigned);
+    bool (*tcp_queued)(void *, unsigned);
+} adapter_t;
 struct nat {
     nat_ops_t op;
+    adapter_t adapter;
     tcp_t tcp[NAT_TCP_MAX];
     udp_t udp[NAT_UDP_MAX];
     fwd_t fwd[NAT_TCP_MAX];
@@ -53,10 +62,6 @@ struct nat {
     uint16_t next_eport;
     uint8_t resolver_count, resolver_next;
     nat_stats_t stat;
-    bool (*emit_try)(void *, const uint8_t *, size_t);
-    bool (*link_busy)(void *);
-    void (*udp_close)(void *, unsigned);
-    bool (*tcp_queued)(void *, unsigned);
 };
 /* The core is entered under the lwIP lock. emit copies before returning, so these
    fixed buffers cannot be re-entered and keep packet-sized frames off the stack. */
@@ -95,7 +100,7 @@ static bool expired(uint32_t now, uint32_t then, uint32_t span) {
     return (uint32_t)(now - then) > span;
 }
 static bool busy(nat_t *n) {
-    return n->link_busy && n->link_busy(n->op.arg);
+    return n->adapter.link_busy && n->adapter.link_busy(n->op.arg);
 }
 static void count(nat_t *n) {
     n->stat.tcp = n->stat.udp = n->stat.forwards = 0;
@@ -126,7 +131,7 @@ static bool emit(nat_t *n, uint32_t src, uint8_t proto, const uint8_t *body, siz
     wr32(p + 16, SNES);
     wr16(p + 10, sum(p, 20, 0));
     memcpy(p + 20, body, len);
-    if (n->emit_try ? n->emit_try(n->op.arg, p, len + 20)
+    if (n->adapter.emit_try ? n->adapter.emit_try(n->op.arg, p, len + 20)
                     : (n->op.emit(n->op.arg, p, len + 20), true)) {
         ++n->stat.out;
         return true;
@@ -192,14 +197,13 @@ static void tcp_reset(nat_t *n, unsigned i) {
     rst(n, t->dip, t->sport, t->dport, t->rcv_nxt, t->snd_nxt, true);
     close_tcp(n, i);
 }
-/* A queued lwIP write is accepted once: tcp_queued consumes its marker, so
- * rcv_nxt must advance here instead of retrying the same console segment. */
+/* A queued lwIP write is accepted on the next poll.  Leaving the console
+ * segment pending until then means a reset cannot leave its ACK on the link. */
 static void try_write(nat_t *n, unsigned i) {
     tcp_t *t = &n->tcp[i];
     if (!t->in_len)
         return;
-    if (!n->op.tcp_write(n->op.arg, i, t->in, t->in_len) &&
-        (!n->tcp_queued || !n->tcp_queued(n->op.arg, i)))
+    if (!n->op.tcp_write(n->op.arg, i, t->in, t->in_len))
         return;
     t->rcv_nxt += t->in_len;
     t->in_len = 0;
@@ -395,29 +399,38 @@ void nat_core_set_resolver(nat_t *n, uint32_t address) {
     nat_core_set_resolvers(n, &address, 1);
 }
 void nat_core_set_resolvers(nat_t *n, const uint32_t *a, size_t count) {
+    uint32_t resolvers[6];
+    size_t valid = 0;
     if (count > 6)
         count = 6;
-    memcpy(n->resolver, a, count * sizeof(*a));
-    n->resolver_count = (uint8_t)count;
+    for (size_t i = 0; i < count; ++i)
+        if (a[i])
+            resolvers[valid++] = a[i];
+    if (n->resolver_count == valid && !memcmp(n->resolver, resolvers, valid * sizeof(*a)))
+        return;
+    memcpy(n->resolver, resolvers, valid * sizeof(*a));
+    n->resolver_count = (uint8_t)valid;
     n->resolver_next = 0;
 }
 void nat_core_set_adapter(nat_t *n, bool (*emit_try)(void *, const uint8_t *, size_t),
                           bool (*link_busy)(void *), void (*udp_close)(void *, unsigned),
                           bool (*tcp_queued)(void *, unsigned)) {
-    n->emit_try = emit_try;
-    n->link_busy = link_busy;
-    n->udp_close = udp_close;
-    n->tcp_queued = tcp_queued;
+    n->adapter = (adapter_t){emit_try, link_busy, udp_close, tcp_queued};
 }
 void nat_core_reset(nat_t *n) {
     nat_ops_t op = n->op;
+    adapter_t adapter = n->adapter;
     for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
         if (n->tcp[i].state != FREE)
             op.tcp_abort(op.arg, i);
     for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
         if (n->fwd[i].used)
             op.forward_del(op.arg, n->fwd[i].port);
-    nat_core_init(n, &op);
+    memset(n, 0, sizeof(*n));
+    n->op = op;
+    n->adapter = adapter;
+    n->iss = 0x2000;
+    n->next_eport = 40000;
 }
 void nat_core_input(nat_t *n, const uint8_t *p, size_t len, uint32_t now) {
     if (len < 20 || (p[0] >> 4) != 4) {
@@ -567,12 +580,20 @@ void nat_core_forward_del(nat_t *n, uint16_t port, uint8_t ch) {
  * would spend retries even though the segment was never deliverable. */
 static void poll_handshake(nat_t *n, unsigned i, uint32_t now) {
     tcp_t *t = &n->tcp[i];
-    if (!busy(n) && (t->unsent || expired(now, t->sent_at, RTO)) &&
-        tcp_out(n, t, t->state == SYN_RCVD ? (SYN | ACK) : SYN, NULL, 0, t->iss)) {
-        if (!t->unsent && ++t->retries > MAX_RETRIES) {
-            tcp_reset(n, i);
-            return;
-        }
+    if (busy(n)) {
+        /* The RTO starts when the link can carry the segment again. */
+        t->sent_at = now;
+        return;
+    }
+    if (!t->unsent && !expired(now, t->sent_at, RTO))
+        return;
+    if (!t->unsent && t->retries >= MAX_RETRIES) {
+        tcp_reset(n, i);
+        return;
+    }
+    if (tcp_out(n, t, t->state == SYN_RCVD ? (SYN | ACK) : SYN, NULL, 0, t->iss)) {
+        if (!t->unsent)
+            ++t->retries;
         t->unsent = false;
         t->sent_at = now;
     }
@@ -592,13 +613,19 @@ static void poll_tcp_data(nat_t *n, unsigned i, uint32_t now) {
             t->sent_at = now;
             t->retries = 0;
         }
-    } else if (t->unacked && expired(now, t->sent_at, RTO) && !busy(n) &&
-               tcp_out(n, t, PSH | ACK, t->out, t->unacked, t->snd_una)) {
-        if (++t->retries > DATA_RETRIES) {
-            tcp_reset(n, i);
-            return;
+    } else if (t->unacked) {
+        if (busy(n)) {
+            t->sent_at = now;
+        } else if (expired(now, t->sent_at, RTO)) {
+            if (t->retries >= DATA_RETRIES) {
+                tcp_reset(n, i);
+                return;
+            }
+            if (tcp_out(n, t, PSH | ACK, t->out, t->unacked, t->snd_una)) {
+                ++t->retries;
+                t->sent_at = now;
+            }
         }
-        t->sent_at = now;
     } else if (t->sock_eof && !t->fin_sent && !t->out_len &&
                (!t->inbound || expired(now, t->eof_at > t->last_console ?
                                          t->eof_at : t->last_console, FIN_GRACE)) &&
@@ -607,13 +634,19 @@ static void poll_tcp_data(nat_t *n, unsigned i, uint32_t now) {
         t->snd_nxt++;
         t->sent_at = now;
         t->retries = 0;
-    } else if (t->fin_sent && expired(now, t->sent_at, RTO) && !busy(n) &&
-               tcp_out(n, t, FIN | ACK, NULL, 0, t->snd_nxt - 1)) {
-        if (++t->retries > MAX_RETRIES) {
-            close_tcp(n, i);
-            return;
+    } else if (t->fin_sent) {
+        if (busy(n)) {
+            t->sent_at = now;
+        } else if (expired(now, t->sent_at, RTO)) {
+            if (t->retries >= MAX_RETRIES) {
+                close_tcp(n, i);
+                return;
+            }
+            if (tcp_out(n, t, FIN | ACK, NULL, 0, t->snd_nxt - 1)) {
+                ++t->retries;
+                t->sent_at = now;
+            }
         }
-        t->sent_at = now;
     }
 }
 
@@ -642,8 +675,8 @@ static void poll_tcp_slot(nat_t *n, unsigned i, uint32_t now) {
 static void poll_udp(nat_t *n, uint32_t now) {
     for (unsigned i = 0; i < NAT_UDP_MAX; ++i)
         if (n->udp[i].used && expired(now, n->udp[i].touched, UDP_IDLE)) {
-            if (n->udp_close)
-                n->udp_close(n->op.arg, i);
+            if (n->adapter.udp_close)
+                n->adapter.udp_close(n->op.arg, i);
             n->udp[i].used = false;
         }
 }
