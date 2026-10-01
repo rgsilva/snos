@@ -227,6 +227,7 @@ static uint8_t cmsg_state; /* 0 want type, 1 want len, 2 collecting */
  * i.e. nearly all of build_frame's measured cost, inside NMI, every poll. */
 static uint16_t txframe_fill;
 static uint8_t peer_syn_seen;
+static uint8_t peer_syn_seq;
 static uint8_t syn_out;
 static uint8_t rx_resync;
 static uint8_t txframe[LINK_FRAME];
@@ -318,6 +319,7 @@ static void session_init(void) {
   rx_next = 0;
   awaiting_ack = 0;
   peer_syn_seen = 0;
+  peer_syn_seq = 0;
   /* Announce our own restart until the peer acknowledges a frame. On the
    * emulated backend the gateway also notices the bridge truncating its files,
    * but that is a property of files, not of the link — on real hardware this
@@ -1120,14 +1122,13 @@ void net_service(void) {
          * this transfer, usually) should not wait for an NMI. */
         net_hot_until = (uint16_t)(snos_frames + NET_HOT_FRAMES);
       }
-      /* The peer restarted. Adopt its sequence base, once, and fail every
-       * channel: whatever sockets those represented died with it, so an app
-       * blocked on one gets an error instead of waiting forever. Acting on
-       * every SYN frame rather than once per episode would re-deliver
-       * retransmissions, because the seq check below is what discards those. */
+      /* The peer restarted. A repeated SYN at the same base is a retransmit;
+       * a changed base is a fresh restart even when no non-SYN frame arrived
+       * between the two (for example, a Pico mode transition). */
       if ((rxframe[LINK_FLAGS] & LINK_F_SYN) != 0) {
-        if (!peer_syn_seen) {
+        if (!peer_syn_seen || rxframe[LINK_SEQ] != peer_syn_seq) {
           peer_syn_seen = 1;
+          peer_syn_seq = rxframe[LINK_SEQ];
           rx_next = rxframe[LINK_SEQ];
           fail_channels();
           /* The IP layer dies with the daemon too. Mode drops until the NEW

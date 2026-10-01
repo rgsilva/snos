@@ -326,13 +326,17 @@ heap, 2-MSS TCP windows, 16 pbufs, 32 TCP segments, 12 TCP PCBs, eight listen
 PCBs and 10 UDP PCBs. Packet scratch is static under the lwIP serialization;
 the ARM stack report's deepest NAT/link call chain is 296 bytes (1,032 bytes
 including `main`), and the firmware reserves
-8 KiB in scratch-Y for main, link and Bluetooth callbacks.
+8 KiB across the linked scratch banks for main, link and Bluetooth callbacks;
+this is a reservation, not a measured hardware stack high-water mark.
 
-Leaving NAT mode or losing WiFi drops queued `CH_IP` packets, discards a
-partly assembled incoming IP packet, and clears the advertised HELLO address.
-If an IP record was already in a stop-and-wait frame, the Pico abandons that
-frame and re-synchronizes the link rather than retransmitting stale bytes.
-Records sharing that already-sent frame are intentionally abandoned too.
+Leaving NAT mode or losing WiFi drops queued `CH_IP` and `CH_CTRL` records,
+discards a partly assembled incoming IP packet, and clears the advertised
+HELLO address. The Pico abandons any current frame, advances to a distinct
+link sequence base, and sends `F_SYN`; the console treats that changed base as
+a new peer lifetime and discards partial IP/control input. Keyboard records
+that shared the abandoned frame are replayed ahead of queued keyboard input,
+so a transition cannot lose a queued key. Stale IP/control output is therefore
+discarded as part of the adapter restart, never spliced into the new stream.
 
 `pico/tests/nat_test.py` compiles the pure C core with a fake raw transport.
 It covers local ICMP, UDP and DNS source restoration, TCP state/data/FIN,

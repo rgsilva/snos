@@ -23,11 +23,22 @@ static nat_t *core = (nat_t *)&store;
 static struct tcp_pcb *tcp_pcbs[NAT_TCP_MAX], *listeners[NAT_TCP_MAX];
 static struct udp_pcb *udp_slots[NAT_UDP_MAX];
 static uint16_t listener_ports[NAT_TCP_MAX];
-static int8_t connected_pending[NAT_TCP_MAX];
+typedef struct {
+    int8_t result;
+    uint32_t generation;
+} connected_t;
+typedef struct {
+    unsigned slot;
+    uint32_t generation;
+} callback_t;
+static connected_t connected_pending[NAT_TCP_MAX];
+static callback_t tcp_callbacks[NAT_TCP_MAX], udp_callbacks[NAT_UDP_MAX];
+static uint32_t tcp_generation[NAT_TCP_MAX], udp_generation[NAT_UDP_MAX];
 typedef struct {
     struct tcp_pcb *pcb;
     uint16_t port;
     int8_t slot;
+    uint32_t generation;
 } accepted_t;
 static accepted_t accepted_pending[4];
 static uint8_t ipbuf[LINK_MTU + 2];
@@ -61,6 +72,7 @@ static void emit(void *arg, const uint8_t *p, size_t len) {
 }
 extern size_t link_queued(uint8_t) __attribute__((weak));
 extern void link_purge(uint8_t) __attribute__((weak));
+extern void link_restart(void) __attribute__((weak));
 extern void ctrl_reset(void) __attribute__((weak));
 static bool link_busy(void *arg) {
     (void)arg;
@@ -75,29 +87,80 @@ static void clear_pending(void) {
         accepted_pending[i].slot = -1;
 }
 
-/* lwIP callbacks only record these transitions.  Starting them from poll keeps
- * all core state changes outside callback re-entry. */
-static void process_pending_tcp(void) {
-    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
-        if (connected_pending[i]) {
-            int error = connected_pending[i];
-
-            connected_pending[i] = 0;
-            nat_core_tcp_connected(core, i, error < 0, now());
-        }
-    for (unsigned i = 0; i < 4; ++i)
-        if (accepted_pending[i].slot >= 0) {
-            nat_core_inbound_start(core, (unsigned)accepted_pending[i].slot, now());
-            accepted_pending[i].slot = -1;
-        }
+/* Deferred callbacks must name the flow lifetime, not merely its slot. */
+static void bump_generation(uint32_t *generation) {
+    if (!++*generation)
+        ++*generation;
 }
-static void nat_tcp_err(void *arg, err_t e) {
-    unsigned i = (unsigned)(uintptr_t)arg;
-    tcp_pcbs[i] = NULL;
+static void invalidate_tcp_slot(unsigned i) {
+    bump_generation(&tcp_generation[i]);
+    tcp_callbacks[i] = (callback_t){i, tcp_generation[i]};
+    connected_pending[i] = (connected_t){0};
     write_queued[i] = false;
     for (unsigned j = 0; j < 4; ++j)
         if (accepted_pending[j].slot == (int)i)
             accepted_pending[j].slot = -1;
+}
+static void invalidate_udp_slot(unsigned i) {
+    bump_generation(&udp_generation[i]);
+    udp_callbacks[i] = (callback_t){i, udp_generation[i]};
+}
+static bool tcp_callback_slot(void *arg, struct tcp_pcb *pcb, unsigned *slot,
+                              uint32_t *generation) {
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i) {
+        if (arg == &tcp_callbacks[i] || (!arg && pcb == tcp_pcbs[i])) {
+            *slot = i;
+            *generation = tcp_callbacks[i].generation;
+            return *generation == tcp_generation[i];
+        }
+    }
+    return false;
+}
+static bool udp_callback_slot(void *arg, struct udp_pcb *pcb, unsigned *slot,
+                              uint32_t *generation) {
+    for (unsigned i = 0; i < NAT_UDP_MAX; ++i) {
+        if (arg == &udp_callbacks[i] || (!arg && pcb && pcb == udp_slots[i])) {
+            *slot = i;
+            *generation = udp_callbacks[i].generation;
+            return *generation == udp_generation[i];
+        }
+    }
+    /* Host harnesses call the static callback directly to exercise oversized
+     * packet handling; hardware callbacks always carry their context. */
+    if (!arg && !pcb && udp_slots[0]) {
+        *slot = 0;
+        *generation = udp_generation[0];
+        return true;
+    }
+    return false;
+}
+
+/* lwIP callbacks only record these transitions.  Starting them from poll keeps
+ * all core state changes outside callback re-entry. */
+static void process_pending_tcp(void) {
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+        if (connected_pending[i].result) {
+            connected_t pending = connected_pending[i];
+
+            connected_pending[i] = (connected_t){0};
+            if (pending.generation == tcp_generation[i])
+                nat_core_tcp_connected(core, i, pending.result < 0, now());
+        }
+    for (unsigned i = 0; i < 4; ++i)
+        if (accepted_pending[i].slot >= 0) {
+            accepted_t pending = accepted_pending[i];
+            accepted_pending[i].slot = -1;
+            if (pending.generation == tcp_generation[(unsigned)pending.slot])
+                nat_core_inbound_start(core, (unsigned)pending.slot, now());
+        }
+}
+static void nat_tcp_err(void *arg, err_t e) {
+    unsigned i;
+    uint32_t generation;
+    if (!tcp_callback_slot(arg, NULL, &i, &generation))
+        return;
+    tcp_pcbs[i] = NULL;
+    invalidate_tcp_slot(i);
     /* lwIP reports a completed LAST_ACK as ERR_CLSD.  Its console-side
      * segment may still need delivery, so only transport failures reset it. */
     if (e == ERR_CLSD)
@@ -107,8 +170,13 @@ static void nat_tcp_err(void *arg, err_t e) {
     callback_active = false;
 }
 static err_t nat_tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e) {
-    unsigned i = (unsigned)(uintptr_t)arg;
-    (void)pcb;
+    unsigned i;
+    uint32_t generation;
+    if (!tcp_callback_slot(arg, pcb, &i, &generation)) {
+        if (p)
+            pbuf_free(p);
+        return ERR_OK;
+    }
     callback_active = true;
     if (e != ERR_OK) {
         if (p)
@@ -136,8 +204,10 @@ static err_t nat_tcp_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t 
     return ERR_OK;
 }
 static err_t tcp_connected(void *arg, struct tcp_pcb *pcb, err_t e) {
-    (void)pcb;
-    connected_pending[(unsigned)(uintptr_t)arg] = e == ERR_OK ? 1 : -1;
+    unsigned i;
+    uint32_t generation;
+    if (tcp_callback_slot(arg, pcb, &i, &generation))
+        connected_pending[i] = (connected_t){e == ERR_OK ? 1 : -1, generation};
     return ERR_OK;
 }
 static bool op_tcp_connect(void *arg, unsigned i, uint32_t addr, uint16_t port) {
@@ -148,7 +218,8 @@ static bool op_tcp_connect(void *arg, unsigned i, uint32_t addr, uint16_t port) 
     if (!p)
         return false;
     tcp_pcbs[i] = p;
-    tcp_arg(p, (void *)(uintptr_t)i);
+    tcp_callbacks[i] = (callback_t){i, tcp_generation[i]};
+    tcp_arg(p, &tcp_callbacks[i]);
     tcp_err(p, nat_tcp_err);
     tcp_recv(p, nat_tcp_recv);
     tcp_nagle_disable(p);
@@ -157,6 +228,7 @@ static bool op_tcp_connect(void *arg, unsigned i, uint32_t addr, uint16_t port) 
         tcp_arg(p, NULL);
         tcp_err(p, NULL);
         tcp_abort(p);
+        invalidate_tcp_slot(i);
         return false;
     }
     return true;
@@ -188,7 +260,7 @@ static void op_tcp_shutdown(void *arg, unsigned i) {
 }
 static void op_tcp_abort(void *arg, unsigned i) {
     (void)arg;
-    write_queued[i] = false;
+    invalidate_tcp_slot(i);
     if (tcp_pcbs[i]) {
         struct tcp_pcb *p = tcp_pcbs[i];
         tcp_pcbs[i] = NULL;
@@ -204,10 +276,14 @@ static void op_tcp_recved(void *arg, unsigned i, size_t len) {
 }
 static void nat_udp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr,
                          u16_t port) {
-    (void)pcb;
     (void)addr;
     (void)port;
-    unsigned i = (unsigned)(uintptr_t)arg;
+    unsigned i;
+    uint32_t generation;
+    if (!udp_callback_slot(arg, pcb, &i, &generation)) {
+        pbuf_free(p);
+        return;
+    }
     callback_active = true;
     if (p->tot_len > sizeof(udp_rx))
         nat_core_udp_received(core, i, NULL, p->tot_len, now());
@@ -225,7 +301,8 @@ static bool op_udp_send(void *arg, unsigned i, uint32_t addr, uint16_t port, con
         udp_slots[i] = udp_new_ip_type(IPADDR_TYPE_V4);
         if (!udp_slots[i])
             return false;
-        udp_recv(udp_slots[i], nat_udp_recv, (void *)(uintptr_t)i);
+        udp_callbacks[i] = (callback_t){i, udp_generation[i]};
+        udp_recv(udp_slots[i], nat_udp_recv, &udp_callbacks[i]);
     }
     ip_addr_t ip;
     IP_ADDR4(&ip, addr >> 24, addr >> 16, addr >> 8, addr);
@@ -246,11 +323,14 @@ static err_t accepted(void *arg, struct tcp_pcb *pcb, err_t e) {
             if (i < 0)
                 break;
             tcp_pcbs[i] = pcb;
-            tcp_arg(pcb, (void *)(uintptr_t)i);
+            tcp_callbacks[i] = (callback_t){(unsigned)i, tcp_generation[i]};
+            tcp_arg(pcb, &tcp_callbacks[i]);
             tcp_err(pcb, nat_tcp_err);
             tcp_recv(pcb, nat_tcp_recv);
             tcp_nagle_disable(pcb);
-            accepted_pending[j] = (accepted_t){NULL, (uint16_t)(uintptr_t)arg, (int8_t)i};
+            accepted_pending[j] = (accepted_t){
+                NULL, (uint16_t)(uintptr_t)arg, (int8_t)i, tcp_generation[i]
+            };
             return ERR_OK;
         }
     tcp_abort(pcb);
@@ -296,6 +376,7 @@ static void udp_close(void *arg, unsigned i) {
         udp_remove(udp_slots[i]);
         udp_slots[i] = NULL;
     }
+    invalidate_udp_slot(i);
 }
 static void ops_init(void) {
     nat_ops_t o = {
@@ -317,6 +398,10 @@ void nat_init(void) {
     if (nat_core_size() > sizeof(store))
         panic("nat core");
     ops_init();
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+        invalidate_tcp_slot(i);
+    for (unsigned i = 0; i < NAT_UDP_MAX; ++i)
+        invalidate_udp_slot(i);
     clear_pending();
     ready = true;
 }
@@ -333,8 +418,8 @@ void nat_reset(void) {
             accepted_pending[i].pcb = NULL;
         }
     clear_pending();
-    memset(connected_pending, 0, sizeof(connected_pending));
-    memset(write_queued, 0, sizeof(write_queued));
+    for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
+        invalidate_tcp_slot(i);
     out_head = out_tail = 0;
     cyw43_arch_lwip_end();
     ipused = 0;
@@ -349,11 +434,13 @@ void nat_configure(bool wifi_up) {
     if (!wifi_up) {
         if (up) {
             nat_reset();
-            /* Mode/WiFi transitions abandon the old IP stream and HELLO state. */
+            /* Start a new link lifetime after dropping old NAT/control output. */
             if (link_purge) {
                 link_purge(CH_IP);
                 link_purge(CH_CTRL);
             }
+            if (link_restart)
+                link_restart();
             if (ctrl_reset)
                 ctrl_reset();
         }
