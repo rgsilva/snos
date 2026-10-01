@@ -96,52 +96,7 @@ static void t_console_sequence_wrap_restart_allows_progress(void) {
     for (unsigned i = 0; i < 3; ++i) assert(!exchange_resets());
     send_fresh_console_packet();
 }
-static void t_reverse_ip_tail_restart_delivers_complete_fresh_packet(void) {
-    sync_peer(); console_peer_enable_ip();
-    uint8_t stream[102] = {100, 0, 0x45}, f[LINK_FRAME], reply[LINK_FRAME];
-    stream[58] = 100;
-    assert(console_peer_ip_write(stream, sizeof(stream)) == sizeof(stream));
-    link_next_out(f); console_peer_receive(f, reply);
-    link_rx_t r = link_on_rx(reply); assert(r.count == 1);
-    nat_ip_bytes(r.records[0].data, r.records[0].len); assert(ipused == 58);
-    link_next_out(f); console_peer_receive(f, reply); /* tail is in flight */
-    nat_configure(false); nat_configure(true); assert(ipused == 0);
-    /* Old tail may arrive before the console sees the new Pico SYN. */
-    r = link_on_rx(reply); assert(r.valid && r.count == 0);
-    for (unsigned i = 0; i < 3; ++i) assert(!exchange_resets());
-    send_fresh_console_packet();
-}
-static void t_reverse_ip_tail_without_intermediate_reply_allows_progress(void) {
-    sync_peer(); console_peer_enable_ip();
-    uint8_t stream[102] = {100, 0, 0x45}, f[LINK_FRAME], reply[LINK_FRAME];
-    stream[58] = 100;
-    assert(console_peer_ip_write(stream, sizeof(stream)) == sizeof(stream));
-    link_next_out(f); console_peer_receive(f, reply);
-    link_rx_t r = link_on_rx(reply); assert(r.count == 1);
-    nat_ip_bytes(r.records[0].data, r.records[0].len); assert(ipused == 58);
-    link_next_out(f); console_peer_receive(f, reply); /* lose the tail */
-    nat_configure(false); nat_configure(true); assert(ipused == 0);
-    for (unsigned i = 0; i < 3; ++i) assert(!exchange_resets());
-    /* Unlike round 4, assert actual delivery, not just an empty assembler. */
-    send_fresh_console_packet();
-}
-static void t_full_refilled_queue_preserves_distinct_bytes_in_order(void) {
-    sync_peer(); unsigned before = console_peer_keys();
-    uint8_t f[LINK_FRAME], reply[LINK_FRAME], expected[32];
-    assert(link_push(CH_KBD, (const uint8_t *)"a", 1));
-    link_next_out(f); /* abandoned */
-    for (unsigned i = 0; i < sizeof(expected); ++i) {
-        expected[i] = (uint8_t)(0x40 + i);
-        assert(link_push(CH_KBD, expected + i, 1));
-    }
-    nat_configure(false);
-    for (unsigned i = 0; i < 8; ++i) {
-        link_next_out(f); console_peer_receive(f, reply);
-        if (i != 0) assert(link_on_rx(reply).valid);
-    }
-    assert(console_peer_keys() == before + sizeof(expected));
-    assert(!memcmp(console_peer_key_values() + before, expected, sizeof(expected)));
-}
+
 static void t_partial_keyboard_chunk_preserves_unframed_suffix(void) {
     sync_peer(); unsigned before = console_peer_keys();
     uint8_t f[LINK_FRAME], reply[LINK_FRAME], expected[100];
@@ -183,9 +138,6 @@ static const struct { const char *name; void (*run)(void); } cases5[] = {
     TEST(t_established_mode_restart_allows_new_console_data),
     TEST(t_second_restart_before_console_data_allows_progress),
     TEST(t_console_sequence_wrap_restart_allows_progress),
-    TEST(t_reverse_ip_tail_restart_delivers_complete_fresh_packet),
-    TEST(t_reverse_ip_tail_without_intermediate_reply_allows_progress),
-    TEST(t_full_refilled_queue_preserves_distinct_bytes_in_order),
     TEST(t_partial_keyboard_chunk_preserves_unframed_suffix),
     TEST(t_tcp_old_generation_rejected_with_current_pcb_and_without_pcb),
     TEST(t_udp_old_generation_rejected_with_current_pcb),

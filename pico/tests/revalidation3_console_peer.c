@@ -15,7 +15,10 @@
 #define link_present console_link_present
 #define link_recv console_link_recv
 #define link_send console_link_send
-#include "../../snes/kernel/net.c"
+#ifndef CONSOLE_NET_SOURCE
+#error "Compile with console_main_fixture.prepare: console must be main 99b6002"
+#endif
+#include CONSOLE_NET_SOURCE
 
 volatile uint16_t snos_frames;
 static uint8_t incoming[LINK_FRAME], outgoing[LINK_FRAME];

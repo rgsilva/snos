@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fourth-round regressions: restart replay and callback generation contracts.
+"""Fourth-round regressions: delivery and callback generation contracts.
 
 Each named scenario runs in a fresh process. Failures are never suppressed.
 The hardware clock/IRQ primitives are host stubs; this is not a timing simulator.
@@ -55,10 +55,12 @@ lwip_sources += [lwip / "netif/ethernet.c"]
 lwip_sources += [root / "pico" / name for name in
                  ("nat_core.c", "link.c", "ctrl.c", "kbd.c", "hidkeys.c",
                   "tests/revalidation4_lwip_harness.c")]
+from console_main_fixture import prepare
+console_main_flags = prepare(root, build)
 # The console uses 24-bit far pointers; host-only warnings in its SDK headers
 # are disabled for this translation unit, not for Pico or lwIP sources.
 console_obj = build / "console_peer.o"
-subprocess.run([*common, "-Wno-pointer-to-int-cast", "-Wno-unused-function",
+subprocess.run([*common, *console_main_flags, "-Wno-pointer-to-int-cast", "-Wno-unused-function",
                 "-Wno-unknown-pragmas", "-ffunction-sections", "-fdata-sections",
                 "-c", str(root / "pico/tests/revalidation4_console_peer.c"),
                 "-o", str(console_obj)], check=True)

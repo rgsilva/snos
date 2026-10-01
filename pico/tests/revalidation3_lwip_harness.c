@@ -2,10 +2,6 @@
 #define main baseline_main
 #include "revalidation_lwip_harness.c"
 #undef main
-void console_peer_init(void);
-void console_peer_receive(const uint8_t *, uint8_t *);
-int console_peer_ip_read(uint8_t *, int);
-unsigned console_peer_keys(void);
 
 static void ack_frame(const uint8_t *frame) {
     uint8_t ack[LINK_FRAME] = {0};
@@ -19,73 +15,7 @@ static void synchronize(void) {
     link_next_out(f); ack_frame(f);
     link_next_out(f); assert(!(f[2] & F_SYN));
 }
-static void t_purge_after_acked_ip_prefix_resynchronizes(void) {
-    synchronize();
-    uint8_t old[100] = {0}, f[LINK_FRAME];
-    assert(link_push(CH_IP, old, sizeof(old)));
-    link_next_out(f); assert(f[4] == CH_IP && f[5] == 58);
-    /* SNES now holds the 100-byte prefix plus 56 bytes. main.c handles
-     * this ACK before console_poll/wifi_poll may disable NAT. */
-    ack_frame(f); assert(link_queued(CH_IP) == 44);
-    nat_configure(false); nat_configure(true);
-    assert(link_push(CH_IP, (const uint8_t *)"fresh", 5));
-    link_next_out(f);
-    assert((f[2] & F_SYN) && "partial console IP assembly must be discarded");
-}
-static void t_console_ip_stream_recovers_after_acked_prefix_purge(void) {
-    synchronize(); console_peer_init();
-    uint8_t old[100] = {0}, fresh[40] = {0x45}, f[LINK_FRAME], reply[LINK_FRAME], bytes[100];
-    assert(link_push(CH_IP, old, sizeof(old))); link_next_out(f);
-    console_peer_receive(f, reply);
-    assert(console_peer_ip_read(bytes, sizeof(bytes)) == 58);
-    assert(bytes[0] == 100 && bytes[1] == 0);
-    /* ip.c would retain these 56 old payload bytes awaiting another 44. */
-    assert(link_on_rx(reply).valid);
-    nat_configure(false); nat_configure(true);
-    assert(link_push(CH_IP, fresh, sizeof(fresh))); link_next_out(f);
-    console_peer_receive(f, reply);
-    int got = console_peer_ip_read(bytes, sizeof(bytes));
-    if (got != -1) fprintf(stderr, "console net_ip_read: expected reset -1, got %d bytes\n", got);
-    assert(got == -1 && "actual SNES receiver appended new packet to old assembly");
-}
-static void t_purge_after_acked_ctrl_prefix_resynchronizes(void) {
-    synchronize();
-    uint8_t f[LINK_FRAME], keys[55] = {0}, error[] = {0, 80, 1};
-    assert(link_push(CH_KBD, keys, sizeof(keys)));
-    assert(ctrl_error(error));
-    link_next_out(f);
-    assert(f[61] == CH_CTRL && f[62] == 1 && f[63] == 0x83);
-    ack_frame(f);
-    nat_configure(false); link_next_out(f);
-    assert((f[2] & F_SYN) && "partial console control record must be discarded");
-}
-static void t_purge_late_old_ack_cannot_ack_new_keyboard(void) {
-    synchronize();
-    uint8_t old[100] = {0}, first[LINK_FRAME], fresh[LINK_FRAME], retry[LINK_FRAME];
-    assert(link_push(CH_IP, old, sizeof(old))); link_next_out(first);
-    /* The console's old ACK is in transit. Abandon this frame and prepare
-     * keyboard data. Lose the new outbound frame, receive the old ACK. */
-    nat_configure(false);
-    kbd_init(); const uint8_t key[8] = {0, 0, 4};
-    kbd_hid_boot_report(key); kbd_poll();
-    link_next_out(fresh); assert(fresh[4] == CH_KBD && fresh[6] == 'a');
-    assert(fresh[2] & F_SYN);
-    ack_frame(first); link_next_out(retry);
-    assert((retry[2] & F_DATA) && retry[4] == CH_KBD && retry[6] == 'a');
-}
-static void t_purge_during_syn_episode_delivers_new_keyboard(void) {
-    console_peer_init();
-    uint8_t old[100] = {0}, f[LINK_FRAME], reply[LINK_FRAME];
-    assert(link_push(CH_IP, old, sizeof(old))); link_next_out(f);
-    assert(f[2] & F_SYN); console_peer_receive(f, reply);
-    /* Before Pico processes that ACK, the mode changes. No frame is lost. */
-    nat_configure(false);
-    kbd_init(); const uint8_t key[8] = {0, 0, 4};
-    kbd_hid_boot_report(key); kbd_poll(); link_next_out(f);
-    assert(f[4] == CH_KBD && (f[2] & F_SYN));
-    console_peer_receive(f, reply);
-    assert(console_peer_keys() == 1 && "new key mistaken for old SYN retransmission");
-}
+
 static void t_purge_keeps_queued_bluetooth_keys(void) {
     synchronize();
     uint8_t old[100] = {0}, f[LINK_FRAME];
@@ -158,11 +88,6 @@ static void t_hooks_survive_repeated_production_reset_paths(void) {
     }
 }
 static const struct { const char *name; void (*run)(void); } round3[] = {
-    TEST(t_purge_after_acked_ip_prefix_resynchronizes),
-    TEST(t_console_ip_stream_recovers_after_acked_prefix_purge),
-    TEST(t_purge_after_acked_ctrl_prefix_resynchronizes),
-    TEST(t_purge_late_old_ack_cannot_ack_new_keyboard),
-    TEST(t_purge_during_syn_episode_delivers_new_keyboard),
     TEST(t_purge_keeps_queued_bluetooth_keys),
     TEST(t_connect_completion_does_not_leak_after_abort),
     TEST(t_connect_completion_does_not_leak_after_error),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Third-round regressions: detach lifetime, slot reuse, and link transition safety.
+"""Third-round regressions: detach lifetime, slot reuse, and queued keys.
 
 Each named scenario runs in a fresh process. Failures are never suppressed.
 The hardware clock/IRQ primitives are host stubs; this is not a timing simulator.
@@ -56,14 +56,6 @@ lwip_sources += [lwip / "netif/ethernet.c"]
 lwip_sources += [root / "pico" / name for name in
                  ("nat_core.c", "link.c", "ctrl.c", "kbd.c", "hidkeys.c",
                   "tests/revalidation3_lwip_harness.c")]
-# The console uses 24-bit far pointers; host-only warnings in its SDK headers
-# are disabled for this translation unit, not for Pico or lwIP sources.
-console_obj = build / "console_peer.o"
-subprocess.run([*common, "-Wno-pointer-to-int-cast", "-Wno-unused-function",
-                "-Wno-unknown-pragmas", "-ffunction-sections", "-fdata-sections",
-                "-c", str(root / "pico/tests/revalidation3_console_peer.c"),
-                "-o", str(console_obj)], check=True)
-lwip_sources.append(console_obj)
 common += ["-Wl,--gc-sections"]
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 failed = []

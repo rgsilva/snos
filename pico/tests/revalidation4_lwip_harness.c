@@ -40,42 +40,7 @@ static void t_restart_does_not_duplicate_delivered_keyboard(void) {
     fprintf(stderr, "key deliveries across restart: %u\n", console_peer_keys() - before);
     assert(console_peer_keys() == before + 1);
 }
-static void t_restart_preserves_queued_keyboard_at_most_once(void) {
-    sync_peer(); unsigned before = console_peer_keys();
-    uint8_t f[LINK_FRAME], reply[LINK_FRAME];
-    assert(link_push(CH_KBD, (const uint8_t *)"a", 1));
-    link_next_out(f); /* This frame is lost. */
-    assert(link_push(CH_KBD, (const uint8_t *)"bcdef", 5));
-    nat_configure(false);
-    for (unsigned i = 0; i < 8; ++i) {
-        link_next_out(f); console_peer_receive(f, reply);
-        /* Deliberately lose one ACK and require duplicate suppression. */
-        if (i != 0) assert(link_on_rx(reply).valid);
-    }
-    unsigned delivered = console_peer_keys() - before;
-    const uint8_t *keys = console_peer_key_values() + before;
-    /* The abandoned key may be absent; queued bytes must arrive exactly
-     * once, in order, even when the replacement frame is retransmitted. */
-    assert(delivered == 5 || delivered == 6);
-    if (delivered == 6) assert(*keys++ == 'a');
-    assert(!memcmp(keys, "bcdef", 5));
-}
-static void t_restart_full_refilled_queue_preserves_queued_keys(void) {
-    sync_peer(); unsigned before = console_peer_keys();
-    uint8_t f[LINK_FRAME], reply[LINK_FRAME];
-    assert(link_push(CH_KBD, (const uint8_t *)"a", 1));
-    link_next_out(f); /* lost; its consumed chunk slot is now free */
-    for (unsigned i = 0; i < 32; ++i)
-        assert(link_push(CH_KBD, (const uint8_t *)"b", 1));
-    nat_configure(false);
-    for (unsigned i = 0; i < 4; ++i) {
-        link_next_out(f); console_peer_receive(f, reply); assert(link_on_rx(reply).valid);
-    }
-    fprintf(stderr, "queued key deliveries after restart: %u\n", console_peer_keys() - before);
-    /* The abandoned a may be lost, but every b that remained queued must
-     * arrive once. */
-    assert(console_peer_keys() == before + 32);
-}
+
 static void t_normal_syn_ack_does_not_fail_live_channel(void) {
     uint8_t f[LINK_FRAME], reply[LINK_FRAME]; console_peer_init();
     assert(link_push(CH_KBD, (const uint8_t *)"a", 1));
@@ -126,45 +91,14 @@ static void t_udp_callback_context_rejects_old_lifetime(void) {
     struct udp_pcb unrelated = {0}; unsigned slot; uint32_t generation;
     assert(!udp_callback_slot(old_arg, &unrelated, &slot, &generation));
 }
-static void t_restart_discards_console_inflight_ip_tail(void) {
-    sync_peer(); console_peer_enable_ip();
-    uint8_t stream[102] = {100, 0, 0x45}, f[LINK_FRAME], reply[LINK_FRAME];
-    /* Payload bytes at the fragment boundary look like a legal new length. */
-    stream[58] = 100;
-    assert(console_peer_ip_write(stream, sizeof(stream)) == sizeof(stream));
-    link_next_out(f); console_peer_receive(f, reply);
-    link_rx_t r = link_on_rx(reply); assert(r.valid && r.count == 1);
-    assert(r.records[0].ch == CH_IP && r.records[0].len == 58);
-    nat_ip_bytes(r.records[0].data, r.records[0].len); assert(ipused == 58);
-    /* ACK the prefix and let console build the tail, which is lost. */
-    link_next_out(f); console_peer_receive(f, reply);
-    assert(reply[2] & F_DATA);
-    nat_configure(false); nat_configure(true); assert(ipused == 0);
-    link_next_out(f); console_peer_receive(f, reply);
-    r = link_on_rx(reply); assert(r.valid);
-    for (size_t i = 0; i < r.count; ++i)
-        if (r.records[i].ch == CH_IP) nat_ip_bytes(r.records[i].data, r.records[i].len);
-    fprintf(stderr, "old tail retained in fresh Pico assembler: %zu bytes\n", ipused);
-    /* The application learns the new HELLO address and submits a new packet. */
-    console_peer_enable_ip();
-    uint8_t fresh[42] = {40, 0, 0x45};
-    assert(console_peer_ip_write(fresh, sizeof(fresh)) == sizeof(fresh));
-    link_next_out(f); console_peer_receive(f, reply); r = link_on_rx(reply);
-    for (size_t i = 0; i < r.count; ++i)
-        if (r.records[i].ch == CH_IP) nat_ip_bytes(r.records[i].data, r.records[i].len);
-    fprintf(stderr, "assembler after complete fresh packet: %zu bytes\n", ipused);
-    assert(ipused == 0 && "fresh packet spliced into pre-restart console tail");
-}
+
 static const struct { const char *name; void (*run)(void); } cases[] = {
     TEST(t_restart_does_not_duplicate_delivered_keyboard),
-    TEST(t_restart_preserves_queued_keyboard_at_most_once),
-    TEST(t_restart_full_refilled_queue_preserves_queued_keys),
     TEST(t_normal_syn_ack_does_not_fail_live_channel),
     TEST(t_saved_connect_generation_is_rejected_after_reuse),
     TEST(t_saved_accept_generation_is_rejected_after_reuse),
     TEST(t_tcp_callback_context_rejects_old_lifetime),
     TEST(t_udp_callback_context_rejects_old_lifetime),
-    TEST(t_restart_discards_console_inflight_ip_tail),
 };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

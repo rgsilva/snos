@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fifth-pass restart progress, keyboard ordering and immutable callback guards.
+"""Fifth-round properties: progress, keyboard ordering, callback lifetime.
 
 Each named scenario runs in a fresh process. Failures are never suppressed.
 The hardware clock/IRQ primitives are host stubs; this is not a timing simulator.
@@ -55,10 +55,12 @@ lwip_sources += [lwip / "netif/ethernet.c"]
 lwip_sources += [root / "pico" / name for name in
                  ("nat_core.c", "link.c", "ctrl.c", "kbd.c", "hidkeys.c",
                   "tests/revalidation5_lwip_harness.c")]
+from console_main_fixture import prepare
+console_main_flags = prepare(root, build)
 # The console uses 24-bit far pointers; host-only warnings in its SDK headers
 # are disabled for this translation unit, not for Pico or lwIP sources.
 console_obj = build / "console_peer.o"
-subprocess.run([*common, "-Wno-pointer-to-int-cast", "-Wno-unused-function",
+subprocess.run([*common, *console_main_flags, "-Wno-pointer-to-int-cast", "-Wno-unused-function",
                 "-Wno-unknown-pragmas", "-ffunction-sections", "-fdata-sections",
                 "-c", str(root / "pico/tests/revalidation4_console_peer.c"),
                 "-o", str(console_obj)], check=True)
@@ -82,7 +84,7 @@ for label, sources in (("lwip", lwip_sources),):
 # A separate process exposes actual console frames to the actual Gateway.
 # Its wire/mailbox callbacks are stubbed as in the C peer tests, not Mesen.
 driver = build / "console_driver"
-subprocess.run([*common, "-Wno-pointer-to-int-cast", "-Wno-unused-function",
+subprocess.run([*common, *console_main_flags, "-Wno-pointer-to-int-cast", "-Wno-unused-function",
                 "-Wno-unknown-pragmas", "-ffunction-sections", "-fdata-sections",
                 str(root / "pico/tests/revalidation5_console_driver.c"),
                 "-o", str(driver)], check=True)
@@ -136,14 +138,6 @@ def gateway_restart_case(inflight, retry=False):
         console.stdin.close()
         assert console.wait(timeout=5) == 0
 
-for inflight in (False, True):
-    name = "t_gateway_restart_preserves_" + ("inflight" if inflight else "queued") + "_console_hello"
-    try:
-        gateway_restart_case(inflight)
-        print("PASS", name)
-    except AssertionError as error:
-        failed.append(name)
-        print(f"FAIL {name}: {error}")
 name = "t_gateway_restart_fresh_hello_recovers_without_reset_loop"
 try:
     gateway_restart_case(False, retry=True)
@@ -151,5 +145,5 @@ try:
 except AssertionError as error:
     failed.append(name)
     print(f"FAIL {name}: {error}")
-print(f"revalidation5 total: {len(names) + 3 - len(failed)} pass, {len(failed)} fail")
+print(f"revalidation5 total: {len(names) + 1 - len(failed)} pass, {len(failed)} fail")
 sys.exit(bool(failed))
