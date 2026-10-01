@@ -292,6 +292,13 @@ exactly-once, and the SNES tree is untouched by tier 2. `transition_test.py`
 switches modes at every byte offset of an in-flight datagram, in both
 directions, to hold that line.
 
+**`net speedtest` in NAT mode (2026-10-01):** HELLO reports the Pico's own
+address in NAT mode and nothing listened there, so the test timed out on real
+hardware. The NAT core now terminates port 7778 itself with a peer speaking
+`speedtest.py`'s protocol, capped at two local flows, and output scheduling
+is round-robin across all flows so an always-ready local source cannot starve
+a real connection. In relay mode `speedtest.py` on the PC is still the peer.
+
 **Tier 3 PARKED** until a W5500 is at hand (Ricardo, 2026-09-30): wired
 Ethernet on the Pico, so the console gets a real LAN address.
 
@@ -420,8 +427,18 @@ own at boot and after sleep. Reports are translated on the Pico in
 `SNOS_KEY_*` codes, Ctrl+letter as control codes) and ride the existing
 `LINK_CH_KBD` records, so the console side did not change. Bonds live in an
 8 KB BTstack flash bank just below the settings sector, with a linker guard
-against the firmware growing into either. BLE (HID over GATT) keyboards are
-not supported yet.
+against the firmware growing into either.
+
+**BLE added 2026-10-01**, because the first real keyboard tried, a Logitech
+ERGO, is LE only and never showed up in a Classic inquiry. `bt scan` now runs
+an LE scan beside the inquiry and tags entries `[LE]`/`[BR]`; pairing is LE
+Secure Connections with the passkey on the console; HID is BTstack's
+`hids_client`, boot protocol first with a report-map fallback (`pico/hogp.c`);
+reconnect uses the bonded identity so a rotating private address survives
+sleep. Reviewed over four passes: the first found every key notification
+would have been dropped (wrong packet-type filter) and the report ID read as
+key data. Still unproven on a real keyboard; follow-up probes are in
+`pico/tests/` outside the `*_test.py` set.
 
 **7. `log off` / `log on` on the Pico's USB console. ✅** The 2-second stats
 line and every asynchronous event line scrolled over whatever was being typed.
