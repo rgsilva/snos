@@ -1305,7 +1305,12 @@ void net_service(void) {
    * SYN frame it sees, and a second in flight could be adopted instead. */
   flying = (uint8_t)(tx_next - tx_base);
   w = syn_out ? 1 : net_window_now();
-  if (tx_cursor == tx_next && flying < w) {
+  /* With frames in flight and nothing new queued there is nothing to build:
+   * a build that came back empty would only be thrown away for the resend
+   * below, ~11k cycles of the NMI's at the end of every burst. */
+  if (tx_cursor == tx_next && flying < w &&
+      (flying == 0 || ((txq_head - txq_tail - txq_out) & (TXQ_SIZE - 1)) != 0 ||
+       (ip_mode && ((iptx_head - iptx_tail - iptx_out) & (IP_TXRING - 1)) != 0))) {
     k = (uint8_t)(tx_next & NET_WINDOW_MASK);
     if (build_frame(txwin[k], k)) {
       txq_out = (uint16_t)(txq_out + txwin_ctrl[k]);
