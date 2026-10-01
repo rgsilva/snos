@@ -81,6 +81,8 @@ extern volatile uint16_t net_stat_hello;
 #define NET_TEXT_MAX 48
 extern char net_text[NET_TEXT_MAX + 1];
 extern volatile uint16_t net_gw_version;
+/* Bumped by the NMI each time it adopts a peer restart (F_SYN). */
+extern volatile uint8_t net_peer_restarts;
 int net_hello(void);
 int net_connect(const char *hostport);
 int net_listen(uint16_t port);

@@ -10,6 +10,20 @@ static chunk_t pool[QUEUE_COUNT];
 static uint8_t order[QUEUE_COUNT];
 static size_t count;
 static bool syn, peer_syn_seen, rx_resync, started;
+/* After OUR restart, a console that did not restart with us is mid-stream:
+ * its frames already on the wire were cut for the Pico that is gone, and the
+ * first may be the middle of a datagram, which the empty IP assembler would
+ * read as a length prefix (restart_validation_test.py). Its sequence is
+ * adopted as before, but its IP records are dropped until it acks inside our
+ * window -- base - 1 included, "nothing of yours yet, but I have your
+ * sequence" -- on a frame after the first, whose ack can match by chance.
+ * By then it has seen our SYN and restarted its streams at a record (current
+ * consoles empty the frames in flight; older ones are stop-and-wait, and the
+ * one frame they had out is the first we saw). Nothing fresh is lost: a
+ * console sends IP only after a HELLO answered by this session, and the
+ * frame that carries it acks that answer. Control is not held: HELLO is how
+ * a console gets that far. */
+static bool ip_hold;
 /* The send window (docs/link-throughput.md). Frames base..tx_seq-1 are in
  * flight, kept by sequence; cursor is the next of them to put on the wire
  * again, or tx_seq when none is owed. A window of 1 is stop-and-wait, frame
@@ -40,7 +54,7 @@ void link_init(void) {
     critical_section_init(&queue_lock);
 #endif
     LOCK();
-    count = 0; peer_syn_seen = started = false;
+    count = 0; peer_syn_seen = started = ip_hold = false;
     syn = rx_resync = true; base = tx_seq = cursor = rx_next = 0; window = 1;
     resends = bad_sum = 0;
     UNLOCK();
@@ -78,9 +92,10 @@ link_rx_t link_on_rx(const uint8_t *f) {
     LOCK();
     if (f[3] != checksum(f)) { ++bad_sum; UNLOCK(); return result; }
     result.valid = true;
-    if (rx_resync) { rx_resync = false; rx_next = f[0]; }
     /* Cumulative: an ack covers every frame up to it. */
     uint8_t acked = (uint8_t)(f[1] - base + 1), flying = (uint8_t)(tx_seq - base);
+    if (rx_resync) { rx_resync = false; rx_next = f[0]; ip_hold = !(f[2] & F_SYN); }
+    else if (ip_hold && acked <= flying) ip_hold = false;
     if (acked && acked <= flying) {
         base = (uint8_t)(f[1] + 1); syn = false;
         if ((uint8_t)(cursor - base) > (uint8_t)(tx_seq - base)) cursor = base;
@@ -91,6 +106,7 @@ link_rx_t link_on_rx(const uint8_t *f) {
              * the window it asked for. */
             peer_syn_seen = true; rx_next = f[0];
             count = 0; started = false; tx_seq = cursor = base; window = 1;
+            ip_hold = false; /* its streams begin again too */
             result.reset = true;
             if (ip_stream_reset)
                 ip_stream_reset();
@@ -100,7 +116,8 @@ link_rx_t link_on_rx(const uint8_t *f) {
         for (size_t o = LINK_HDR; o + 2 <= LINK_FRAME;) {
             uint8_t ch = f[o], n = f[o + 1];
             if (ch == CH_PAD || o + 2 + n > LINK_FRAME) break;
-            result.records[result.count++] = (link_record_t){ch, n, f + o + 2};
+            if (ch != CH_IP || !ip_hold)
+                result.records[result.count++] = (link_record_t){ch, n, f + o + 2};
             o += 2 + n;
         }
         ++rx_next;

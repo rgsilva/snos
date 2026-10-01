@@ -145,7 +145,11 @@ on restart, checksum — and all of it is already tested against this kernel.
 On the cable both ends may keep a window of frames in flight: the console
 asks the Pico for one (`C2S_LINKWIN`, `net tune window`), and until it does,
 and after every console restart, the Pico sends stop-and-wait exactly as
-gateway.py does (docs/link-throughput.md).
+gateway.py does (docs/link-throughput.md). Whichever end restarts holds the
+other's IP records until that end acks inside its window -- frames already
+on the wire were cut for the peer that is gone -- and the end that lived on
+empties its frames in flight when it sees the F_SYN, so both streams start
+again at a record (docs/link-throughput.md, "Peer restarts").
 
 **Frame size.** `LINK_FRAME` is 256 in the emulator build. The hardware
 build sets **`LINK_FRAME 64`**. The 65816 bit loop (§4) costs ~181 master

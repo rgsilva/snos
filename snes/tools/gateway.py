@@ -123,6 +123,15 @@ class Gateway:
         # sequence they are already using. Announce and adopt are both
         # required; each alone fixes exactly one direction.
         self.rx_resync = True
+        # A console that did not restart with us is mid-stream: its frames
+        # already on the wire were cut for the gateway that is gone, and the
+        # first may be the middle of a datagram, which ip_bytes would read as
+        # a length. Its IP is dropped until it acks inside our window, on a
+        # frame after the first -- proof it has seen our F_SYN and begun its
+        # streams again. Control is not held: HELLO is how it gets that far.
+        # pico/link.c does the same; pico/tests/link_test.py and
+        # ip_hold_test.py hold the two to each other.
+        self.ip_hold = False
         self.out = []            # [ch, bytearray] queued for the SNES
         # True when out[0] has already had bytes taken from it: a HELLO may
         # jump the queue, but never into the middle of a half-sent record.
@@ -321,6 +330,10 @@ class Gateway:
         if self.rx_resync:
             self.rx_resync = False
             self.rx_next = f[SEQ]
+            self.ip_hold = not (f[FLAGS] & F_SYN)
+        elif self.ip_hold and ((f[ACK] - self.tx_seq + 1) & 0xFF) <= int(self.awaiting):
+            # Inside our window: tx_seq - 1, or the frame in flight.
+            self.ip_hold = False
 
         if self.awaiting and f[ACK] == self.tx_seq:
             self.awaiting = False
@@ -346,13 +359,27 @@ class Gateway:
                 # session's reassembler as a record start.
                 self.awaiting = False
                 self.inflight = None
+                self.ip_hold = False
                 print("gateway: SNES restarted, session reset")
         else:
             self.peer_syn_seen = False
 
         if (f[FLAGS] & F_DATA) and f[SEQ] == self.rx_next:
-            self.deliver(f)
+            self.deliver(self._without_ip(f) if self.ip_hold else f)
             self.rx_next = (self.rx_next + 1) & 0xFF
+
+    @classmethod
+    def _without_ip(cls, f):
+        """The frame's records with the IP ones left out (ip_hold)."""
+        g = bytearray([CH_PAD]) * FRAME
+        g[:HDR] = f[:HDR]
+        o = HDR
+        for at in cls._record_offsets(f):
+            if f[at] != CH_IP:
+                n = 2 + f[at + 1]
+                g[o:o + n] = f[at:at + n]
+                o += n
+        return g
 
     def next_out(self):
         if not self.awaiting:

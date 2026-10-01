@@ -85,6 +85,10 @@ static uint8_t ip_started;  /* uip_init has run */
  * after boot — so ask, at boot and then patiently, until an answer names a
  * version. One 2-byte record every ~2 s is the cost of autoconfiguration. */
 static uint16_t hello_last;
+/* net_peer_restarts as of the last pass. A peer restart throws away any
+ * HELLO still queued for the dead peer (net.c), so a move here asks again at
+ * once instead of waiting out the two seconds. */
+static uint8_t restarts_seen;
 
 /* uIP's periodic timer. Every connection gets a tick every half second: that
  * is uIP's retransmission clock, its connection timeout, and the only thing
@@ -1019,6 +1023,10 @@ void ip_service(void) {
   /* Ask the gateway what it is, until it answers. net_gw_version is zeroed at
    * boot and again on a peer restart, so this also re-arms IP mode after the
    * daemon bounces — the new process states its own capabilities. */
+  if (restarts_seen != net_peer_restarts) {
+    restarts_seen = net_peer_restarts;
+    hello_last = (uint16_t)(snos_frames - 121u);
+  }
   if (net_gw_version == 0 && (uint16_t)(snos_frames - hello_last) > 120u) {
     hello_last = snos_frames;
     net_hello();

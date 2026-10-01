@@ -263,6 +263,20 @@ static uint8_t syn_out;
 static uint8_t rx_resync;
 static uint8_t rxframe[LINK_FRAME];
 static uint8_t rx_next;     /* the sequence we are waiting to receive */
+/* Inbound IP held back after OUR restart, from a peer that did not restart
+ * with us. Adopting its sequence is right, but its first frames were built
+ * for the console that is gone and may be the middle of a datagram: ip.c
+ * would read payload as a length prefix and misframe every datagram after.
+ * Such a peer starts its streams again once it has seen our SYN (pico/link.c,
+ * tools/gateway.py), so IP waits for proof that it has -- an ack inside our
+ * own send window, on a frame after the first -- and the frames before that
+ * lose only their IP. Nothing is lost by waiting: the peer has no flows
+ * toward a console that has not yet had a HELLO answered. */
+static uint8_t rx_hold;
+/* Peer restarts adopted, NMI -> foreground: ip.c asks the new peer for its
+ * HELLO at once when this moves, since a HELLO already queued for the old
+ * one was discarded with everything else (net_service). */
+volatile uint8_t net_peer_restarts;
 
 /* `net tune` (shell.c): the window this end keeps in flight on the cable and
  * asks the peer to keep toward it (C2S_LINKWIN, sent from the foreground by
@@ -371,6 +385,7 @@ static void session_init(void) {
    * counter we just zeroed. Announce and adopt are both needed — each alone
    * fixes one direction and leaves the other deadlocked. */
   rx_resync = 1;
+  rx_hold = 0;
   window_told = 0xFFFFu; /* tell the peer once it has answered a HELLO */
   net_stat_rx_frames = 0;
   net_stat_hello = 0;
@@ -705,6 +720,34 @@ static void txq_put(uint8_t b) {
   txq_head = (uint16_t)((txq_head + 1) & (TXQ_SIZE - 1));
 }
 
+/* One whole control record, published by a single store of txq_head -- the
+ * net_ip_write2 rule, for the same reason. When the peer restarts, the NMI
+ * throws away everything queued with `tail = head` (net_service), and a head
+ * that moved byte by byte could be caught mid-record: the record's first
+ * bytes discarded, its last ones published after them, and the new peer's
+ * parser reading a length as a verb. Callers check txq_space() and hold
+ * proc_lock(), as they always have. */
+static void txq_record(const uint8_t *r, uint8_t n) {
+  uint16_t h = txq_head;
+  uint8_t i;
+  for (i = 0; i < n; i++) {
+    txq[h] = r[i];
+    h = (uint16_t)((h + 1) & (TXQ_SIZE - 1));
+  }
+  txq_head = h;
+}
+
+/* C2S_IPFWD / C2S_IPUNFWD: [verb][3][ch][port lo][port hi]. */
+static void txq_port_record(uint8_t verb, uint8_t ch, uint16_t port) {
+  uint8_t r[5];
+  r[0] = verb;
+  r[1] = 3;
+  r[2] = ch;
+  r[3] = (uint8_t)(port & 0xFF);
+  r[4] = (uint8_t)(port >> 8);
+  txq_record(r, 5);
+}
+
 /* Called by the trap layer when an app — rather than the shell — opened one.
  * The tag says WHICH app (M10): 1 = the foreground app, 2.. = background
  * process id + 1. Reaping by tag is what stops a foreground app's exit from
@@ -867,11 +910,7 @@ int net_listen(uint16_t port) {
     net_close(ch);
     return -1;
   }
-  txq_put(C2S_IPFWD);
-  txq_put(3);
-  txq_put((uint8_t)ch);
-  txq_put((uint8_t)(port & 0xFF));
-  txq_put((uint8_t)(port >> 8));
+  txq_port_record(C2S_IPFWD, (uint8_t)ch, port);
   ch_listen[ch] = 1;
   ch_lport[ch] = port;
   ch_state[ch] = NET_ST_LISTEN;
@@ -888,11 +927,7 @@ void net_unfwd_retry(void) {
     if (unfwd_port[ch] == 0) continue;
     proc_lock();
     if (txq_space() >= 5) {
-      txq_put(C2S_IPUNFWD);
-      txq_put(3);
-      txq_put((uint8_t)ch);
-      txq_put((uint8_t)(unfwd_port[ch] & 0xFF));
-      txq_put((uint8_t)(unfwd_port[ch] >> 8));
+      txq_port_record(C2S_IPUNFWD, (uint8_t)ch, unfwd_port[ch]);
       unfwd_port[ch] = 0;
     }
     proc_unlock();
@@ -904,8 +939,10 @@ int net_hello(void) {
   if (!net_up()) return -1;
   proc_lock();
   if (txq_space() >= 2) {
-    txq_put(C2S_HELLO);
-    txq_put(0);
+    uint8_t r[2];
+    r[0] = C2S_HELLO;
+    r[1] = 0;
+    txq_record(r, 2);
     rc = 0;
   }
   proc_unlock();
@@ -923,11 +960,7 @@ void net_close(int ch) {
    * taken by its own previous life. */
   if (ch_listen[ch] && ch_lport[ch] != 0) {
     if (txq_space() >= 5) {
-      txq_put(C2S_IPUNFWD);
-      txq_put(3);
-      txq_put((uint8_t)ch);
-      txq_put((uint8_t)(ch_lport[ch] & 0xFF));
-      txq_put((uint8_t)(ch_lport[ch] >> 8));
+      txq_port_record(C2S_IPUNFWD, (uint8_t)ch, ch_lport[ch]);
     } else {
       unfwd_port[ch] = ch_lport[ch];   /* net_unfwd_retry sends it later */
     }
@@ -1030,8 +1063,9 @@ static int frame_fits(const uint8_t *f) {
     /* Only IP records need room reserved; control bytes feed a state machine
      * with no backpressure of its own, and any other channel number is
      * something this kernel no longer speaks — stepped over by its length,
-     * which is the forward-compatibility rule both sides have always had. */
-    if (ch == LINK_CH_IP) need_ip = (uint16_t)(need_ip + len);
+     * which is the forward-compatibility rule both sides have always had.
+     * Held IP (rx_hold) is dropped, so it needs no room. */
+    if (ch == LINK_CH_IP && !rx_hold) need_ip = (uint16_t)(need_ip + len);
     o += 2 + len;
   }
   /* The tail read here is foreground-owned and may be stale; stale only
@@ -1053,8 +1087,9 @@ static void frame_deliver(const uint8_t *f) {
     if (ch == LINK_CH_PAD) break;
     if (o + 2 + len > LINK_FRAME) break;
     if (ch == LINK_CH_CTRL) ctrl_bytes(&f[o + 2], len);
-    else if (ch == LINK_CH_IP)
-      iprx_put(&f[o + 2], len); /* frame_fits reserved the space */
+    else if (ch == LINK_CH_IP) {
+      if (!rx_hold) iprx_put(&f[o + 2], len); /* frame_fits reserved the space */
+    }
     else if (ch == LINK_CH_KBD) {
       uint8_t i;
       for (i = 0; i < len; i++) kbd_push(f[o + 2 + i]);
@@ -1174,9 +1209,11 @@ void net_tune_announce(void) {
   if (!link_is_serial() || net_gw_version == 0 || window_told == net_stat_hello) return;
   proc_lock();
   if (txq_space() >= 3) {
-    txq_put(C2S_LINKWIN);
-    txq_put(1);
-    txq_put(net_window);
+    uint8_t r[3];
+    r[0] = C2S_LINKWIN;
+    r[1] = 1;
+    r[2] = net_window;
+    txq_record(r, 3);
     window_told = net_stat_hello;
   }
   proc_unlock();
@@ -1209,6 +1246,18 @@ void net_service(void) {
       if (rx_resync) {
         rx_resync = 0;
         rx_next = rxframe[LINK_SEQ];
+        /* A peer announcing its own restart starts its streams afresh; one
+         * that does not is mid-stream (rx_hold). */
+        rx_hold = (uint8_t)((rxframe[LINK_FLAGS] & LINK_F_SYN) == 0);
+      } else if (rx_hold &&
+                 (uint8_t)(rxframe[LINK_ACK] - tx_base + 1) <=
+                     (uint8_t)(tx_next - tx_base)) {
+        /* It acks inside our window -- tx_base - 1 included, which is
+         * "nothing of yours yet, but I have your sequence" -- so it has
+         * adopted our restart, and what it sends now begins at a datagram.
+         * Never on the first frame: that one was built before the peer could
+         * have seen us, and its ack field can match by chance. */
+        rx_hold = 0;
       }
 
       /* An ack releases every frame up to it — acknowledgements are
@@ -1266,6 +1315,31 @@ void net_service(void) {
           for (n = 0; n < NET_WINDOW_MAX; n++) txwin_ip[n] = 0;
           iprx_mark = iprx_head;
           iprx_resync = 1;
+          /* And our streams toward it must begin again at a record. The
+           * frames in flight were cut for the dead peer: the first may be
+           * the middle of a datagram or a control record, and the new peer
+           * -- which adopted our sequence, not our stream -- would read it
+           * as a start (restart_validation_test.py). So every one of them
+           * goes out empty: the peer still takes its sequence number, but
+           * no byte of it. Unsent control goes too, whole records only
+           * (txq_record), and a HELLO among it is asked again at once
+           * (net_peer_restarts, ip.c). What the peer took before we could
+           * adopt -- a frame already on the wire -- is its side's problem,
+           * and it solves it: it holds our IP until we ack inside its
+           * window (pico/link.c, tools/gateway.py).
+           *
+           * Not while our own SYN is still out: then nothing we sent has
+           * been acknowledged, our streams are still at their start, and
+           * the new peer receives them whole -- HELLO included. */
+          if (!syn_out) {
+            for (k = tx_base; k != tx_next; k++)
+              txwin[k & NET_WINDOW_MASK][LINK_HDR] = LINK_CH_PAD;
+            for (n = 0; n < NET_WINDOW_MAX; n++) txwin_ctrl[n] = 0;
+            txq_tail = txq_head;
+            txq_out = 0;
+          }
+          rx_hold = 0;
+          net_peer_restarts++;
         }
       } else {
         peer_syn_seen = 0;
