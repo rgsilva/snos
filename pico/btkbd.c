@@ -53,8 +53,18 @@ static char target_name[64];
 static uint16_t hid_cid, hids_cid;
 static hci_con_handle_t le_handle = HCI_CON_HANDLE_INVALID;
 static bool le_report_mode;
+static bool le_hids_started, le_report_retry, le_boot_waiting;
 static hogp_keyboard_map_t le_map;
 static uint32_t reconnect_at;
+static bool target_store_pending;
+static uint32_t target_store_at;
+
+static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet,
+                          uint16_t size);
+
+/* The controller provides these when BTstack's full BLE stack is linked. */
+extern uint8_t gap_load_resolving_list_from_le_device_db(void) __attribute__((weak));
+extern void sm_request_pairing(hci_con_handle_t handle) __attribute__((weak));
 
 static bool same_addr(const bd_addr_t a, const bd_addr_t b) { return bd_addr_cmp(a, b) == 0; }
 static const char *addr_str(const bd_addr_t addr) { return bd_addr_to_str(addr); }
@@ -68,9 +78,21 @@ static void copy_text(char *dst, size_t dst_size, const char *src) {
     dst[len] = '\0';
 }
 
+static bool same_scan_address(const scan_entry_t *entry, const bd_addr_t addr,
+                              bd_addr_type_t addr_type) {
+    if (!same_addr(entry->addr, addr)) return false;
+    if (entry->addr_type == addr_type) return true;
+    return (entry->addr_type == BD_ADDR_TYPE_ACL && addr_type == BD_ADDR_TYPE_LE_PUBLIC) ||
+           (entry->addr_type == BD_ADDR_TYPE_LE_PUBLIC && addr_type == BD_ADDR_TYPE_ACL);
+}
+
 static int scan_index(transport_t transport, const bd_addr_t addr, bd_addr_type_t addr_type) {
     for (size_t i = 0; i < scan_count; ++i) {
-        if (scan[i].transport == transport && scan[i].addr_type == addr_type && same_addr(scan[i].addr, addr)) {
+        if (scan[i].transport == transport && scan[i].addr_type == addr_type &&
+            same_addr(scan[i].addr, addr)) {
+            return (int)i;
+        }
+        if (same_scan_address(&scan[i], addr, addr_type)) {
             return (int)i;
         }
     }
@@ -93,10 +115,20 @@ static void store_target(void) {
     void *ctx = NULL;
     btstack_tlv_get_instance(&tlv, &ctx);
     if (!tlv || !target_valid) return;
-    target_store_t rec = { TARGET_MAGIC, TARGET_VERSION, {0}, target_transport, target_addr_type, {0} };
+    target_store_t rec = {
+        TARGET_MAGIC, TARGET_VERSION, {0}, target_transport, target_addr_type, {0}
+    };
     memcpy(rec.addr, target_addr, sizeof(rec.addr));
     copy_text(rec.name, sizeof(rec.name), target_name);
-    tlv->store_tag(ctx, TARGET_TAG, (const uint8_t *)&rec, sizeof(rec));
+    if (tlv->store_tag(ctx, TARGET_TAG, (const uint8_t *)&rec, sizeof(rec))) {
+        log_puts("bt: could not save keyboard target");
+    }
+}
+
+/* Avoid a synchronous flash write from an HCI or SM callback. */
+static void schedule_target_store(void) {
+    target_store_pending = true;
+    target_store_at = to_ms_since_boot(get_absolute_time()) + 1000;
 }
 
 static void load_target(void) {
@@ -124,6 +156,7 @@ static void clear_target(void) {
     void *ctx = NULL;
     btstack_tlv_get_instance(&tlv, &ctx);
     if (tlv) tlv->delete_tag(ctx, TARGET_TAG);
+    target_store_pending = false;
     target_valid = false;
     target_name[0] = '\0';
     memset(target_addr, 0, sizeof(target_addr));
@@ -139,6 +172,10 @@ static void drop_target_bond(void) {
     gap_auto_connection_stop_all();
     gap_whitelist_clear();
     for (int i = le_device_db_count() - 1; i >= 0; --i) le_device_db_remove(i);
+    if (gap_load_resolving_list_from_le_device_db != NULL &&
+        gap_load_resolving_list_from_le_device_db() != ERROR_CODE_SUCCESS) {
+        log_puts("bt: could not reload LE resolving list");
+    }
 }
 
 static bool bonded(void) {
@@ -233,6 +270,10 @@ static void handle_br_report(const uint8_t *report, uint16_t len) {
 
 static void handle_le_report(uint8_t report_id, const uint8_t *report, uint16_t len) {
     uint8_t boot[HIDKEYS_REPORT_LEN];
+    /* hids_client prepends this ID and includes it in its reported length. */
+    if (!len || report[0] != report_id) return;
+    ++report;
+    --len;
     if (!le_report_mode) {
         if (len >= sizeof(boot)) kbd_hid_boot_report(report);
     } else if (hogp_keyboard_report_to_boot(&le_map, report_id, report, len, boot)) {
@@ -240,55 +281,104 @@ static void handle_le_report(uint8_t report_id, const uint8_t *report, uint16_t 
     }
 }
 
-static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+static void start_le_hids(void) {
+    if (le_hids_started || le_handle == HCI_CON_HANDLE_INVALID) return;
+    le_hids_started = true;
+    le_report_mode = false;
+    le_report_retry = false;
+    memset(&le_map, 0, sizeof(le_map));
+    uint8_t status = hids_client_connect(le_handle, le_hids_event, HID_PROTOCOL_MODE_BOOT,
+                                         &hids_cid);
+    if (status != ERROR_CODE_SUCCESS) {
+        le_hids_started = false;
+        log_printf("bt: LE HID setup could not start (0x%02x)\n", status);
+        gap_disconnect(le_handle);
+    }
+}
+
+static void start_le_report_hids(void) {
+    if (!le_report_retry || le_handle == HCI_CON_HANDLE_INVALID) return;
+    le_report_retry = false;
+    le_report_mode = true;
+    uint8_t status = hids_client_connect(le_handle, le_hids_event, HID_PROTOCOL_MODE_REPORT,
+                                         &hids_cid);
+    if (status != ERROR_CODE_SUCCESS) {
+        le_hids_started = false;
+        log_printf("bt: LE report HID setup could not start (0x%02x)\n", status);
+        gap_disconnect(le_handle);
+    }
+}
+
+static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet,
+                          uint16_t size) {
     (void)channel;
-    (void)size;
-    if (packet_type != HCI_EVENT_PACKET || hci_event_packet_get_type(packet) != HCI_EVENT_GATTSERVICE_META) return;
+    (void)packet_type;
+    if (size < 3 || hci_event_packet_get_type(packet) != HCI_EVENT_GATTSERVICE_META) return;
     switch (hci_event_gattservice_meta_get_subevent_code(packet)) {
         case GATTSERVICE_SUBEVENT_HID_SERVICE_CONNECTED: {
             uint8_t status = gattservice_subevent_hid_service_connected_get_status(packet);
             if (status != ERROR_CODE_SUCCESS && !le_report_mode) {
-                le_report_mode = true;
+                /* hids_client finalizes its live client after this callback returns. */
+                le_report_retry = true;
                 log_puts("bt: LE boot protocol unavailable; trying report protocol");
-                hids_client_connect(le_handle, le_hids_event, HID_PROTOCOL_MODE_REPORT, &hids_cid);
                 return;
             }
             if (status != ERROR_CODE_SUCCESS) {
+                le_hids_started = false;
                 log_printf("bt: LE HID setup failed (0x%02x)\n", status);
                 gap_disconnect(le_handle);
                 return;
             }
             hids_cid = gattservice_subevent_hid_service_connected_get_hids_cid(packet);
             if (le_report_mode) {
-                const uint8_t *map = hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0);
+                const uint8_t *map =
+                    hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0);
                 uint16_t map_len = hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0);
                 if (!hogp_keyboard_map_parse(map, map_len, &le_map)) {
                     log_puts("bt: LE HID report map has no keyboard input");
                     gap_disconnect(le_handle);
                     return;
                 }
+            } else {
+                /* Boot mode is ready only after its keyboard input report arrives. */
+                le_boot_waiting = true;
+                return;
             }
             connected = true;
             connecting = false;
-            store_target();
+            schedule_target_store();
             log_printf("bt: keyboard ready [LE %s]\n", le_report_mode ? "report" : "boot");
             break;
         }
         case GATTSERVICE_SUBEVENT_HID_REPORT:
-            if (connected) handle_le_report(gattservice_subevent_hid_report_get_report_id(packet),
-                                             gattservice_subevent_hid_report_get_report(packet),
-                                             gattservice_subevent_hid_report_get_report_len(packet));
+            if (le_boot_waiting) {
+                uint8_t report_id = gattservice_subevent_hid_report_get_report_id(packet);
+                const uint8_t *report = gattservice_subevent_hid_report_get_report(packet);
+                uint16_t len = gattservice_subevent_hid_report_get_report_len(packet);
+                if (report_id != HID_BOOT_MODE_KEYBOARD_ID || len <= HIDKEYS_REPORT_LEN ||
+                    report[0] != report_id) break;
+                le_boot_waiting = false;
+                connected = true;
+                connecting = false;
+                schedule_target_store();
+                log_puts("bt: keyboard ready [LE boot]");
+            }
+            if (connected) {
+                handle_le_report(gattservice_subevent_hid_report_get_report_id(packet),
+                                 gattservice_subevent_hid_report_get_report(packet),
+                                 gattservice_subevent_hid_report_get_report_len(packet));
+            }
             break;
         default:
             break;
     }
 }
 
-static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet,
+                              uint16_t size) {
     (void)channel;
     (void)size;
     if (packet_type != HCI_EVENT_PACKET) return;
-    bool start_hids = false;
     switch (hci_event_packet_get_type(packet)) {
         case SM_EVENT_JUST_WORKS_REQUEST:
             sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
@@ -301,24 +391,49 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
         case SM_EVENT_PAIRING_COMPLETE:
             if (sm_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
                 log_puts("bt: LE pairing complete");
-                start_hids = true;
+                start_le_hids();
             } else {
                 log_printf("bt: LE pairing failed (0x%02x)\n",
                            sm_event_pairing_complete_get_status(packet));
+                gap_disconnect(le_handle);
             }
             break;
-        case SM_EVENT_REENCRYPTION_COMPLETE:
-            start_hids = true;
+        case SM_EVENT_REENCRYPTION_COMPLETE: {
+            uint8_t status = sm_event_reencryption_complete_get_status(packet);
+            if (status == ERROR_CODE_SUCCESS) {
+                start_le_hids();
+            } else {
+                log_printf("bt: LE re-encryption failed (0x%02x); pairing again\n", status);
+                if (sm_request_pairing != NULL) sm_request_pairing(le_handle);
+            }
             break;
+        }
+        case SM_EVENT_IDENTITY_CREATED: {
+            bd_addr_t peer_addr;
+            sm_event_identity_created_get_address(packet, peer_addr);
+            if (sm_event_identity_created_get_handle(packet) != le_handle &&
+                (!target_valid || target_transport != TRANSPORT_LE ||
+                 !same_addr(peer_addr, target_addr))) break;
+            target_addr_type = sm_event_identity_created_get_identity_addr_type(packet);
+            sm_event_identity_created_get_identity_address(packet, target_addr);
+            target_valid = true;
+            schedule_target_store();
+            break;
+        }
+        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED: {
+            bd_addr_t peer_addr;
+            sm_event_identity_resolving_succeeded_get_address(packet, peer_addr);
+            if (sm_event_identity_resolving_succeeded_get_handle(packet) != le_handle &&
+                (!target_valid || target_transport != TRANSPORT_LE ||
+                 !same_addr(peer_addr, target_addr))) break;
+            target_addr_type = sm_event_identity_resolving_succeeded_get_identity_addr_type(packet);
+            sm_event_identity_resolving_succeeded_get_identity_address(packet, target_addr);
+            target_valid = true;
+            schedule_target_store();
+            break;
+        }
         default:
             break;
-    }
-    if (start_hids) {
-        le_report_mode = false;
-        memset(&le_map, 0, sizeof(le_map));
-        if (hids_client_connect(le_handle, le_hids_event, HID_PROTOCOL_MODE_BOOT, &hids_cid) != ERROR_CODE_SUCCESS) {
-            gap_disconnect(le_handle);
-        }
     }
 }
 
@@ -422,21 +537,27 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             log_puts("bt: pairing started");
             break;
         case GAP_EVENT_PAIRING_COMPLETE:
-            if (gap_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) store_target();
+            if (gap_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
+                schedule_target_store();
+            }
             break;
         case HCI_EVENT_META_GAP:
-            if (hci_event_gap_meta_get_subevent_code(packet) == GAP_SUBEVENT_LE_CONNECTION_COMPLETE &&
+            if (hci_event_gap_meta_get_subevent_code(packet) ==
+                    GAP_SUBEVENT_LE_CONNECTION_COMPLETE &&
                 target_valid && target_transport == TRANSPORT_LE) {
                 le_handle = gap_subevent_le_connection_complete_get_connection_handle(packet);
                 connecting = false;
+                connected = false;
+                le_hids_started = le_report_retry = le_report_mode = le_boot_waiting = false;
                 log_puts("bt: LE connected; pairing");
-                sm_request_pairing(le_handle);
+                if (sm_request_pairing != NULL) sm_request_pairing(le_handle);
             }
             break;
         case HCI_EVENT_DISCONNECTION_COMPLETE:
             if (target_transport == TRANSPORT_LE && le_handle != HCI_CON_HANDLE_INVALID) {
                 le_handle = HCI_CON_HANDLE_INVALID;
                 connected = connecting = false;
+                le_hids_started = le_report_retry = le_report_mode = le_boot_waiting = false;
                 log_puts("bt: LE keyboard disconnected");
                 if (target_valid && radio_on) connect_target(3000);
             }
@@ -462,7 +583,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     hid_subevent_connection_opened_get_bd_addr(packet, target_addr);
                     target_valid = true;
                     target_transport = TRANSPORT_BR;
-                    store_target();
+                    schedule_target_store();
                     log_printf("bt: keyboard connected [BR] (%s)\n", addr_str(target_addr));
                     break;
                 case HID_SUBEVENT_DESCRIPTOR_AVAILABLE:
@@ -525,6 +646,12 @@ void btkbd_poll(void) {
         scan_print_pending = false;
         print_scan_results();
     }
+    if (target_store_pending &&
+        (int32_t)(to_ms_since_boot(get_absolute_time()) - target_store_at) >= 0) {
+        target_store_pending = false;
+        store_target();
+    }
+    if (le_report_retry) start_le_report_hids();
     if (initialized && radio_on && target_valid && !connected && !connecting &&
         (int32_t)(to_ms_since_boot(get_absolute_time()) - reconnect_at) >= 0) try_connect_now();
 }
@@ -551,7 +678,8 @@ static void start_scan(void) {
     memset(scan, 0, sizeof(scan));
     scanning = true;
     scan_print_pending = false;
-    gap_set_scan_params(1, 0x30, 0x30, 0);
+    /* A 25% active LE scan duty leaves time for WiFi and Classic inquiry. */
+    gap_set_scan_params(1, 0x60, 0x18, 0);
     gap_set_scan_duplicate_filter(false);
     gap_start_scan();
     int err = gap_inquiry_start(INQUIRY_10S);
@@ -573,6 +701,12 @@ static bool parse_target(const char *arg, scan_entry_t *entry) {
     }
     memset(entry, 0, sizeof(*entry));
     if (!sscanf_bd_addr(arg, entry->addr)) return false;
+    for (size_t i = 0; i < scan_count; ++i) {
+        if (same_addr(scan[i].addr, entry->addr)) {
+            *entry = scan[i];
+            return true;
+        }
+    }
     entry->transport = TRANSPORT_BR;
     entry->addr_type = BD_ADDR_TYPE_ACL;
     return true;
