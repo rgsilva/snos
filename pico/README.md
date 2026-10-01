@@ -91,7 +91,8 @@ HELLO reports protocol version 2 and the relay host's address. The keyboard
 module sends `abcdef` every five seconds only with `kbd test on`; `type <text>`
 sends text plus Enter as keystrokes.
 
-Bluetooth Classic HID keyboards pair from the console:
+Bluetooth HID keyboards pair from the console. Both Bluetooth Classic and BLE
+HID-over-GATT keyboards are supported (one bonded keyboard at a time):
 
 ```text
 bt scan
@@ -99,12 +100,28 @@ bt pair 1
 bt
 ```
 
-`bt scan` runs for about 10 seconds and prints Classic devices with likely
-keyboards first. `bt pair <n|addr>` connects to an entry from the latest scan,
-or to a Bluetooth address. If a passkey is printed, type those digits on the
-keyboard and press Enter. A bonded keyboard reconnects automatically at boot
-and after sleep disconnects. `bt forget` disconnects and drops the bond target.
+`bt scan` runs for about 10 seconds and prints `[LE]` and `[BR]` devices, with
+likely keyboards first. LE scanning is active, so names from scan responses are
+included. `bt pair <n|addr>` connects to an entry from the latest scan, or to a
+Bluetooth address (an address entered directly is Classic). If a passkey is
+printed, type those digits on the keyboard and press Enter. A bonded keyboard
+reconnects automatically at boot and after sleep disconnects; LE reconnect uses
+the bonded identity/IRK and controller accept list, so Logitech private
+addresses are handled. `bt` shows the keyboard transport. `bt forget`
+disconnects and drops either kind of bond target.
+
+For multi-device Logitech keyboards (MX Keys, ERGO, K860, Wave Keys), put the
+desired Easy-Switch slot in pairing mode first: hold its Easy-Switch key for
+about three seconds until the light blinks quickly.
 `bt off`/`bt on` power the Bluetooth host stack down/up.
+
+LE discovery requests a 15 ms active scan window every 60 ms (25% configured
+duty); no over-the-air duty measurement has been made. The target record is
+written by the main loop as soon as it is known, under the CYW43 async-context
+lock shared with BTstack's TLV store. The target write, BTstack bond writes and
+flash-bank compaction are still synchronous while that lock is held; pairing's
+software ECC is also synchronous. RF coexistence and controller-port deadlines
+under those operations still require hardware timing measurement.
 
 `LINK_FRAME` is defined once in `link.h`, at 64 bytes. Each exchange is 512
 clocks, MSB first, about 8 us per bit. The console writes $4016 bit 0 onto
@@ -164,6 +181,7 @@ PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/ctrl_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/wire_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/config_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/hidkeys_test.py
+PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/hogp_test.py
 ```
 
 The first compares 10,000 seeded exchanges to `gateway.py` at 64 bytes,
