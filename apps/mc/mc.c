@@ -41,9 +41,10 @@
 #define RXBUF 200          /* every packet we PARSE fits; larger ones are
                             * skipped by length, streaming */
 #define KA_FRAMES 600u     /* keepalive every ~10 s; the client kicks ~30 */
-/* The trap layer copies at most 128 bytes per SYS_NET_WRITE, so asking for
- * more just means a short write and another trip round the loop. */
-#define WRCHUNK 128
+/* SYS_NET_WRITE takes whatever the channel's send ring has room for (it was
+ * capped at 128 bytes until the link-throughput work); a chunk the size of
+ * that ring is one syscall per segment instead of eight. */
+#define WRCHUNK 1024
 
 static const mc_blob_t BLOB_STATUS = MC_STATUS_RESPONSE;
 static const mc_blob_t BLOB_PONG = MC_PONG;

@@ -148,11 +148,16 @@ static uint16_t unfwd_port[NET_CHANNELS];
  * acknowledgement (net_stack_txdrop). Both indices foreground-owned, like the
  * receive rings above.
  *
- * 512 rather than the 1024 of the receive ring, because the shapes differ: a
- * download arrives in bulk and has to be buffered against an app that reads it
- * slowly, whereas what the SNES sends is a request or a response it generates
- * itself and can simply generate less of when the queue is full. */
-#define NET_TXRING 512
+ * THIS IS THE SEGMENT SIZE. uIP keeps one segment in flight and fills it with
+ * whatever the ring holds, up to the MSS (1460), so a ring of 512 sent 511-byte
+ * segments: half the MSS, and every one paid a whole round trip -- the far
+ * end's ack, an ip_service pass, the application refilling the ring -- before
+ * the next could leave. 1024 doubles the bytes per round trip for 4 KB of WRAM
+ * over eight channels (docs/link-throughput.md); 2048 would reach the MSS but
+ * does not fit. Smaller than the receive ring because the shapes differ: a
+ * download arrives in bulk against an app that reads it when it reads it,
+ * while what the SNES sends it generates itself, and can generate less of. */
+#define NET_TXRING 1024
 static uint8_t txring[NET_CHANNELS][NET_TXRING];
 static uint16_t txring_head[NET_CHANNELS];
 static uint16_t txring_tail[NET_CHANNELS];
@@ -322,6 +327,9 @@ typedef char net_checksum_needs_16_byte_frames[(LINK_FRAME % 16) == 0 ? 1 : -1];
  * end of the buffer. The destination bank restriction is checked in net_read;
  * see netasm.s for why it cannot simply be taken from the pointer. */
 extern void ring_move(uint8_t __far *dst, const uint8_t *src, uint16_t n);
+
+/* kernel/netasm.s: n bytes between any two banks, ~22 cycles a byte. */
+extern void far_copy(uint8_t *dst, const uint8_t __far *src, uint16_t n);
 
 static void session_init(void) {
   int j, k;
@@ -761,6 +769,29 @@ int net_write(int ch, const uint8_t *src, int n) {
   ring_move(&txring[ch][h], src, first);
   if (first < (uint16_t)n)
     ring_move(&txring[ch][0], src + first, (uint16_t)((uint16_t)n - first));
+  txring_head[ch] = (uint16_t)((h + (uint16_t)n) & (NET_TXRING - 1));
+  return n;
+}
+
+/* net_write's twin for SYS_NET_WRITE: the bytes come from an application's
+ * own bank, so they go straight into the ring with far_copy (netasm.s) --
+ * MVN's banks are immediates. It replaced a copy through a 128-byte buffer
+ * on the caller's stack, which also capped every write at 128 bytes; now a
+ * write takes whatever net_wspace says the ring has room for. */
+int net_write_far(int ch, const uint8_t __far *src, int n) {
+  int room;
+  uint16_t h, first;
+  if (ch <= 0 || ch >= NET_CHANNELS) return 0;
+  if (ch_state[ch] != NET_ST_OPEN && ch_state[ch] != NET_ST_EOF) return 0;
+  room = net_wspace(ch);
+  if (n > room) n = room;
+  if (n <= 0) return 0;
+  h = txring_head[ch];
+  first = (uint16_t)(NET_TXRING - h);
+  if (first > (uint16_t)n) first = (uint16_t)n;
+  far_copy(&txring[ch][h], src, first);
+  if (first < (uint16_t)n)
+    far_copy(&txring[ch][0], src + first, (uint16_t)((uint16_t)n - first));
   txring_head[ch] = (uint16_t)((h + (uint16_t)n) & (NET_TXRING - 1));
   return n;
 }

@@ -86,6 +86,8 @@ int net_connect(const char *hostport);
 int net_listen(uint16_t port);
 int net_hangup(int ch);
 int net_write(int ch, const uint8_t *src, int n);
+/* The same, from any bank (SYS_NET_WRITE: an application's buffer). */
+int net_write_far(int ch, const uint8_t __far *src, int n);
 int net_wspace(int ch);
 extern volatile uint16_t net_stat_bad_sum;
 extern volatile uint16_t net_stat_resent;

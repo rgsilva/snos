@@ -4,7 +4,8 @@
  * for it does (including SYS_NET_WRITE's copy through a 128-byte local) and
  * charges the bench clock for the syscall, so the application's own CPU time
  * competes with the link inside a video frame exactly as it does on the
- * console. The costs live in linkbench_harness.c's table. */
+ * console. The costs live in linkbench_harness.c's table. SYS_NET_WRITE is
+ * net_write_far straight from the application's buffer, as traps.c does it. */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,7 +24,7 @@
 
 /* The kernel, compiled from snes/kernel (see linkbench.py). */
 int net_read(int ch, uint8_t *dst, int max);
-int net_write(int ch, const uint8_t *src, int n);
+int net_write_far(int ch, const uint8_t *src, int n);
 int net_wspace(int ch);
 int net_state(int ch);
 int net_connect(const char *hostport);
@@ -84,11 +85,9 @@ static uint16_t sys_net_read(uint16_t ch, void *buf, uint16_t max) {
     return (uint16_t)n;
 }
 static uint16_t sys_net_write(uint16_t ch, const void *buf, uint16_t len) {
-    uint8_t tmp[128];
-    uint16_t n = len > sizeof tmp ? sizeof tmp : len;
-    memcpy(tmp, buf, n);
-    bench_charge_syscall(SC_WRITE, n);
-    return (uint16_t)net_write((int)ch, tmp, (int)n);
+    int n = net_write_far((int)ch, (const uint8_t *)buf, (int)len);
+    bench_charge_syscall(SC_WRITE, (unsigned)(n > 0 ? n : 0));
+    return (uint16_t)n;
 }
 static uint16_t sys_net_wspace(uint16_t ch) {
     bench_charge_syscall(SC_WSPACE, 0);

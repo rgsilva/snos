@@ -77,7 +77,7 @@ static cost_t cost[] = {
     {"uip_out_fixed", 25000},/* a segment out: header, ip_output... */
     {"uip_out_byte", 7},     /* ...per byte beyond ip_sum and the copy (79k for 511) */
     {"sys_fixed", 11800},    /* COP dispatch (SYS_FRAMES 12.7k, NET_STATE 12.3k) */
-    {"sys_write_byte", 150}, /* SYS_NET_WRITE: far_copy into tmp[128] (43k for 128) */
+    {"sys_write_byte", 130}, /* SYS_NET_WRITE: far_copy into the ring */
     {"sys_read_fixed", 3000},/* net_read beyond the MVN */
     {"app_loop", 1000},      /* the app's own C per syscall */
     {"pico_us", 300},        /* Pico main loop: received frame to port_set_tx */
@@ -198,6 +198,7 @@ void link_mb_move(void *dst, const void *src, uint16_t n) {
         tl("uip in done");
     }
 }
+void far_copy(uint8_t *dst, const uint8_t *src, uint16_t n) { memmove(dst, src, n); }
 uint16_t ip_sum(const uint8_t *p, uint16_t n) {
     uint32_t s = 0;
     for (uint16_t i = 0; i + 1 < n; i += 2) s += (uint32_t)(p[i] << 8 | p[i + 1]);

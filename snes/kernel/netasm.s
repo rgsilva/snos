@@ -298,10 +298,9 @@ ipsum_zero:
 ;;;
 ;;; n bytes, either side in any bank, n may be 0. For the copy MVN cannot do:
 ;;; its banks are immediates, and SYS_NET_WRITE takes its bytes from whichever
-;;; bank an application keeps its buffer in. [dp],y long-indirect on both
-;;; sides is ~22 cycles a byte; the C loop it replaces in traps.c was ~840
-;;; master cycles a byte, 107k for every 128-byte write
-;;; (docs/link-throughput.md).
+;;; bank an application keeps its buffer in (net_write_far). [dp],y
+;;; long-indirect on both sides is ~22 cycles a byte; the C loop it replaced
+;;; in traps.c was ~840 master cycles a byte (docs/link-throughput.md).
 ;;; ---------------------------------------------------------------------------
 far_copy:
               rep     #0x30

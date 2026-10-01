@@ -48,6 +48,7 @@ uint8_t net_checksum(const uint8_t *f, uint16_t n) {
     return s;
 }
 void ring_move(uint8_t *dst, const uint8_t *src, uint16_t n) { memmove(dst, src, n); }
+void far_copy(uint8_t *dst, const uint8_t *src, uint16_t n) { memmove(dst, src, n); }
 void link_mb_move(void *dst, const void *src, uint16_t n) { memmove(dst, src, n); }
 uint16_t ip_sum(const uint8_t *p, uint16_t n) { (void)p; (void)n; return 0; }
 void proc_lock(void) {}

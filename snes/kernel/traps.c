@@ -32,8 +32,6 @@
 
 #define BANK0M 0x7E0000ul
 
-/* kernel/netasm.s: n bytes between any two banks. */
-extern void far_copy(uint8_t *dst, const uint8_t __far *src, uint16_t n);
 
 #define FRM_DB 1
 #define FRM_D 2
@@ -444,14 +442,10 @@ uint16_t snos_cop_c(uint16_t sp) {
     uint16_t off = SNOS_ARGS.p0, bank = SNOS_ARGS.p1, ch = SNOS_ARGS.p2;
     const uint8_t __far *src =
         (const uint8_t __far *)(((uint32_t)bank << 16) | (uint32_t)off);
-    /* Copy through a local buffer: net_write takes a near pointer and the
-     * source is in the application's bank. far_copy (netasm.s), because the
-     * C loop here was ~840 master cycles a byte. */
-    uint8_t tmp[128];
-    uint16_t n = a;
-    if (n > sizeof tmp) n = sizeof tmp;
-    far_copy(tmp, src, n);
-    return (uint16_t)net_write((int)ch, tmp, (int)n);
+    /* Straight from the application's bank into the channel's ring. It went
+     * through a 128-byte local first, which capped every write at 128 bytes
+     * and copied every byte twice. */
+    return (uint16_t)net_write_far((int)ch, src, (int)a);
   }
 
   case SYS_NET_WSPACE:
