@@ -192,7 +192,10 @@ What this step does:
   with the early gate alone, 125 exchanges were still clocking when vblank
   began, NMIs were held off, and the run wedged. The host bench had not seen
   it -- its cost table had the C before the exchange at half its real size
-  (corrected now). With the check: none, in every run since.
+  (corrected now). With the check: none, in every run since. (The check
+  stopped the clocks in time but not, by much, the NMI mask behind them:
+  "The unmask, not the last clock" below moved it from line 135 to 131,
+  and 128 while the keyboard's HDMA runs.)
 - An exchange that follows another in the same frame is **kicked**: eight
   bare `$4017` clocks (`link_serial_kick`, linkxfer.s), a short burst like
   the auto-read's, which the adapter's gap detector turns into a restart
@@ -209,7 +212,11 @@ What this step does:
   loop slower than ~2 ms per turn, or one that stalls 5 ms every 20 turns,
   lost hundreds of frames unsent and download fell to 1460 B/s (duplex 584 +
   357); with in-order staging, nothing was lost and throughput did not move.
-  At one exchange a frame the two policies are identical.
+  At one exchange a frame the two policies are identical. *What those runs
+  showed is the staging policy, not stalls*: that bench's Pico handled each
+  frame the moment it arrived and only delayed its reply, with 64 queue slots
+  where `port.c` has two. "The bench's Pico, made faithful" below has stalls
+  that block.
 
 The gain on the hardware ROM is small: the NMI ends too late for the
 foreground exchange to fit in most frames (186 of 2300 in a speedtest). The
@@ -295,20 +302,17 @@ Tried and dropped:
   has an unbegun datagram in front of it, only the rest of the one in
   flight, which it must not cut into. No effect in the bench; reverted.
 
-## The one test this breaks
+## The one test this broke
 
-`pico/tests/transition_test.py` ends with a property,
-`p4_console_sources_equal_main`, that fails unless `snes/kernel/net.c` and
-`link.h` are byte-identical to commit 99b6002. It was tier 2's guard that the
-NAT work left the SNES tree alone. A console-side window cannot leave net.c
-alone, so from step 3 on that one property fails; the brief says not to edit
-an existing test that encodes behaviour being deliberately changed, so it is
-not edited. Its 21 behavioural properties -- mode switches at every byte
-offset, restarts, keyboard exactly-once -- still pass, and they run the 99b6002
-console against the new windowed Pico, which is the old-ROM/new-firmware
-pairing. Retiring the property, or re-pinning `console_main_fixture.MAIN`
-(which would also move the other harnesses to the new console), is the
-owner's call.
+`pico/tests/transition_test.py` ended with a property,
+`p4_console_sources_equal_main`, that failed unless `snes/kernel/net.c` and
+`link.h` were byte-identical to commit 99b6002 -- tier 2's guard that the NAT
+work left the SNES tree alone, which a console-side window cannot satisfy.
+It was left failing rather than edited. The validation (dea11f2) replaced
+the pin with what it stood for: the 21 behavioural properties -- mode
+switches at every byte offset, keyboard exactly-once -- now run against the
+99b6002 console (old ROM, new firmware) *and* the checked-out one at windows
+1, 4 and 8.
 
 ## The link alone
 
@@ -372,6 +376,124 @@ in. If silicon misbehaves,
 `net tune exch 1` takes out the kick and the foreground exchange first, and
 `net tune window 1` everything else; both are runtime, no reflash.
 
+## After validation
+
+### The unmask, not the last clock
+
+The beam check was argued from the last clock: ~85 fixed lines from the
+kick, so starting by line 135 left ~4 lines before vblank. But the hazard is
+NMI *masked* when vblank begins (input.c, `fg_poll_fits`), and a foreground
+poll's mask lasts past its last clock: the receive check and the way back out
+to `net_service_fg`'s unmask. `test/hwport.lua` now follows `$4200`. Every
+runtime mask (`$01`) that held an exchange is timed from its unmask to the
+next vblank, and a vblank that begins inside one fails the run. The `$2137`
+latch that `xfer()` reads for its check is timed to the unmask too. On the
+speedtest:
+
+- the unmask comes at most 4.8 lines after the last clock, and 88.9 lines
+  after the check, so a check passed late on line 135 unmasks at 224.9 -- a
+  tenth of a line short of vblank, not four;
+- the worst actually seen was 1.6 lines on the code before this change;
+- `test-hwresponse` found a slower case: with the on-screen keyboard up, its
+  HDMA split (`$420C = $38`) takes cycles from every line and check to
+  unmask is 91.8 lines -- 227.8 from line 135, past vblank.
+
+So the gate is two lines: 131, and 128 while HDMA runs (`console.c` sets
+`link_serial_hdma` before enabling it and clears it after disabling it).
+With the gate's own read, check to unmask is now 89.0 and 91.9 lines, and
+the worst case unmasks by line 221.0 or 220.9 -- four lines clear. The
+speedtest did not move: 3650 / 3375 / 3066 + 2148 before and after. 128 for
+both would have cost its duplex phase 5% (2920 + 2046), and lowering the
+early gate as well (`FG_LAST` 100 -> 96) about 10%, so neither is done.
+
+`test-hwspeed` and `test-hwresponse` now fail on a vblank inside a
+foreground mask and on a run with no foreground exchange to check. Each
+HDMA state is also judged at its gate, which the Makefile splices in from
+`link_serial.c`: they fail if a check passed on its gate's last line could
+unmask under 2 lines before vblank. With 131 for both, `test-hwresponse`
+reports 1.1 lines with HDMA on and fails; at 135, `test-hwspeed` fails too.
+One trap for the trace: `cop_ret` writes `$01` at line 225 just as vblank
+latches its NMI, so the whole NMI handler, exchange included, runs inside
+that "mask"; a mask an NMI fires inside is not counted as a foreground poll.
+
+### The bench's Pico, made faithful
+
+The validation's point: the bench's Pico processed each frame the instant
+it arrived and only delayed the reply, with 64 queue slots where `port.c`
+has two -- so its stall runs could not show a blocked main loop, its
+four-frame receive ring overflowing, or `port_set_tx` evicting a reply.
+They showed the staging policy, which is what step 4 used them for. The
+model now has all three. The receive ring takes whole exchanges and loses
+the fifth. The main loop takes one frame per turn and blocks for a slow turn
+(`pico_us_slow` every `pico_slow_every` turns) or a periodic stall
+(`pico_stall_us` every `pico_stall_every_ms`, frame or none). The two-slot
+queue drops its oldest. At the defaults nothing changes: 3606 / 3171 /
+3504 + 2455, at most one frame waiting, nothing evicted.
+
+| Pico main loop (in-order staging) | download | upload | both | lost, full ring | evicted |
+|---|---|---|---|---|---|
+| 0.3 ms turns (default) | 3606 | 3171 | 3504 + 2455 | 0 | 0 |
+| 2 ms turns, or 4 ms | 3504 | 3069 | 3212 + 2250 | 0 | 0 |
+| 5 ms stall every 100 ms | 3504 | 3069 | 3212 + 2250 | 0 | 0 |
+| 20 ms stall every 200 ms | 3504 | 3069 | 3212 + 2250 | 0 | 10 |
+| 50 ms stall every 500 ms | 3212 | 2966 | 2920 + 2148 | 25 | 124 |
+| 50 ms stall every 100 ms | 2336 | 2250 | 1898 + 1432 | 126 | 626 |
+
+Every phase completed, with no bad sums, refusals or desyncs. The 3-8% of
+the middle rows is one or two 1460-byte segments in a 10 s phase.
+Newest-wins staging at 2 ms turns is still 584 / 3375 / 438 + 613: step 4's
+result stands. The old model could not run
+the 20 and 50 ms rows at all; its replies queued behind the slow one and the
+speedtest timed out.
+
+What this establishes: with the real link code on both ends, a receive
+overrun or an evicted reply is recovered by the window, and what an
+interrupts-on stall of a given shape costs. What it does not: how the real
+loop stalls (unmeasured), a stall with interrupts off (a flash write: no
+restart, so no ring and no staging while it lasts), IRQ latency, or anything
+electrical.
+
+### Peer restarts
+
+The validation's FIX-FIRST finding, inherited from before this work
+(`restart_validation_test.py`): restart the adapter while the console is
+part-way through sending a datagram, and the restarted Pico adopts the
+console's sequence *and* the frame already on the wire, whose IP bytes are
+the middle of that datagram; its empty assembler reads payload as a length
+prefix, and every datagram after is misframed until the console reboots.
+Two halves fix it, one per side of the restart:
+
+- **The restarted end holds IP until the survivor has seen the restart.**
+  If the first frame after a restart lacks F_SYN, the peer lived on, and its
+  IP records are dropped until a later frame acks inside our window, the
+  ack just below it included ("I have your sequence, none of your frames
+  yet"). The first frame never counts: it was built before the peer could
+  see us, and its ack can match by chance. `pico/link.c` and
+  `tools/gateway.py` hold the console's IP;
+  `net.c` holds the peer's, for the mirror case -- the console restarting,
+  or `net reset`, while the Pico is mid-datagram. Control is not held: HELLO
+  is how a peer gets that far, and IP cannot flow before a HELLO is
+  answered, so nothing fresh is lost.
+- **The survivor restarts its streams at a record.** On adopting a peer's
+  F_SYN the console empties every frame in flight (a pad where its first
+  record was: the peer still takes the sequence number, but no byte) and
+  drops all queued control and IP. A HELLO among them is asked again at
+  once (`net_peer_restarts`, ip.c). Control records are now published
+  whole (`txq_record`), so that drop always lands between records. The Pico
+  already did its half on a console's F_SYN.
+
+Not by a link restart: no SYN is re-sent, no sequence rewinds, nothing is
+queued from the NMI, and a NAT/relay mode switch is still invisible to the
+link (`transition_test.py`, all four consoles). `restart_validation_test.py`
+passes against the legacy console and windows 1, 4 and 8.
+`restart_recovery_test.py` pins each half with a property that fails
+without it: a stale frame whose first copy was lost, a first frame whose
+ack aliases the new window, and both mirror cases. `ip_hold_test.py` holds
+`link.c` and `gateway.py` to the same hold. Left as it was: a stale control
+record split across that first frame could still desync the restarted end's
+control parser (control records rarely span frames), and an old ROM does not
+have the mirror half.
+
 ## What only hardware can confirm
 
 - **The kick on the real adapter.** Eight clocks ~6 us apart and the gap
@@ -379,16 +501,22 @@ in. If silicon misbehaves,
   (kick_test.py), not against the divider-fed GPIO and a real 5A22's read
   strobe. The auto-read's burst, which the same mechanism already handles on
   silicon every frame, is the reassurance.
-- **The Pico main loop's turnaround.** The bench varies it from 0.1 to 4 ms
-  and adds 5 ms stalls; in-order staging made every case safe and none of
-  them slow. The real figure is unmeasured; `stats` resends against fresh
-  frames is the tell.
-- **`port.c`'s in-order staging** is interrupt-context firmware with no host
-  test (the SDK's PIO/DMA would need faking); the bench models its policy, not
-  its code.
-- **Margins against vblank.** The last-moment check leaves ~4 scanlines of
-  margin at worst; Mesen's PPU and S-CPU timing are cycle-exact for these
-  paths, but it is the only check of them.
+- **The Pico main loop's turnaround and stalls.** The bench now blocks the
+  main loop for real ("The bench's Pico, made faithful"): stalls to 20 ms
+  lose nothing, 50 ms ones overflow the receive ring and cost 6-17%, and the
+  window recovers every time. How long and how often the real loop stalls is
+  unmeasured; `stats` (`overrun=`, and resends against fresh frames) is the
+  tell. A stall with interrupts off -- a flash write -- is not modelled at
+  all.
+- **`port.c` itself.** `port_validation_test.py` runs the actual file
+  against SDK stubs: restart, the two-slot queue, receive overflow, idle,
+  both wire encodings. Not DMA DREQ credits, IRQ latency or partial bits.
+- **Margins against vblank.** Traced in Mesen ("The unmask, not the last
+  clock"): with the check at line 131 (128 under HDMA), a foreground poll
+  unmasks NMI at least 4 lines before vblank, worst case, and
+  `test-hwspeed`/`test-hwresponse` fail if that falls under 2. Mesen's PPU and S-CPU timing are cycle-exact for these
+  paths, but it is the only check of them; a real trace of `$4200` against
+  vblank, NTSC and PAL, would be the confirmation.
 - **WiFi.** The speedtest peer lives inside the Pico's NAT; a real remote
   peer adds WiFi and lwIP to every round trip, which these numbers do not
   include.

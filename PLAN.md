@@ -385,9 +385,19 @@ with a clean wire. The work is logged step by step in
 
 What is left is above the link and not its code: `con_flush` costs 28k
 cycles a pass with nothing to draw, an idle `ip_service` pass 39k, and every
-syscall ~12k of COP dispatch. And one test is in the way: transition_test.py's
-`p4_console_sources_equal_main` asserts net.c is unchanged since tier 2, which
-a console-side window cannot satisfy (docs/link-throughput.md).
+syscall ~12k of COP dispatch.
+
+Validation (2026-10-01, docs/link-throughput.md "After validation"): an
+adapter restart mid-upload poisoned the Pico's IP assembler with the stale
+middle of a datagram (inherited, not the window's) -- fixed without a link
+restart: the restarted end holds IP until the survivor acks inside its
+window, and the survivor empties its frames in flight. The foreground
+exchange's NMI mask outlived its last clock by up to 4.8 lines (more with
+the keyboard's HDMA split up), so the last-moment beam check moved from line
+135 to 131, and 128 under HDMA (worst case now 4 lines before vblank;
+`test-hwspeed`/`test-hwresponse` check it). The host bench's Pico now blocks
+for real; stalls to 20 ms cost nothing, 50 ms ones 6-17%. transition_test.py's
+source pin was replaced by its properties run on the current console.
 
 **2. `net reset` — restart the network stack. ✅** Fails every occupied
 channel, clears uIP and DNS state, re-probes both link backends and re-HELLOs.
