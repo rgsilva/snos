@@ -44,14 +44,19 @@ static uint16_t checksum(const uint8_t *p, size_t len, uint32_t s) {
     while (s >> 16) s = (s & 65535) + (s >> 16);
     return ~s;
 }
-static void console_tcp(unsigned flags, uint32_t ack) {
+static void console_tcp_to(uint32_t destination, uint16_t port, unsigned flags,
+                           uint32_t ack) {
     uint8_t p[40] = {0}; p[0] = 0x45; put16(p + 2, sizeof(p)); p[8] = 64; p[9] = 6;
-    put32(p + 12, 0x0a00020f); put32(p + 16, 0xc0000201);
+    put32(p + 12, 0x0a00020f); put32(p + 16, destination);
     put16(p + 10, checksum(p, 20, 0));
-    put16(p + 20, 5000); put16(p + 22, 80); put32(p + 24, flags == 2 ? 100 : 101);
+    put16(p + 20, 5000); put16(p + 22, port); put32(p + 24, flags == 2 ? 100 : 101);
     put32(p + 28, ack); p[32] = 0x50; p[33] = flags; put16(p + 34, 1460);
-    put16(p + 36, checksum(p + 20, 20, 0x0a00 + 0x020f + 0xc000 + 0x0201 + 6 + 20));
+    put16(p + 36, checksum(p + 20, 20, 0x0a00 + 0x020f + (destination >> 16) +
+                            (destination & 0xffffu) + 6 + 20));
     cyw43_arch_lwip_begin(); nat_core_input(core, p, sizeof(p), clock_ms); cyw43_arch_lwip_end();
+}
+static void console_tcp(unsigned flags, uint32_t ack) {
+    console_tcp_to(0xc0000201, 80, flags, ack);
 }
 static struct tcp_pcb *established(void) {
     console_tcp(2, 0); assert(tcp_pcbs[0]);
@@ -89,6 +94,14 @@ static void t_bug_address_byte_order(void) {
     nat_configure(true);
     const uint8_t expected[] = {192, 0, 2, 10};
     assert(!memcmp(hello_address, expected, sizeof(expected)));
+}
+static void t_speedtest_uses_configured_address(void) {
+    console_tcp_to(0xc000020a, 7778, 2, 0);
+    assert(!tcp_pcbs[0] && outputs == 1 && packet[33] == (2 | 16));
+    assert(get32(packet + 12) == 0xc000020au);
+    assert(get32(packet + 16) == 0x0a00020fu);
+    nat_poll();
+    assert(nat_stats().speed == 1);
 }
 static void t_bug_dns_byte_order(void) {
     nat_configure(true);
@@ -240,6 +253,7 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     TEST(t_bug_connect_segment_exhaustion), TEST(t_bug_udp_pool_capacity),
     TEST(t_bug_udp_idle_releases_pcbs), TEST(t_bug_udp_oversize_accounting), TEST(t_pbuf_ownership_and_receive_credit), TEST(t_bug_receive_payload),
     TEST(t_bug_receive_coalesced_pbuf), TEST(t_bug_address_byte_order), TEST(t_bug_dns_byte_order),
+    TEST(t_speedtest_uses_configured_address),
     TEST(t_bug_write_output_failure_duplicates), TEST(t_bug_reset_listener),
     TEST(t_bug_mode_disable_releases_pcbs), TEST(t_bug_accepted_data_before_poll),
     TEST(t_bug_accepted_error_before_poll), TEST(t_bug_listener_allocation_failure),

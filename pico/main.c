@@ -29,8 +29,9 @@ static void print_stats(bool reply) {
            nat_mode() ? "" : relay_state(), wifi_state,
            settings.host[0] ? settings.host : "(none)");
     if (nat_mode()) { nat_stats_t n = nat_stats();
-        (reply ? printf : log_printf)("nat: in=%"PRIu32" out=%"PRIu32" drop=%"PRIu32" tcp=%u udp=%u fwd=%u\n",
-            n.in, n.out, n.drop, n.tcp, n.udp, n.forwards); }
+        (reply ? printf : log_printf)("nat: in=%"PRIu32" out=%"PRIu32" drop=%"PRIu32
+            " tcp=%u udp=%u fwd=%u speed=%u\n", n.in, n.out, n.drop, n.tcp, n.udp,
+            n.forwards, n.speed); }
 }
 static void wifi_changed(void) {
     if (wifi_ready) {

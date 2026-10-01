@@ -26,7 +26,7 @@ typedef struct {
 
 typedef struct {
     uint32_t in, out, drop;
-    uint8_t tcp, udp, forwards;
+    uint8_t tcp, udp, forwards, speed;
 } nat_stats_t;
 size_t nat_core_size(void);
 
@@ -35,6 +35,7 @@ struct nat;
 void nat_core_init(nat_t *nat, const nat_ops_t *ops);
 void nat_core_set_resolver(nat_t *nat, uint32_t address);
 void nat_core_set_resolvers(nat_t *nat, const uint32_t *addresses, size_t count);
+void nat_core_set_local_address(nat_t *nat, uint32_t address);
 void nat_core_set_adapter(nat_t *nat, bool (*emit_try)(void *, const uint8_t *, size_t),
                           bool (*link_busy)(void *), void (*udp_close)(void *, unsigned),
                           bool (*tcp_queued)(void *, unsigned));

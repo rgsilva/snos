@@ -9,6 +9,7 @@
 #define GW 0x0a000202u
 #define DNS 0x0a000203u
 #define REMOTE 0x7f000001u
+#define PICO 0xc000020au
 #define FIN 1
 #define SYN 2
 #define RST 4
@@ -93,6 +94,24 @@ static uint32_t establish(uint32_t seq) {
     uint32_t their = rd32(last + 24) + 1;
     send_tcp(ACK, seq + 1, their, 1460, NULL);
     return their;
+}
+/* The local peer still speaks ordinary console-side TCP through nat_core. */
+static uint32_t speed_open(uint16_t port, uint32_t seq, uint16_t window) {
+    unsigned before = connects;
+    send_tcp_to(PICO, port, 7778, SYN, seq, 0, window, NULL);
+    assert(connects == before && last[33] == (SYN | ACK));
+    assert(rd32(last + 12) == PICO && rd16(last + 20) == 7778);
+    uint32_t theirs = rd32(last + 24) + 1;
+    send_tcp_to(PICO, port, 7778, ACK, seq + 1, theirs, window, NULL);
+    return theirs;
+}
+static void speed_request(uint16_t port, uint32_t seq, uint32_t theirs,
+                          const char *request) {
+    size_t len = strlen(request);
+    send_tcp_to(PICO, port, 7778, PSH | ACK, seq, theirs, 1460, request);
+    assert(last[33] == ACK && rd32(last + 28) == seq + len);
+    nat_core_poll(n, ++tick);
+    assert(last[33] == (PSH | ACK) && last_len == 43 && !memcmp(last + 40, "OK\n", 3));
 }
 static void send_udp(uint32_t dst, const char *data) {
     unsigned char b[NAT_MTU] = {0}; size_t len = strlen(data);
@@ -331,6 +350,58 @@ static void t_bug_reset_releases_forwards(void) {
     nat_core_reset(n);
     assert(removed == 1);
 }
+static void t_speedtest_phases(void) {
+    uint32_t download = speed_open(5100, 100, 1460);
+    speed_request(5100, 101, download, "D 60\n");
+    send_tcp_to(PICO, 5100, 7778, ACK, 106, download + 3, 0, NULL);
+    send_tcp_to(PICO, 5100, 7778, PSH | ACK, 106, download + 3, 0, "GO\n");
+    unsigned before = emitted;
+    nat_core_poll(n, ++tick);
+    assert(emitted == before); /* A closed console window stops the source. */
+    send_tcp_to(PICO, 5100, 7778, ACK, 109, download + 3, 1460, NULL);
+    nat_core_poll(n, ++tick);
+    assert(last[33] == (PSH | ACK) && last_len == 20 + 20 + 1460);
+    for (unsigned i = 0; i < 1460; ++i)
+        assert(last[40 + i] == 'x');
+    send_tcp_to(PICO, 5100, 7778, FIN | ACK, 109, download + 1463, 1460, NULL);
+    nat_core_poll(n, ++tick);
+    assert(last[33] == (FIN | ACK));
+
+    uint32_t upload = speed_open(5101, 200, 1460);
+    speed_request(5101, 201, upload, "U 60\n");
+    send_tcp_to(PICO, 5101, 7778, ACK, 206, upload + 3, 1460, NULL);
+    send_tcp_to(PICO, 5101, 7778, PSH | ACK, 206, upload + 3, 1460, "GO\nabcdef");
+    tick += 1001;
+    nat_core_poll(n, tick);
+    assert(last[33] == (PSH | ACK) && last_len == 42 && !memcmp(last + 40, "6\n", 2));
+
+    uint32_t both_download = speed_open(5102, 300, 1460);
+    uint32_t both_upload = speed_open(5103, 400, 1460);
+    speed_request(5102, 301, both_download, "D 60\n");
+    speed_request(5103, 401, both_upload, "U 60\n");
+    send_tcp_to(PICO, 5102, 7778, ACK, 306, both_download + 3, 1460, NULL);
+    send_tcp_to(PICO, 5103, 7778, ACK, 406, both_upload + 3, 1460, NULL);
+    send_tcp_to(PICO, 5102, 7778, PSH | ACK, 306, both_download + 3, 1460, "GO\n");
+    send_tcp_to(PICO, 5103, 7778, PSH | ACK, 406, both_upload + 3, 1460, "GO\nxyz");
+    nat_core_poll(n, ++tick);
+    assert(nat_core_stats(n).speed == 4); /* All four local flows remain active. */
+    tick += 1001;
+    nat_core_poll(n, tick);
+    assert(last_len == 42 && !memcmp(last + 40, "3\n", 2));
+}
+static void t_speedtest_reset_and_other_port(void) {
+    uint32_t theirs = speed_open(5200, 100, 1460);
+    send_tcp_to(PICO, 5200, 7778, PSH | ACK, 101, theirs, 1460, "X 60\n");
+    assert(last[33] == (RST | ACK));
+
+    theirs = speed_open(5201, 200, 1460);
+    tick += 15001;
+    nat_core_poll(n, tick);
+    assert(last[33] == (FIN | ACK));
+
+    send_tcp_to(PICO, 5202, 23, SYN, 100, 0, 1460, NULL);
+    assert(connects == 1 && connect_addr == PICO && connect_port == 23);
+}
 
 typedef struct { const char *name; void (*run)(void); } test_t;
 #define TEST(name) {#name, name}
@@ -339,8 +410,11 @@ static const test_t tests[] = {
     TEST(t_stray), TEST(t_refused), TEST(t_forward), TEST(t_forward_cap), TEST(t_syn_reuse),
     TEST(t_udp_oversize), TEST(t_backpressure), TEST(t_garbage),
     TEST(t_window_and_receive_credit), TEST(t_sequence_wrap), TEST(t_fin_grace_and_time_wait),
-    TEST(t_fin_retry_limits), TEST(t_forward_owner_lifetime), TEST(t_data_retry_limits), TEST(t_all_flows_busy), TEST(t_retry_limits), TEST(t_bug_async_refused), TEST(t_bug_forward_after_five_minutes),
-    TEST(t_bug_data_before_handshake), TEST(t_bug_reset_releases_forwards)
+    TEST(t_fin_retry_limits), TEST(t_forward_owner_lifetime), TEST(t_data_retry_limits),
+    TEST(t_all_flows_busy), TEST(t_retry_limits), TEST(t_bug_async_refused),
+    TEST(t_bug_forward_after_five_minutes), TEST(t_bug_data_before_handshake),
+    TEST(t_bug_reset_releases_forwards), TEST(t_speedtest_phases),
+    TEST(t_speedtest_reset_and_other_port)
 };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
@@ -350,6 +424,7 @@ int main(int argc, char **argv) {
     }
     nat_ops_t ops = {emit, connect_, write_, shutdown_, abort_, udp, fadd, fdel, got, NULL};
     assert(nat_core_size() <= sizeof(store)); nat_core_init(n, &ops);
+    nat_core_set_local_address(n, PICO);
     for (size_t i = 0; i < sizeof(tests) / sizeof(*tests); ++i) if (!strcmp(argv[1], tests[i].name)) {
         tests[i].run(); printf("PASS %s\n", tests[i].name); return 0;
     }
