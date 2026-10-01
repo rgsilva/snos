@@ -26,7 +26,7 @@ See [`PLAN.md`](PLAN.md) for the full design and milestone list, and
 | M5 — BASIC | ✅ |
 | EDIT — menu-driven text editor | ✅ |
 | M6 — Networking (framed link + gateway; `get`, `view`, `httpd`, `netecho`) | ✅ |
-| M7 — Real hardware: Pico W adapter on port 2 (keyboard + network), `make LINK_HW=1` | ✅ live on silicon 2026-09-29: keystrokes and a real Minecraft client over the cable. Speed and comfort are the open list in [`PLAN.md`](PLAN.md) ([docs/pico-adapter.md](docs/pico-adapter.md)) |
+| M7 — Real hardware: Pico W adapter on port 2 (keyboard + network), `make LINK_HW=1` | ✅ live on silicon 2026-09-29: keystrokes and a real Minecraft client over the cable. Bluetooth keyboard and tier 2 (the Pico is the NAT, no PC) shipped 2026-10-01. Speed and comfort are the open list in [`PLAN.md`](PLAN.md) ([docs/pico-adapter.md](docs/pico-adapter.md)) |
 | M8 — IRC client (`irc`, windows/tabs/user list) | ✅ |
 | VNC — `vnc`, a Super Nintendo as a live VNC thin client | ✅ |
 | M10 — Preemptive multitasking (`run &`, `jobs`, `kill`, `fg`, notify) | ✅ |

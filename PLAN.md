@@ -271,8 +271,29 @@ keyboard as a `LINK_CH_KBD` record on the same frames. Circuit, wire protocol,
 firmware (`pico/`, tier 1: the Pico relays IP datagrams to
 `tools/picoslirp.py` on the host) and the console side (`make LINK_HW=1`:
 `link_serial_xfer` in `kernel/linkxfer.s`, `LINK_FRAME` 64) are in
-`docs/pico-adapter.md`. Tier 2 (the Pico *is* the slirp box) is designed
-there and not built.
+`docs/pico-adapter.md`.
+
+**Tier 2 SHIPPED 2026-10-01: the Pico is the NAT.** `slirp.py`'s behaviour is
+ported to lwIP on the Pico (`pico/nat_core.c` for the logic, `pico/nat.c` for
+the lwIP glue), so console, adapter and a WiFi network are the whole system
+and no PC is involved. Tier 1 (relay to `picoslirp.py`) remains, chosen at
+runtime with `mode nat` / `mode relay HOST`. Built by one model and reviewed
+adversarially by another across seven rounds; every finding was pinned by a
+committed regression test before it was fixed, and the host suite drives the
+real console receiver from `snes/kernel/net.c`.
+
+One design was abandoned on the way, recorded so it is not retried: restarting
+the controller-port link on a mode switch. Four rounds of fixes kept producing
+new protocol edge cases (spliced streams, sequence aliasing, a handshake
+deadlock) and finally an NMI-unsafe queue write in the SNES kernel. A mode
+switch is now a NAT-layer event the link never sees: anything already crossing
+the link finishes whole, only unsent output is dropped, keystrokes stay
+exactly-once, and the SNES tree is untouched by tier 2. `transition_test.py`
+switches modes at every byte offset of an in-flight datagram, in both
+directions, to hold that line.
+
+**Tier 3 PARKED** until a W5500 is at hand (Ricardo, 2026-09-30): wired
+Ethernet on the Pico, so the console gets a real LAN address.
 
 **The cable is five wires, and that shaped the protocol.** Ricardo's cable
 carries pins 1-4 and 7 only — no IOBIT, no DATA2 — so LATCH (`$4016` bit 0)
