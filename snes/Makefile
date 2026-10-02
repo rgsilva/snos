@@ -91,7 +91,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-hwspeed test-hwresponse clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-mode test-hwspeed test-hwresponse clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -309,7 +309,7 @@ $(BUILD)/apps/mc/mc.raw: $(BUILD)/mcdata.h
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-mc test-kbd test-wire test-speedtest
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-mc test-kbd test-wire test-speedtest test-mode
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -470,6 +470,15 @@ test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/history.lua
+
+# The `mode` command and the 32-column console: wrap, the narrow keyboard
+# panel, a 64-column app's switch and restore, palette writes, and a picture
+# killed while it held the PPU. Written against the emulator ROM's 64-column
+# power-on mode, which it switches away from and back to.
+test-mode: $(BUILD)/snos.sfc $(BUILD)/test/mode.lua
+	$(call check_env)
+	rm -f "$(MESEN_SRM)"
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mode.lua
 
 # Deliberately NOT in `test`: it receives a whole 48 KB framebuffer through the
 # emulated link, which is two minutes on its own — as long as the other twelve
