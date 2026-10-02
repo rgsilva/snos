@@ -45,6 +45,7 @@ int proc_kill(uint8_t id);
 uint8_t proc_state(uint8_t id);
 const char *proc_name(uint8_t id);
 uint16_t proc_exit_code(uint8_t id);
+uint8_t proc_flags(uint8_t id); /* the app header's APP_FLAG_* */
 void proc_reap_slot(uint8_t id); /* free a dead PCB after reporting it */
 
 /* Arena occupancy of live processes 1.., for the foreground launch check:

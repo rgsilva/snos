@@ -11,6 +11,9 @@
  *   +$00C u16 con state      console scroll state (see console.c)
  *   +$00E u16 break          keyboard break, kbdbridge writes (see traps.c)
  *   +$010 u8[3552] ring      stdout ring buffer (+$010..+$DEF)
+ *   +$DF0 u16 con mode       live columns | colour index << 8 (console.c)
+ *   +$DF2 u16 con colour     the text colour, BGR555 (console.c)
+ *   +$DF4 ..$DFF             free
  *   +$E00 u8[512] in_ring    stdin ring buffer (+$E00..+$FFF)
  * Index words are only ever written by one side, and the harness runs with
  * the CPU paused (end-of-frame Lua callback), so no torn reads either way.

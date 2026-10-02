@@ -75,10 +75,28 @@ Run `python3 snes/tools/speedtest.py` on the gateway host, then
 `net speedtest [host:port|-] [seconds]` overrides the destination or duration;
 see [the measurement and protocol notes](docs/net-speedtest.md).
 
+## The screen
+
+Two text modes, both 28 rows. The hardware ROM (`make LINK_HW=1`) boots **32
+columns in white**: Mode 0, 8 px glyphs at normal resolution, which survive
+composite video into a CRT. The emulator ROM keeps the **64-column** Mode 5
+hires console in green, which is what every screen-reading test was written
+against; `make CON_COLS=32 CON_COLOUR=white` builds it with the hardware's
+default instead.
+
+`mode` says which one is up (`32x28 white`). `mode 32` and `mode 64` change
+the width, which clears the screen; `mode white`, `green`, `mint` or `amber`
+change the colour and leave the text alone; both can go in one command.
+`irc` and `edit` are laid out for 64 columns, so the kernel gives them 64
+while they hold the screen and puts the shell's mode back when they exit or
+are killed ([docs/console-notes.md](docs/console-notes.md)).
+
 ## Typing into it
 
 On a stock SNES the on-screen keyboard is the only way in, which is fine for a
-demo and tedious for development. The kernel's input layer has three
+demo and tedious for development. SELECT opens it as a six-row panel along
+the bottom; at 32 columns the controller hints move into its frame, since the
+keys alone fill the width. The kernel's input layer has three
 interchangeable backends behind `kbd_getchar()`, though, and one of them is a
 byte ring in the test mailbox — which is how the automated tests type.
 

@@ -66,7 +66,7 @@ months. Optimize for app reuse, not kernel elegance.
 | Exit | **`COP #0`** (exit code in A); kernel restores its saved `S` | Works from arbitrary call depth, which `RTL` cannot. `RTL` from the entry point also lands in a kernel trampoline, so trivial apps can use either. |
 | Kill switch | **Kernel NMI handler force-exits on START+SELECT held ~1 s** | Answers "how do I get out of BASIC" *generally*, for every app including buggy ones. Non-negotiable — it's the only thing standing between a hung app and a power cycle. |
 | Interrupts | **Kernel owns NMI unconditionally.** Apps hook via a RAM vector table, never by writing `$00:FFEA` | Vectors are fetched from bank `$00` = ROM, so they're baked at build time; indirection through RAM is how BS-X and sd2snes both do it. Kernel-owned NMI is *also* what makes background networking possible without cooperative yielding (§5). |
-| Console | **`snespdp11/snes/console.c` verbatim** — Mode 5, 64×28, 8 px font | Already written, already debugged, standalone by design. **80 columns is impossible** (512/80 = 6.4 px — non-integer cell alignment; needs 1792 tiles vs a 1024 index limit; ~3 lo-res px/glyph). 64 is the hardware ceiling. |
+| Console | **`snespdp11/snes/console.c` verbatim** — Mode 5, 64×28, 8 px font | Already written, already debugged, standalone by design. **80 columns is impossible** (512/80 = 6.4 px — non-integer cell alignment; needs 1792 tiles vs a 1024 index limit; ~3 lo-res px/glyph). 64 is the hardware ceiling. *(2026-10-02: plus 32×28 in Mode 0, the hardware ROM's default, for CRTs — M7 follow-ups item 4.)* |
 | Input | **Abstraction from day 1**: `kbd_getchar()` → ASCII, three backends | OSK (M1), Lua test-feed (M1, drives CI), Pico USB bridge (M7). Never let the shell talk to `$4218` directly. |
 | Network | **Controller port 1, synchronous serial**, byuu/near protocol | ~20 KB/s practical each way, full duplex free, ~$10–13 of parts, **no cartridge hardware**, and already emulated in bsnes. Keyboard moves to port 2. |
 | Test harness | **Mesen `--testrunner` + WRAM mailbox** (built at `$7EF000`, not the `$0100` first planned — bank $00 is too contended) | Reuse `snesmac/snes/calypsi/mailbox.{h,c}` (bidirectional stdio ring) + `emu8086/snes/test/suite.sh` `RESULT PASS/FAIL` protocol wholesale. |
@@ -153,7 +153,7 @@ trivial) and skips ahead by `bank_count`.
 | `$0B` | 1 | Bank count |
 | `$0C` | 16 | Name, ASCII, NUL-padded |
 | `$1C` | 1 | SRAM quota, in 8 K blocks (0 = none) |
-| `$1D` | 1 | Flags: wants-NMI-hook, wants-network, wants-raw-input |
+| `$1D` | 1 | Flags: bit 0 = laid out for 64 columns (`APP_MODE_<name> := 64`); the rest reserved |
 | `$1E` | 1 | Arena start page (M10: data at `$7F:page*256`) |
 | `$1F` | 1 | Arena page count (0 = 256; was the never-used checksum) |
 
@@ -420,13 +420,35 @@ existing kill switch or keyboard break before the shell accepts `restart`.
 `test-restart` checks two boots, mailbox ring resets, the power-on screen,
 file persistence, job removal and a fresh TCP session.
 
-**4. Text mode — the 64-column font is hard to read on a CRT.** Add a `mode`
+**4. Text mode — the 64-column font is hard to read on a CRT. ✅ (the
+mechanism; irc and edit still run at 64)** Add a `mode`
 command and make the DEFAULT bigger. Mode 5's 64×28 is the hardware ceiling,
 not a requirement; a 32-column mode at double width (or Mode 1 with 8×8 tiles
 at 32×28) is legible across a room, which is what a talk needs. The console
 layer already abstracts rows and columns, and `SYS_SCREEN` exists precisely
 so apps ask rather than assume — but `edit`, `vnc`, `irc` and `telnetd` all
 paint full screens, so this is a real compatibility pass, not a register poke.
+
+Shipped 2026-10-02: Mode 0, BG2 alone, 8×8 tiles, 32×28 — the same font
+tiles, tilemaps, scroll ring and keyboard split as Mode 5, so no new VRAM and
+no new font data ([docs/console-notes.md](docs/console-notes.md)). The shadow
+stays 64 wide under a live column count, so `SYS_CONROW` and telnetd are
+unchanged and there was no ABI bump. `mode [32|64] [white|green|mint|amber]`
+switches at runtime; a width change clears the screen. The hardware ROM boots
+32 white, the emulator ROM 64 green (`CON_COLS`/`CON_COLOUR` in the Makefile).
+At 32 a vblank moves 8 rows instead of 4 (measured). The keyboard panel has
+a 32-column layout with the controller hints in its frame; `help`, `mem`,
+`apps`, `net status` and the boot lines fit 31 columns. App header flag bit 0
+(`APP_MODE_irc`/`APP_MODE_edit := 64`) makes the kernel switch to 64 while
+such an app holds the screen — launched, or brought back by `fg` — and
+restore the shell's mode however it ends; background launches are allowed,
+since a background job has no screen until `fg`. Fixed on the way: an app
+killed while it held the PPU (`view`, `vnc`) left the console frozen for
+good; the exit path now takes the PPU back. `test-mode` covers it all.
+
+Left: native 32-column layouts for `irc` and `edit` (both re-read
+`SYS_SCREEN` already, but lay out for 64), and the CRT's verdict on
+legibility, the colours, and whether rows 0 and 27 survive overscan.
 
 **5. `net speedtest` — measure the link, both ways, then both at once. ✅**
 Console → gateway, gateway → console, then simultaneous, reporting B/s and

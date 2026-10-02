@@ -7,7 +7,7 @@
 # byte-identical to the kernel's.
 #
 # Usage: buildapp.sh <name> <bankhex> <caldir> <builddir> [min-kernel-abi] \
-#                    [arena-lo-hex] [arena-hi-hex]
+#                    [arena-lo-hex] [arena-hi-hex] [columns]
 #
 # The arena bounds (M10 step 4, e.g. 7f0000 7f3bff) place the app's DATA the
 # way the bank places its CODE: at build time, by declaration. The first 256
@@ -22,6 +22,7 @@ BUILD=$4
 MINABI=${5:-1}
 ARENA_LO=${6:-7f0000}
 ARENA_HI=${7:-7fffff}
+COLS=${8:-0}                 # 64 = lays its screen out for 64 columns
 
 # Fail loudly on a malformed declaration. Silence here was dangerous three
 # ways: a one-word APP_ARENA_x fell back to 7fffff for HI; an inverted range
@@ -66,7 +67,7 @@ AZLO=$(printf '%04x' $(( 0x$ARENA_LO & 0xFFFF )))
 AZEND=$(printf '%04x' $(( (0x$ARENA_HI + 1) & 0xFFFF )))
 sed -e "s/@AZLO@/$AZLO/g" -e "s/@AZEND@/$AZEND/g" ../apps/crt0.s > "$OUT/crt0.s"
 python3 tools/mkappinfo.py "$NAME" 1 "$OUT/appinfo.s" "$MINABI" \
-    "$ARENA_PAGE" "$ARENA_PAGES"
+    "$ARENA_PAGE" "$ARENA_PAGES" "$COLS"
 
 "$CALDIR/bin/as65816" -o "$OUT/appinfo.o" "$OUT/appinfo.s" $AFLAGS
 "$CALDIR/bin/as65816" -o "$OUT/crt0.o"    "$OUT/crt0.s"     $AFLAGS

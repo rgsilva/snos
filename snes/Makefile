@@ -55,6 +55,25 @@ ifdef LINK_HW
 CFLAGS += -DLINK_HW=1
 BUILD := build-hw
 endif
+# The console's power-on text mode; `mode` changes it at runtime. 64-column
+# Mode 5 is too fine for composite video into a CRT -- its one-dot gaps smear
+# shut -- so the hardware ROM boots 32 columns in white. The emulator ROM keeps
+# 64 in green, which every screen-reading test was written against; preview
+# the other with `make CON_COLS=32 CON_COLOUR=white`. Colours: white green
+# mint amber (kernel/console.h).
+ifdef LINK_HW
+CON_COLS ?= 32
+CON_COLOUR ?= white
+endif
+CON_COLS ?= 64
+CON_COLOUR ?= green
+ifeq ($(filter 32 64,$(CON_COLS)),)
+$(error CON_COLS must be 32 or 64, not '$(CON_COLS)')
+endif
+ifeq ($(filter white green mint amber,$(CON_COLOUR)),)
+$(error CON_COLOUR must be white, green, mint or amber, not '$(CON_COLOUR)')
+endif
+CON_DEFS := -DCON_COLS_DEFAULT=$(CON_COLS) -DCON_COLOUR_DEFAULT=CON_COLOUR_$(CON_COLOUR)
 AFLAGS := --core=65816 --target=SNES $(MODEL)
 # Generic clib to match the bare-target C objects (the -snes variants carry a
 # target attribute the linker refuses to mix). Verified to contain no
@@ -72,7 +91,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-hwspeed test-hwresponse clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-mode test-hwspeed test-hwresponse clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -106,6 +125,17 @@ KERNEL_H := $(wildcard $(K)/*.h)
 
 $(BUILD)/%.o: $(K)/%.c $(KERNEL_H) | $(BUILD)
 	$(CC) -o $@ $< $(CFLAGS)
+
+# Only console.c reads the power-on mode. Make does not notice a changed
+# variable, so the stamp's NAME carries the values: a different mode is a
+# missing stamp, and a missing stamp rebuilds console.o.
+CON_STAMP := $(BUILD)/.conmode-$(CON_COLS)-$(CON_COLOUR)
+$(CON_STAMP): | $(BUILD)
+	rm -f $(BUILD)/.conmode-*
+	touch $@
+
+$(BUILD)/console.o: $(K)/console.c $(KERNEL_H) $(CON_STAMP) | $(BUILD)
+	$(CC) -o $@ $< $(CFLAGS) $(CON_DEFS)
 
 # Vendored uIP (kernel/uip/). Same flags as the rest of the kernel, including
 # the no---target=snes rule: uIP does 16-bit arithmetic everywhere and every
@@ -189,6 +219,15 @@ APP_ABI_telnetd := 11
 APP_ABI_irc    := 7
 APP_ABI_mc     := 12
 APP_ABI_speedtest := 12
+# Apps whose screens are laid out for 64 columns. The flag goes in the app
+# header, and the kernel switches the console to 64 while one holds the
+# screen -- launched from the shell, or brought back with `fg` -- and puts the
+# shell's mode back when it exits or is killed. Native 32-column layouts for
+# these two are future work (PLAN.md, M7 follow-ups item 4). vnc and view need
+# nothing here: they take the whole PPU, and giving it back rebuilds the
+# console in whatever mode it was.
+APP_MODE_irc   := 64
+APP_MODE_edit  := 64
 
 # Arena slots (M10 step 4): measured need, declared placement, build-time
 # enforcement — the app's data links inside exactly this range and the link
@@ -255,7 +294,7 @@ $(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c $(wildcard ../apps/$(1)/*.s) \
                              ../apps/lib/snoslib.c ../apps/lib/snoslib.h \
                              $(K)/syscall.s $(KERNEL_H) tools/mkappinfo.py \
                              tools/buildapp.sh | $(BUILD)
-	sh tools/buildapp.sh $(1) $(APP_BANK_$(1)) $(CALDIR) $(BUILD) $(or $(APP_ABI_$(1)),1) $(or $(APP_ARENA_$(1)),7f0000 7fffff)
+	sh tools/buildapp.sh $(1) $(APP_BANK_$(1)) $(CALDIR) $(BUILD) $(or $(APP_ABI_$(1)),1) $(or $(APP_ARENA_$(1)),7f0000 7fffff) $(or $(APP_MODE_$(1)),0)
 endef
 $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 
@@ -270,7 +309,7 @@ $(BUILD)/apps/mc/mc.raw: $(BUILD)/mcdata.h
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-mc test-kbd test-wire test-speedtest
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-mc test-kbd test-wire test-speedtest test-mode
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -436,6 +475,15 @@ test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/history.lua
+
+# The `mode` command and the 32-column console: wrap, the narrow keyboard
+# panel, a 64-column app's switch and restore, palette writes, and a picture
+# killed while it held the PPU. Written against the emulator ROM's 64-column
+# power-on mode, which it switches away from and back to.
+test-mode: $(BUILD)/snos.sfc $(BUILD)/test/mode.lua
+	$(call check_env)
+	rm -f "$(MESEN_SRM)"
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mode.lua
 
 # Deliberately NOT in `test`: it receives a whole 48 KB framebuffer through the
 # emulated link, which is two minutes on its own — as long as the other twelve

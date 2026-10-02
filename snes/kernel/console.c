@@ -1,18 +1,25 @@
-/* Text console: 64 cols x 28 rows, Mode 5 hires, hardware-scroll ring.
+/* Text console: 64 or 32 cols x 28 rows, hardware-scroll ring.
  * Own module — keyboard/ and basic-rom/ stay untouched.
  *
- * Mode 5 is 512-dot hires: each tilemap cell is 16px wide and fetches an 8x8
- * tile PAIR (N, N+1). We split each cell into two text columns using two
- * layers, the emu8086/dosboot.asm technique (see snes/tools notes):
+ * 64 columns: Mode 5 is 512-dot hires, and each tilemap cell is 16px wide and
+ * fetches an 8x8 tile PAIR (N, N+1). We split each cell into two text columns
+ * using two layers, the emu8086/dosboot.asm technique (see snes/tools notes):
  *   - BG2 (2bpp) holds EVEN text columns: font tile pair = [glyph][blank]
  *   - BG1 (4bpp) holds ODD  text columns: font tile pair = [blank][glyph]
  * transparency + priority composite them, giving 64 readable 8px columns.
  *
+ * 32 columns: Mode 0 with BG2 alone and 8x8 tiles. A cell fetches only tile
+ * N, which is the [glyph] half of BG2's pair, so the same font, the same
+ * tilemaps, the same ring and the same keyboard split all carry over; only
+ * the registers and the row build differ. A glyph's one-dot gaps are twice
+ * as wide as in hires, which is the whole point: composite video into a CRT
+ * smears Mode 5's into the strokes beside them.
+ *
  * Tilemaps (32x32 each): BG2 at word $0000, BG1 at word $0400. Row r -> +r*32.
  * A map entry for char c = (2c) | $2000(priority); it fetches tiles 2c,2c+1.
- * Fonts: BG2 chars at $1000 (2bpp), BG1 chars at $3000 (4bpp); both build
- * their [glyph][blank]/[blank][glyph] pairs from font8x8_basic. Color 1 =
- * green, shared via CGRAM[1] by both bit depths.
+ * Fonts: BG2 chars at $1000 (2bpp), BG1 chars at $3000 (4bpp), baked by
+ * tools/mkfont.py. Colour 1 of palette 0 is the text: CGRAM[1] for both bit
+ * depths in Mode 5, but CGRAM[33] in Mode 0, where BG2's palettes start at 32.
  *
  * The 32-row map is a ring: scroll bumps BG1/BG2 VOFS by 8 and clears the
  * wrapped row, so a scroll dirties one row, not 28.
@@ -25,7 +32,7 @@
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
-#define COLS 64
+#define COLS 64 /* the shadow's width; the live width is `cols` below */
 #define ROWS 28
 #define RING 32
 /* The scroll ring is indexed with & (RING - 1) — a _Mod16 library call per
@@ -50,6 +57,30 @@ typedef char con_ring_must_be_power_of_two[(RING & (RING - 1)) == 0 ? 1 : -1];
 static uint8_t shadow[RING][COLS];
 static uint8_t dirty[RING];
 static uint8_t top, row, col, vofs_dirty;
+
+/* The live width, 32 or 64: what wraps, clips and reaches VRAM. The shadow
+ * stays 64 wide in both modes, so a ring row is still a constant stride and
+ * SYS_CONROW still hands out 64 bytes; at 32 columns 32-63 just stay blank. */
+static uint8_t cols = CON_COLS_DEFAULT;
+
+/* The text colour, an index into palette[]. pal_dirty asks con_flush to write
+ * it inside its vblank window: CGRAM, like VRAM, ignores writes during active
+ * display. */
+static uint8_t colour = CON_COLOUR_DEFAULT;
+static uint8_t pal_dirty;
+
+/* BGR555. Pure green is the dimmest, most saturated colour the console could
+ * have picked for composite video, which carries luma sharply and chroma
+ * smeared: on a CRT its glyphs bleed. The others trade saturation for luma. */
+static const uint16_t palette[CON_NCOLOURS] = {
+    0x7FFF, /* white */
+    0x03E0, /* green: the original */
+    0x33EC, /* mint: R12 G31 B12 */
+    0x029F, /* amber: R31 G20 B0 */
+};
+static const char *const colour_names[CON_NCOLOURS] = {
+    "white", "green", "mint", "amber",
+};
 
 /* A second dirty array, for the screen mirror (SYS_CONDIRTY). dirty[] cannot
  * be shared: con_flush clears it the moment a row reaches VRAM, which says
@@ -93,6 +124,29 @@ static void con_publish(void) {
     CON_STATE = (uint16_t)(top | ((uint16_t)text_rows << 8));
 }
 
+/* And the mode ($7EFDF0, the mailbox's spare 16 bytes): the harness decodes
+ * one layer or two depending on it, and asserts on the colour. Low byte the
+ * live width, high byte the colour index; $7EFDF2 the colour as BGR555. */
+#define CON_MODE (*(volatile __far uint16_t *)0x7EFDF0ul)
+#define CON_RGB (*(volatile __far uint16_t *)0x7EFDF2ul)
+
+static void con_publish_mode(void) {
+    CON_MODE = (uint16_t)(cols | ((uint16_t)colour << 8));
+    CON_RGB = palette[colour];
+}
+
+/* Colour 1 of BG palette 0 in both modes: CGRAM 1 serves Mode 5, CGRAM 33
+ * serves Mode 0, whose BG2 palettes begin at 32. Writing both means a mode
+ * switch can never leave the text black on black. Forced blank or vblank
+ * only. */
+static void write_palette(void) {
+    uint16_t v = palette[colour];
+    R8(0x2121) = 1;
+    R8(0x2122) = (uint8_t)v; R8(0x2122) = (uint8_t)(v >> 8);
+    R8(0x2121) = 33;
+    R8(0x2122) = (uint8_t)v; R8(0x2122) = (uint8_t)(v >> 8);
+}
+
 /* Where the caret was last drawn, as a RING row so it survives scrolling. */
 static int caret_ring = -1;
 static uint8_t caret_col;
@@ -126,17 +180,29 @@ static void set_vofs(void) {
 void con_init(void) {
     int y, i;
     R8(0x2100) = 0x8F;                    /* force blank */
-    R8(0x2105) = 0x05;                    /* Mode 5 */
+    if (cols == 32) {
+        R8(0x2105) = 0x00;                /* Mode 0, 8x8 tiles */
+        R8(0x212C) = 0x02;                /* main: BG2 only */
+        R8(0x212D) = 0x00;                /* sub: unused without hires */
+    } else {
+        R8(0x2105) = 0x05;                /* Mode 5 */
+        R8(0x212C) = 0x03;                /* main: BG1+BG2 */
+        R8(0x212D) = 0x03;                /* sub:  BG1+BG2 */
+    }
     R8(0x2107) = (uint8_t)((BG1_MAP >> 10) << 2);  /* BG1SC: map $0400, 32x32 */
     R8(0x2108) = (uint8_t)((BG2_MAP >> 10) << 2);  /* BG2SC: map $0000, 32x32 */
     R8(0x210B) = 0x13;                    /* BG1 chr $3000, BG2 chr $1000 */
-    R8(0x212C) = 0x03;                    /* main: BG1+BG2 */
-    R8(0x212D) = 0x03;                    /* sub:  BG1+BG2 */
+    /* Nothing else in the kernel writes the horizontal scrolls. vnc and view
+     * zero them for their own pictures; this is so the console does not
+     * depend on that, or on what power-on left there. */
+    R8(0x210D) = 0; R8(0x210D) = 0;       /* BG1HOFS */
+    R8(0x210F) = 0; R8(0x210F) = 0;       /* BG2HOFS */
     R8(0x2130) = 0x30; R8(0x2131) = 0x00; /* no color math */
     R8(0x2133) = 0x00;
-    R8(0x2121) = 0;                       /* CGRAM: 0=black, 1=green */
+    R8(0x2121) = 0;                       /* CGRAM 0: black backdrop */
     R8(0x2122) = 0x00; R8(0x2122) = 0x00;
-    R8(0x2122) = 0xE0; R8(0x2122) = 0x03;
+    write_palette();
+    pal_dirty = 0;
     R8(0x2115) = 0x80;                    /* VRAM inc after high byte */
 
     /* Fonts from ROM by DMA — cart ROM is on the A-bus, VRAM on the B-bus,
@@ -166,9 +232,30 @@ void con_init(void) {
      * after SYS_GFX release, which lands here through con_gfx(0). */
     snap_top = 0xFF;
     top = 0; row = 0; col = 0;
+    caret_ring = -1; /* the shadow it pointed into is gone */
     set_vofs();
     vofs_dirty = 0;
+    con_publish_mode();
     R8(0x2100) = 0x0F;                    /* display on */
+}
+
+void con_set_cols(int n) {
+    cols = (uint8_t)(n == 32 ? 32 : 64);
+    gfx_owned = 0; /* rebuilding the console is taking the PPU back */
+    con_init();
+}
+
+void con_set_colour(int c) {
+    if (c < 0 || c >= CON_NCOLOURS || c == colour) return;
+    colour = (uint8_t)c;
+    pal_dirty = 1;
+    con_publish_mode();
+}
+
+int con_colour(void) { return colour; }
+
+const char *con_colour_name(int c) {
+    return (c >= 0 && c < CON_NCOLOURS) ? colour_names[c] : 0;
 }
 
 static void newline(void) {
@@ -192,11 +279,11 @@ void con_putc(int c) {
     if (c == '\r') { col = 0; return; }
     if (c == '\b') {
         /* Step back onto the previous row when already at column 0. A typed
-         * line longer than 64 columns wraps, and stopping at the left edge
+         * line longer than the screen wraps, and stopping at the left edge
          * meant the wrapped part could never be erased — you could delete
          * "mg" from "cover.img" and no further. */
         if (col) col--;
-        else if (row) { row--; col = COLS - 1; }
+        else if (row) { row--; col = (uint8_t)(cols - 1); }
         return;
     }
     if (c == 7) return;
@@ -205,7 +292,7 @@ void con_putc(int c) {
     shadow[r][col] = (uint8_t)c;
     dirty[r] = 1;
     snap[r] = 1;
-    if (++col >= COLS) newline();
+    if (++col >= cols) newline();
 }
 
 void con_puts(const char *s) { while (*s) con_putc(*s++); }
@@ -218,10 +305,17 @@ void con_puts(const char *s) { while (*s) con_putc(*s++); }
  * How many depends on how much of vblank there is — see CON_FLUSH_ROWS in
  * console.h for the measurement. It is NOT about DMA channels: dma_vram writes
  * $420B and the CPU stalls until that single transfer finishes, so transfers
- * are always sequential and one channel does all of them. */
-#define FLUSH_MAX CON_FLUSH_ROWS
+ * are always sequential and one channel does all of them.
+ *
+ * rowbuf is BG2's half of a row at 64 columns and the whole row at 32, where
+ * a flush moves more rows; rowbuf1, BG1's half, exists only at 64. */
+#define FLUSH_MAX CON_FLUSH_ROWS_NARROW
 static uint16_t rowbuf[FLUSH_MAX][32];
-static uint16_t rowbuf1[FLUSH_MAX][32];
+static uint16_t rowbuf1[CON_FLUSH_ROWS][32];
+
+int con_flush_rows(void) {
+    return cols == 32 ? CON_FLUSH_ROWS_NARROW : CON_FLUSH_ROWS;
+}
 
 /* One channel for every transfer. Channels 3, 4 and 5 belong to the keyboard
  * split's HDMA, and channel 0 never does — and since each transfer runs to
@@ -256,7 +350,7 @@ void con_flush(void) {
     /* The split no longer costs rows. It used to halve them because HDMA had
      * taken three of the eight channels; with a single channel doing every
      * transfer, HDMA's channels are irrelevant. */
-    budget = FLUSH_MAX;
+    budget = con_flush_rows();
 
     /* A scroll changes what the hardware displays IMMEDIATELY, but the row
      * being revealed at the bottom still holds whatever was in that tilemap row
@@ -274,19 +368,28 @@ void con_flush(void) {
         if (n > 0 && rows[0] == r) continue;   /* already queued above */
         rows[n++] = r;
     }
-    if (n == 0 && !vofs_dirty) return;
+    if (n == 0 && !vofs_dirty && !pal_dirty) return;
 
     for (i = 0; i < n; i++) {
         uint8_t rr = rows[i];
-        for (cell = 0; cell < 32; cell++)
-            rowbuf[i][cell]  = (uint16_t)((shadow[rr][cell * 2]     << 1) | 0x2000);
-        for (cell = 0; cell < 32; cell++)
-            rowbuf1[i][cell] = (uint16_t)((shadow[rr][cell * 2 + 1] << 1) | 0x2000);
-        /* The attention cell: screen row 0 is ring row `top`, column 63 is
-         * BG1 cell 31. Applied to the outgoing buffer, never the shadow, so
-         * the app's own content returns untouched when the flag drops. */
-        if (notify_on && rr == top)
-            rowbuf1[i][31] = (uint16_t)(((0x80 | '!') << 1) | 0x2000);
+        if (cols == 32) {
+            for (cell = 0; cell < 32; cell++)
+                rowbuf[i][cell] = (uint16_t)((shadow[rr][cell] << 1) | 0x2000);
+        } else {
+            for (cell = 0; cell < 32; cell++)
+                rowbuf[i][cell]  = (uint16_t)((shadow[rr][cell * 2]     << 1) | 0x2000);
+            for (cell = 0; cell < 32; cell++)
+                rowbuf1[i][cell] = (uint16_t)((shadow[rr][cell * 2 + 1] << 1) | 0x2000);
+        }
+        /* The attention cell: screen row 0 is ring row `top`, and the last
+         * column is BG1 cell 31 at 64 columns, BG2 cell 31 at 32. Applied to
+         * the outgoing buffer, never the shadow, so the app's own content
+         * returns untouched when the flag drops. */
+        if (notify_on && rr == top) {
+            uint16_t bang = (uint16_t)(((0x80 | '!') << 1) | 0x2000);
+            if (cols == 32) rowbuf[i][31] = bang;
+            else rowbuf1[i][31] = bang;
+        }
     }
 
     con_publish();
@@ -309,6 +412,11 @@ void con_flush(void) {
     while (R8(0x4212) & 0x80) ;
     while (!(R8(0x4212) & 0x80)) ;                    /* into vblank */
     if (vofs_dirty) { set_vofs(); vofs_dirty = 0; }
+    if (pal_dirty) {
+        write_palette();
+        /* Same rule as the rows below: landed only if vblank outlived it. */
+        if (R8(0x4212) & 0x80) pal_dirty = 0;
+    }
     for (i = 0; i < n; i++) {
         /* Stop the moment vblank ends, and leave the row DIRTY when it does.
          *
@@ -319,13 +427,14 @@ void con_flush(void) {
          * row that stays blank or half-painted until something else happens to
          * dirty it again.
          *
-         * CON_FLUSH_ROWS is sized so this never triggers in the normal case.
+         * con_flush_rows() is sized so this never triggers in the normal case.
          * It is here so that when something changes the arithmetic — a costlier
          * NMI, a slower emulator, PAL's different window — the failure mode is
          * "this row goes out next frame" rather than "this row is lost". */
         if (!(R8(0x4212) & 0x80)) break;
         dma_vram(DMA_CH, (uint16_t)(BG2_MAP + rows[i] * 32), rowbuf[i], 32);
-        dma_vram(DMA_CH, (uint16_t)(BG1_MAP + rows[i] * 32), rowbuf1[i], 32);
+        if (cols != 32)
+            dma_vram(DMA_CH, (uint16_t)(BG1_MAP + rows[i] * 32), rowbuf1[i], 32);
         /* Checked AFTER both halves: a pair that straddles the end of vblank
          * lands the BG2 half and drops the BG1 half, which is the "l  s   i e"
          * shape — every other column updated. The row is rebuilt whole next
@@ -364,12 +473,12 @@ int con_gfx_owned(void) { return gfx_owned; }
 
 int con_rows(void) { return ROWS; }
 int con_text_rows(void) { return text_rows; }
-int con_cols(void) { return COLS; }
+int con_cols(void) { return cols; }
 void con_getpos(int *r, int *c) { *r = row; *c = col; }
 
 void con_putat(int r_, int c_, int ch) {
     uint8_t r;
-    if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= COLS) return;
+    if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= cols) return;
     r = (uint8_t)((top + r_) & (RING - 1));
     shadow[r][c_] = (uint8_t)ch;
     dirty[r] = 1;
@@ -377,7 +486,7 @@ void con_putat(int r_, int c_, int ch) {
 }
 
 int con_getat(int r_, int c_) {
-    if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= COLS) return ' ';
+    if (r_ < 0 || r_ >= ROWS || c_ < 0 || c_ >= cols) return ' ';
     return shadow[(top + r_) & (RING - 1)][c_];
 }
 
@@ -613,7 +722,7 @@ int con_dirty_pending(void) {
      * gone quiet. Every earlier app downloaded FIRST and displayed AFTER, so
      * nothing had ever needed the network while holding the screen. */
     if (gfx_owned) return 0;
-    if (vofs_dirty) return 1;
+    if (vofs_dirty || pal_dirty) return 1;
     for (i = 0; i < RING; i++)
         if (dirty[i]) return 1;
     return 0;
@@ -675,13 +784,19 @@ void con_changes(uint16_t *lo, uint16_t *hi) {
 int con_panel_row(int screen_row, const uint8_t *chars) {
     int cell;
     if (screen_row < 0 || screen_row >= ROWS) return 1;
-    for (cell = 0; cell < 32; cell++) {
-        rowbuf[0][cell]  = (uint16_t)((chars[cell * 2]     << 1) | 0x2000);
-        rowbuf1[0][cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
+    if (cols == 32) {
+        for (cell = 0; cell < 32; cell++)
+            rowbuf[0][cell] = (uint16_t)((chars[cell] << 1) | 0x2000);
+    } else {
+        for (cell = 0; cell < 32; cell++) {
+            rowbuf[0][cell]  = (uint16_t)((chars[cell * 2]     << 1) | 0x2000);
+            rowbuf1[0][cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
+        }
     }
     while (R8(0x4212) & 0x80) ;
     while (!(R8(0x4212) & 0x80)) ;
     dma_vram(0, (uint16_t)(BG2_PANEL + screen_row * 32), rowbuf[0], 32);
-    dma_vram(1, (uint16_t)(BG1_PANEL + screen_row * 32), rowbuf1[0], 32);
+    if (cols != 32)
+        dma_vram(1, (uint16_t)(BG1_PANEL + screen_row * 32), rowbuf1[0], 32);
     return (R8(0x4212) & 0x80) ? 1 : 0;
 }

@@ -3,6 +3,7 @@
 #include "snos.h"
 #include "snos_abi.h"
 #include "farmem.h"
+#include "console.h"
 
 static app_entry_t apps[APP_MAX];
 static int napps;
@@ -40,6 +41,7 @@ void app_scan(void) {
       a->minabi = far_rd16(b, APPHDR_MINABI);
       a->banks = far_rd(b, APPHDR_BANKS);
       a->type = far_rd(b, APPHDR_TYPE);
+      a->flags = far_rd(b, APPHDR_FLAGS);
       a->arena_page = far_rd(b, APPHDR_ARENA_PAGE);
       a->arena_pages = far_rd(b, APPHDR_ARENA_PAGES);
       if (a->banks == 0) a->banks = 1;
@@ -82,8 +84,28 @@ const app_entry_t *app_find(const char *name) {
   return 0;
 }
 
+/* Run a foreground application, and put the console back afterwards.
+ *
+ * Every way an app ends comes back through here: SYS_EXIT, the START+SELECT
+ * kill and the keyboard break all unwind through app_return to the
+ * app_exec() below. So this is where a 64-column app's mode is undone, and
+ * where a PPU an app was killed holding gets reclaimed (kcon_reclaim).
+ *
+ * The header fields are copied out before anything else is called: `a` is a
+ * far pointer, and those have arrived corrupt across this kernel's call
+ * frames before (docs/calypsi-interrupt-hazard.md). */
 uint16_t app_run(const app_entry_t *a) {
-  SNOS_ARGS.p2 = a->bank;
-  SNOS_ARGS.p3 = a->entry;
-  return app_exec();
+  uint16_t bank = a->bank, entry = a->entry, rc;
+  uint8_t flags = a->flags;
+  int cols = con_cols();
+
+  if ((flags & APP_FLAG_COLS64) && cols != 64) {
+    kcon_mode(64, con_colour());
+    kcon_puts("[64 columns while it runs]\n");
+  }
+  SNOS_ARGS.p2 = bank;
+  SNOS_ARGS.p3 = entry;
+  rc = app_exec();
+  kcon_reclaim(cols);
+  return rc;
 }

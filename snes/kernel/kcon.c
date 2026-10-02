@@ -7,7 +7,7 @@
  *
  * Two things console.c does not do that the kernel needs:
  *
- *  1. con_flush() moves up to CON_FLUSH_ROWS dirty rows per call and blocks for
+ *  1. con_flush() moves up to con_flush_rows() dirty rows per call and blocks for
  *     vblank while doing it, so anything printing more than that in one go is
  *     left partly unpainted until something calls flush again. kcon_sync()
  *     loops until the screen is actually clean.
@@ -21,6 +21,8 @@
 #include "snos.h"
 #include "console.h"
 #include "mailbox.h"
+#include "input.h"
+#include "proc.h"
 
 void kcon_init(void) { con_init(); }
 
@@ -36,15 +38,15 @@ void kcon_init(void) { con_init(); }
  * lines instead of one. Anything that stops to wait for input drains
  * completely, because kbd_idle flushes every frame while it waits.
  *
- * The batch size is CON_FLUSH_ROWS and not a number of its own: batching MORE
- * than a flush can move leaves the surplus sitting unpainted until the next
- * batch trips, which is its own version of the bug this replaced. */
+ * The batch size is con_flush_rows() and not a number of its own: batching
+ * MORE than a flush can move leaves the surplus sitting unpainted until the
+ * next batch trips, which is its own version of the bug this replaced. */
 static uint8_t pending_rows;
 
 void kcon_putc(int c) {
   con_putc(c);
   mb_putc((char)c);
-  if (c == '\n' && ++pending_rows >= CON_FLUSH_ROWS) {
+  if (c == '\n' && ++pending_rows >= con_flush_rows()) {
     pending_rows = 0;
     con_flush();
   }
@@ -110,4 +112,37 @@ void kcon_sync(void) {
   for (guard = 0; guard < 64; guard++) {
     con_flush();
   }
+}
+
+/* Change the text mode: the `mode` command, and the switch around an app
+ * that needs 64 columns.
+ *
+ * A colour change is a palette write and leaves the text alone. A width
+ * change rebuilds the console from nothing -- the ring keeps no record of
+ * where lines broke, so there is no honest way to re-wrap scrollback -- and
+ * the keyboard panel has to come down first: hiding it is what turns the
+ * HDMA split off and gives the text all 28 rows back, and it goes back up
+ * afterwards laid out for the new width. Pinned against a context switch
+ * because a background mirror reading the shadow mid-rebuild would see half
+ * of each. */
+void kcon_mode(int cols, int colour) {
+  int osk;
+  con_set_colour(colour);
+  if (cols == con_cols() && !con_gfx_owned()) return;
+  osk = osk_visible();
+  if (osk) osk_hide();
+  proc_lock();
+  con_set_cols(cols);
+  proc_unlock();
+  if (osk) osk_show();
+  kcon_sync();
+}
+
+/* Put the console back the way the shell had it once a foreground program is
+ * gone, however it went. An app killed while it held the PPU (SYS_GFX) never
+ * released it: con_flush stayed a no-op and the screen never repainted again,
+ * so the reclaim is unconditional about that, and about the keyboard lock. */
+void kcon_reclaim(int cols) {
+  osk_lock(0);
+  kcon_mode(cols, con_colour());
 }

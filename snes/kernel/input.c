@@ -69,11 +69,16 @@ uint16_t pad_pressed(void) {
 
 /* Six rows across the bottom: a framed panel with the key grid on the left and
  * the controller mapping on the right, so the controls are visible exactly when
- * you need them rather than buried in `help`. */
+ * you need them rather than buried in `help`.
+ *
+ * At 32 columns the grid alone fills the width, so the mapping moves into the
+ * frame's top and bottom lines instead. Still six rows either way, so an
+ * application sees the same 22-row text area in both modes. */
 #define PANEL_ROWS 6
 #define PANEL_TOP (28 - PANEL_ROWS)
 #define KEY_ROWS 4
 #define KEY_COL0 3   /* left edge of the key grid */
+#define KEY_COL0_32 4 /* ...at 32 columns: centred, three blank columns a side */
 #define KEY_STEP 2   /* one blank column between keys, so it reads as a grid */
 #define HINT_COL 34  /* controller mapping starts here */
 
@@ -97,6 +102,11 @@ static const char *const HINTS[KEY_ROWS] = {
     "X space",
     "Y shift",
 };
+
+/* The same mapping at 32 columns, set into the frame from column 2; each '|'
+ * is drawn as a stretch of the frame line. */
+static const char HINT_TOP_32[] = "A type|B bksp|X space|Y shift";
+static const char HINT_BOT_32[] = "START enter|SELECT hide";
 
 static uint8_t panel_buf[64];
 static uint8_t panel_dirty;
@@ -128,44 +138,55 @@ static void clamp_sel(void) {
   if (sel_col < 0) sel_col = 0;
 }
 
-static void put(uint8_t *b, int col, const char *s) {
-  while (*s && col < 63) b[col++] = (uint8_t)*s++;
+/* Text inside the frame, never over its right edge `right`. A '|' in the
+ * text is a piece of the frame line (the 32-column hints). */
+static void put(uint8_t *b, int col, int right, const char *s) {
+  for (; *s && col < right; s++)
+    b[col++] = (uint8_t)(*s == '|' ? CON_BOX_H : *s);
 }
 
+/* Laid out for the width the console has NOW: osk_show after a mode switch
+ * redraws every row, so a row is never built for one width and shown in
+ * the other. */
 static void build_row(uint8_t *b, int prow) {
   int i;
+  int narrow = con_cols() == 32;
+  int right = con_cols() - 1; /* the frame's right edge */
 
   for (i = 0; i < 64; i++) b[i] = ' ';
 
   /* Frame */
   if (prow == 0) {
-    for (i = 1; i < 63; i++) b[i] = CON_BOX_H;
+    for (i = 1; i < right; i++) b[i] = CON_BOX_H;
     b[0] = CON_BOX_TL;
-    b[63] = CON_BOX_TR;
+    b[right] = CON_BOX_TR;
+    if (narrow) put(b, 2, right, HINT_TOP_32);
     return;
   }
   if (prow == PANEL_ROWS - 1) {
-    for (i = 1; i < 63; i++) b[i] = CON_BOX_H;
+    for (i = 1; i < right; i++) b[i] = CON_BOX_H;
     b[0] = CON_BOX_BL;
-    b[63] = CON_BOX_BR;
+    b[right] = CON_BOX_BR;
+    if (narrow) put(b, 2, right, HINT_BOT_32);
     return;
   }
   b[0] = CON_BOX_V;
-  b[63] = CON_BOX_V;
+  b[right] = CON_BOX_V;
 
   {
     int krow = prow - 1;
     const char *s = osk_shift ? KEYS_HI[krow] : KEYS_LO[krow];
+    int col0 = narrow ? KEY_COL0_32 : KEY_COL0;
 
     /* Stagger each row by one column, the way a real keyboard is offset. */
     for (i = 0; s[i]; i++) {
-      int c = KEY_COL0 + krow + i * KEY_STEP;
-      if (c >= 62) break;
+      int c = col0 + krow + i * KEY_STEP;
+      if (c >= right - 1) break;
       /* $80 selects the inverse-video twin of the glyph — the selection
        * highlight, since Mode 5 has no spare layer to draw a cursor on. */
       b[c] = (uint8_t)(s[i] | ((krow == sel_row && i == sel_col) ? 0x80 : 0x00));
     }
-    put(b, HINT_COL, HINTS[krow]);
+    if (!narrow) put(b, HINT_COL, right, HINTS[krow]);
   }
 }
 

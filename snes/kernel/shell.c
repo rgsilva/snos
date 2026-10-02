@@ -68,32 +68,109 @@ static void put_kv(const char *k, uint16_t v) {
   kcon_putc('\n');
 }
 
+static int slen(const char *s) {
+  int n = 0;
+  while (s[n]) n++;
+  return n;
+}
+
+static int ulen(uint16_t v) { /* the digits kcon_putu will print */
+  int n = 1;
+  while (v >= 10u) {
+    v /= 10u;
+    n++;
+  }
+  return n;
+}
+
+/* The separator before the next field of a status line: `sep` while `width`
+ * more columns still fit on this row, otherwise a fresh row indented by two.
+ * At 64 columns these lines fit with ordinary counts, so the transcript the
+ * tests match is the one it always was; at 32 a line breaks between fields
+ * instead of through the middle of one. */
+static void field_sep(const char *sep, int width) {
+  int r, c;
+  con_getpos(&r, &c);
+  (void)r;
+  if (c + slen(sep) + width < con_cols()) kcon_puts(sep);
+  else kcon_puts("\n  ");
+}
+
+static void field_u(const char *sep, const char *label, uint16_t v) {
+  field_sep(sep, slen(label) + ulen(v));
+  kcon_puts(label);
+  kcon_putu(v);
+}
+
 /* ------------------------------------------------------------- builtins */
 
 /* One column for every description, wide enough for the longest usage on the
  * left. It had grown two: the original entries at column 10 and later ones at
  * column 22, so the descriptions no longer lined up and the list read as two
- * lists. 14 fits "write N T" and "run N [A]" with room, inside 64 columns. */
+ * lists.
+ *
+ * And one list for both widths: every line fits 31 columns, so it reads the
+ * same at 32 as at 64. (31, not 32: a character in the last column wraps the
+ * cursor by itself, and the newline after it then leaves a blank row.) */
 static void cmd_help(void) {
-  kcon_puts("help          this list\n");
-  kcon_puts("clear         clear the screen\n");
-  kcon_puts("restart       reboot SNOS, preserving files\n");
-  kcon_puts("mem           memory and cartridge SRAM usage\n");
-  kcon_puts("echo ...      print arguments\n");
-  kcon_puts("apps          list applications; N [A] [&] runs one\n");
-  kcon_puts("run N [A] [&] run an application; & = in the background\n");
-  kcon_puts("jobs          list background jobs\n");
-  kcon_puts("kill N        kill background job N\n");
-  kcon_puts("fg N          bring job N to the console (exits back here)\n");
-  kcon_puts("ls            list files\n");
-  kcon_puts("cat NAME      print a file\n");
-  kcon_puts("write N T     write text T to file N\n");
-  kcon_puts("rm NAME       delete a file (instant; bytes stay spent)\n");
-  kcon_puts("compact       recopy files, reclaim deleted space (slow)\n");
-  kcon_puts("net           gateway diagnostics\n");
-  kcon_puts("ping HOST     ICMP echo, composed on this machine (M11)\n");
-  kcon_puts("resolve NAME  DNS, asked and parsed by this machine (M11)\n");
-  kcon_puts("debug         other diagnostics\n");
+  kcon_puts("help        this list\n");
+  kcon_puts("clear       clear the screen\n");
+  kcon_puts("mode ...    text width, colour\n");
+  kcon_puts("restart     reboot, keep files\n");
+  kcon_puts("mem         memory and SRAM use\n");
+  kcon_puts("echo ...    print arguments\n");
+  kcon_puts("apps        list applications\n");
+  kcon_puts("run N [A]   run an application\n");
+  kcon_puts("run N [A] & in the background\n");
+  kcon_puts("N [A] [&]   runs app N directly\n");
+  kcon_puts("jobs        background jobs\n");
+  kcon_puts("kill N      kill job N\n");
+  kcon_puts("fg N        bring job N forward\n");
+  kcon_puts("ls          list files\n");
+  kcon_puts("cat NAME    print a file\n");
+  kcon_puts("write N T   text T to file N\n");
+  kcon_puts("rm NAME     delete a file\n");
+  kcon_puts("compact     reclaim space, slow\n");
+  kcon_puts("net         network commands\n");
+  kcon_puts("ping HOST   ICMP echo\n");
+  kcon_puts("resolve N   DNS lookup\n");
+  kcon_puts("debug       diagnostics\n");
+}
+
+/* `mode [32|64] [colour]`: say the mode, or change it. Words in any order,
+ * either or both; a width change clears the screen (kcon_mode says why), a
+ * colour change alone does not. 64-column apps get 64 regardless and give
+ * this setting back when they exit (app_run). */
+static void cmd_mode(char *rest) {
+  int cols = con_cols(), colour = con_colour();
+  while (*rest) {
+    char *w = rest;
+    int i;
+    rest = split_word(rest);
+    if (streq(w, "32")) cols = 32;
+    else if (streq(w, "64")) cols = 64;
+    else {
+      for (i = 0; con_colour_name(i) && !streq(w, con_colour_name(i)); i++) {
+      }
+      if (!con_colour_name(i)) {
+        kcon_puts("usage: mode [32|64] [colour]\ncolours:");
+        for (i = 0; con_colour_name(i); i++) {
+          kcon_putc(' ');
+          kcon_puts(con_colour_name(i));
+        }
+        kcon_putc('\n');
+        return;
+      }
+      colour = i;
+    }
+  }
+  kcon_mode(cols, colour);
+  kcon_putu((uint16_t)con_cols());
+  kcon_putc('x');
+  kcon_putu((uint16_t)con_rows());
+  kcon_putc(' ');
+  kcon_puts(con_colour_name(con_colour()));
+  kcon_putc('\n');
 }
 
 /* Only the shell may abandon the kernel stack. A foreground app first comes
@@ -117,7 +194,7 @@ static void cmd_ver(void) {
  * it directly rather than making anyone go and read linker.scm. */
 static void cmd_mem(void) {
   uint16_t low = stack_low();
-  kcon_puts("bank $00 (8K, holds every stack and direct page):\n");
+  kcon_puts("bank $00, 8K of stacks and DPs:\n");
   put_kv("  kernel DP    ", SNOS_KDP_BASE);
   put_kv("  kernel stack ", SNOS_KSTACK_LO);
   put_kv("  proc0 stack  ", SNOS_PSTACK_LO(0));
@@ -125,21 +202,31 @@ static void cmd_mem(void) {
   put_kv("  proc1 stack  ", SNOS_PSTACK_LO(1));
   put_kv("  proc1 DP     ", SNOS_PDP(1));
   put_kv("  syscall args ", (uint16_t)(SNOS_ARGS_ADDR & 0xFFFFu));
-  kcon_puts("kernel stack used ");
+  kcon_puts("kernel stack: ");
   kcon_putu((uint16_t)(SNOS_KSTACK_HI + 1u - low));
-  kcon_puts(" of ");
+  kcon_putc('/');
   kcon_putu((uint16_t)(SNOS_KSTACK_HI + 1u - SNOS_KSTACK_LO));
   kcon_puts(" bytes\n");
   kcon_puts("app arena 64K at $7F0000\n");
   /* Cartridge SRAM used to be a separate `sram` command. It is the same
    * question — where does memory go — so it is the same command. */
-  kcon_puts("cart SRAM ");
-  kcon_putu((uint16_t)(sram_size() >> 10));
-  kcon_puts(" KB, free ");
-  kcon_putu((uint16_t)(fs_free() >> 10));
-  kcon_puts(" KB, reclaimable ");
-  kcon_putu((uint16_t)(fs_reclaimable() >> 10));
-  kcon_puts(" KB (see compact)\n");
+  {
+    uint16_t freek = (uint16_t)(fs_free() >> 10);
+    uint16_t reck = (uint16_t)(fs_reclaimable() >> 10);
+    kcon_puts("cart SRAM ");
+    kcon_putu((uint16_t)(sram_size() >> 10));
+    kcon_puts(" KB");
+    field_sep(", ", 5 + ulen(freek) + 3);
+    kcon_puts("free ");
+    kcon_putu(freek);
+    kcon_puts(" KB");
+    field_sep(", ", 12 + ulen(reck) + 3);
+    kcon_puts("reclaimable ");
+    kcon_putu(reck);
+    kcon_puts(" KB");
+    field_sep(" ", 13);
+    kcon_puts("(see compact)\n");
+  }
 }
 
 static void cmd_echo(const char *rest) {
@@ -204,11 +291,12 @@ static void cmd_apps(void) {
   }
   for (i = 0; i < n; i++) {
     const app_entry_t *a = app_get(i);
+    /* No entry offset: it is $0020 for every app, by construction
+     * (tools/mkappinfo.py), and dropping it is what fits 32 columns. */
     kcon_puts(a->name);
     kcon_puts("  bank $");
     kcon_puthex16(a->bank);
-    kcon_puts(" entry $");
-    kcon_puthex16(a->entry);
+    if (a->flags & APP_FLAG_COLS64) kcon_puts("  64 cols");
     kcon_putc('\n');
   }
 }
@@ -407,11 +495,18 @@ static void cmd_fg(char *rest) {
   char *w = rest;
   (void)split_word(rest);
   while (*w >= '0' && *w <= '9') id = (uint16_t)(id * 10 + (*w++ - '0'));
+  int cols = con_cols();
   /* id 0 is the shell itself: waiting for our own death is not a feature. */
   if (id < 1 || proc_state((uint8_t)id) != 1) {
     kcon_puts("no such job (see `jobs`)\n");
     return;
   }
+  /* A 64-column app may be started in the background from 32 columns: it
+   * has no screen until it gets here, so this is where it gets 64, and the
+   * reclaim below gives the shell its own mode back -- the same deal a
+   * foreground launch gets in app_run. */
+  if ((proc_flags((uint8_t)id) & APP_FLAG_COLS64) && cols != 64)
+    kcon_mode(64, con_colour());
   proc_set_fg((uint8_t)id);
   while (proc_state((uint8_t)id) == 1) {
     /* The keyboard break must still work with the shell asleep: F12 sets
@@ -426,6 +521,7 @@ static void cmd_fg(char *rest) {
     kbd_idle();
   }
   proc_set_fg(0);
+  kcon_reclaim(cols);
   kcon_puts("[");
   kcon_putu(id);
   kcon_puts("] ");
@@ -817,20 +913,19 @@ static void cmd_net_report(uint16_t waited) {
   if (net_text[0]) {
     /* The SNES has no address of its own, so anything it serves is reached at
      * the gateway's. This is where you look before pointing a browser at it. */
-    kcon_puts(" @ ");
+    field_sep(" ", 2 + slen(net_text));
+    kcon_puts("@ ");
     kcon_puts(net_text);
   }
-  kcon_puts(", v");
-  kcon_putu(net_gw_version);
-  kcon_puts(", replied in ");
+  field_u(", ", "v", net_gw_version);
+  field_sep(", ", 11 + ulen(waited) + 7);
+  kcon_puts("replied in ");
   kcon_putu(waited);
   kcon_puts(" frames\n");
   kcon_puts("frames ");
   kcon_putu(net_stat_rx_frames);
-  kcon_puts(", bad sums ");
-  kcon_putu(net_stat_bad_sum);
-  kcon_puts(", resends ");
-  kcon_putu(net_stat_resent);
+  field_u(", ", "bad sums ", net_stat_bad_sum);
+  field_u(", ", "resends ", net_stat_resent);
   kcon_putc('\n');
 
   /* M11: whether this gateway is a slirp box, and what our address is when
@@ -839,15 +934,14 @@ static void cmd_net_report(uint16_t waited) {
    * ping / point a port-forward at". */
   if (net_ipmode()) {
     ip_uipstat_t u;
-    kcon_puts("ip 10.0.2.15 via 10.0.2.2 (slirp), dns 10.0.2.3\n");
+    kcon_puts("ip 10.0.2.15 via 10.0.2.2");
+    field_sep(" ", 21);
+    kcon_puts("(slirp), dns 10.0.2.3\n");
     kcon_puts("ip rx ");
     kcon_putu(ip_stat_rx);
-    kcon_puts(", tx ");
-    kcon_putu(ip_stat_tx);
-    kcon_puts(", drop ");
-    kcon_putu(ip_stat_drop);
-    kcon_puts(", desync ");
-    kcon_putu(ip_stat_desync);
+    field_u(", ", "tx ", ip_stat_tx);
+    field_u(", ", "drop ", ip_stat_drop);
+    field_u(", ", "desync ", ip_stat_desync);
     kcon_putc('\n');
     /* The stack's own view, which answers the other half of every network
      * question: the link moved N datagrams, and uIP made THIS of them. */
@@ -856,30 +950,31 @@ static void cmd_net_report(uint16_t waited) {
     kcon_putu(u.ip_recv);
     kcon_putc('/');
     kcon_putu(u.ip_sent);
-    kcon_puts(" drop ");
-    kcon_putu(u.ip_drop);
-    kcon_puts(", icmp ");
+    field_u(" ", "drop ", u.ip_drop);
+    field_sep(", ", 5 + ulen(u.icmp_recv) + 1 + ulen(u.icmp_sent));
+    kcon_puts("icmp ");
     kcon_putu(u.icmp_recv);
     kcon_putc('/');
     kcon_putu(u.icmp_sent);
     kcon_puts("\nuip tcp rx ");
     kcon_putu(u.tcp_recv);
-    kcon_puts(" drop ");
-    kcon_putu(u.tcp_drop);
-    kcon_puts(" rexmit ");
-    kcon_putu(u.tcp_rexmit);
-    kcon_puts(" rst ");
-    kcon_putu(u.tcp_rst);
-    kcon_puts(", udp drop ");
-    kcon_putu(u.udp_drop);
-    kcon_puts(", dns ");
-    /* The resolver is a single shared slot, so "what is it doing" is a real
-     * question when a connection will not start. */
-    switch (ip_resolve_slot()) {
-    case IP_RES_IDLE: kcon_puts("idle"); break;
-    case IP_RES_BUSY: kcon_puts("BUSY"); break;
-    case IP_RES_OK: kcon_puts("held"); break;
-    default: kcon_puts("failed"); break;
+    field_u(" ", "drop ", u.tcp_drop);
+    field_u(" ", "rexmit ", u.tcp_rexmit);
+    field_u(" ", "rst ", u.tcp_rst);
+    field_u(", ", "udp drop ", u.udp_drop);
+    {
+      /* The resolver is a single shared slot, so "what is it doing" is a
+       * real question when a connection will not start. */
+      const char *dns;
+      switch (ip_resolve_slot()) {
+      case IP_RES_IDLE: dns = "idle"; break;
+      case IP_RES_BUSY: dns = "BUSY"; break;
+      case IP_RES_OK: dns = "held"; break;
+      default: dns = "failed"; break;
+      }
+      field_sep(", ", 4 + slen(dns));
+      kcon_puts("dns ");
+      kcon_puts(dns);
     }
     kcon_putc('\n');
   } else {
@@ -1311,11 +1406,12 @@ static int cmd_net(char *rest) {
     return 1;
   }
   else {
-    kcon_puts("net status         the daemon, its address and counters\n");
-    kcon_puts("net reset          fail channels and restart the network\n");
-    kcon_puts("net test           reach a known host to prove the path works\n");
-    kcon_puts("net speedtest [host:port|-] [seconds 1..120]\n");
-    kcon_puts("net tune           show or set the link's window and pace\n");
+    kcon_puts("net status     daemon, counters\n");
+    kcon_puts("net reset      restart network\n");
+    kcon_puts("net test       prove the path\n");
+    kcon_puts("net speedtest  measure the link\n");
+    kcon_puts("  [host:port|-] [secs 1..120]\n");
+    kcon_puts("net tune       window and pace\n");
   }
   return 0;
 }
@@ -1329,10 +1425,10 @@ static void cmd_debug(char *rest) {
 
   if (*what == 0) {
     kcon_puts("debug ver       version and ABI\n");
-    kcon_puts("debug syscheck  exercise the COP syscall path\n");
-    kcon_puts("debug fstest    verify SRAM addressing\n");
-    kcon_puts("debug mtest     preempt two kernel workers (M10 step 1)\n");
-    kcon_puts("debug send H:P  raw stream: connect, GET /, print\n");
+    kcon_puts("debug syscheck  syscall path\n");
+    kcon_puts("debug fstest    SRAM addressing\n");
+    kcon_puts("debug mtest     preemption test\n");
+    kcon_puts("debug send H:P  GET / over TCP\n");
     return;
   }
   if (streq(what, "send")) cmd_send((char *)arg);
@@ -1365,6 +1461,7 @@ void shell_run(void) {
     if (line[0] == 0) continue;
     if (streq(line, "help")) cmd_help();
     else if (streq(line, "clear")) con_clear();
+    else if (streq(line, "mode")) cmd_mode(rest);
     else if (streq(line, "restart")) cmd_restart();
     else if (streq(line, "mem")) cmd_mem();
     else if (streq(line, "echo")) cmd_echo(rest);
@@ -1388,12 +1485,9 @@ void shell_run(void) {
         }
         kcon_puts("refused ");
         kcon_putu(net_stat_refused);
-        kcon_puts(", hello ");
-        kcon_putu(net_stat_hello);
-        kcon_puts(", ip drop ");
-        kcon_putu(ip_stat_drop);
-        kcon_puts(", desync ");
-        kcon_putu(ip_stat_desync);
+        field_u(", ", "hello ", net_stat_hello);
+        field_u(", ", "ip drop ", ip_stat_drop);
+        field_u(", ", "desync ", ip_stat_desync);
         kcon_putc('\n');
       }
     }
