@@ -60,27 +60,43 @@ end
 -- than the mailbox does: that the font uploaded, the tilemaps were written,
 -- and the vblank DMA actually landed.
 --
--- console.c layout: Mode 5, BG2 tilemap at word $0000 (EVEN text columns),
--- BG1 tilemap at word $0400 (ODD columns). Cell entry = (char << 1) | $2000,
--- so char = (entry & 0x1FF) >> 1. 32 cells x 32 rows, used as a scroll ring.
+-- console.c layout at 64 columns: Mode 5, BG2 tilemap at word $0000 (EVEN
+-- text columns), BG1 tilemap at word $0400 (ODD columns). At 32 columns:
+-- Mode 0, BG2 alone, one text column per cell; BG1's map is not on screen and
+-- is not read. Cell entry = (char << 1) | $2000, so char = (entry & 0x1FF) >> 1.
+-- 32 cells x 32 rows, used as a scroll ring. M.COLS is the widest mode.
 M.BG2_MAP, M.BG1_MAP = 0x0000, 0x0400
 M.COLS, M.ROWS, M.RING_ROWS = 64, 28, 32
+
+-- The console's mode, published by con_publish_mode() in the mailbox's spare
+-- bytes at $7EFDF0: low byte the live width, high byte the colour index, and
+-- the colour itself as BGR555 at $7EFDF2. Anything but 32 decodes as 64,
+-- which is also what a kernel that predates the mode word looks like.
+function M.con_cols()
+  return emu.read(M.MB + 0xDF0, emu.memType.snesWorkRam) == 32 and 32 or 64
+end
+function M.con_colour() return M.u16(M.MB + 0xDF2) end
 
 local function map_char(mapword, ring_row, cell)
   local w = mapword + ring_row * 32 + cell
   return (emu.read16(w * 2, emu.memType.snesVideoRam) & 0x1FF) >> 1
 end
 
--- One screen row as text. ring_row is the tilemap row, which for an unscrolled
--- console is the same as the screen row.
-function M.screen_row(ring_row)
+-- One row of a pair of tilemaps as text, in whichever layout the live mode
+-- puts on screen.
+local function maps_row(bg2, bg1, row)
   local out = {}
+  local wide = M.con_cols() == 64
   for cell = 0, 31 do
-    out[#out + 1] = string.char(map_char(M.BG2_MAP, ring_row, cell))
-    out[#out + 1] = string.char(map_char(M.BG1_MAP, ring_row, cell))
+    out[#out + 1] = string.char(map_char(bg2, row, cell))
+    if wide then out[#out + 1] = string.char(map_char(bg1, row, cell)) end
   end
   return (table.concat(out):gsub("%s+$", ""))
 end
+
+-- One screen row as text. ring_row is the tilemap row, which for an unscrolled
+-- console is the same as the screen row.
+function M.screen_row(ring_row) return maps_row(M.BG2_MAP, M.BG1_MAP, ring_row) end
 
 -- Console scroll state, published by con_publish(): low byte = ring offset of
 -- screen row 0, high byte = how many rows the text area currently occupies.
@@ -138,19 +154,7 @@ end
 M.BG2_PANEL, M.BG1_PANEL = 0x0800, 0x0C00
 M.PANEL_TOP, M.PANEL_ROWS = 22, 6
 
-local function panel_char(mapword, row, cell)
-  local w = mapword + row * 32 + cell
-  return (emu.read16(w * 2, emu.memType.snesVideoRam) & 0x1FF) >> 1
-end
-
-function M.panel_row(row)
-  local out = {}
-  for cell = 0, 31 do
-    out[#out + 1] = string.char(panel_char(M.BG2_PANEL, row, cell))
-    out[#out + 1] = string.char(panel_char(M.BG1_PANEL, row, cell))
-  end
-  return (table.concat(out):gsub("%s+$", ""))
-end
+function M.panel_row(row) return maps_row(M.BG2_PANEL, M.BG1_PANEL, row) end
 
 function M.panel_text()
   local out = {}

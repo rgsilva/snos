@@ -67,6 +67,8 @@ void kcon_putu(uint16_t v);      /* unsigned decimal */
 void kcon_putu32(uint32_t v);    /* unsigned decimal, 32-bit */
 void kcon_puthex16(uint16_t v);  /* 4 hex digits */
 void kcon_sync(void);            /* flush every dirty row, not just one */
+void kcon_mode(int cols, int colour); /* width 32/64, CON_COLOUR_* (kcon.c) */
+void kcon_reclaim(int cols);     /* after a foreground program: PPU, width */
 
 /* ---- stack instrumentation (stack.s) ----
  * The 8 KB bank-$00 budget is the design's tightest constraint, so measure it

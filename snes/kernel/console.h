@@ -1,11 +1,12 @@
-/* Mode 5 hires text console: 64 cols x 28 rows, 8px font, hardware-scroll
- * ring. Reused from snespdp11; the SNOS additions live at the bottom of
- * console.c and leave the original stream interface untouched.
+/* Text console: 28 rows of 8px glyphs on a hardware-scroll ring, 64 columns
+ * in Mode 5 hires or 32 in Mode 0 (con_set_cols; the shell's `mode`). Reused
+ * from snespdp11; the SNOS additions live at the bottom of console.c and
+ * leave the original stream interface untouched.
  *
- * Characters $80-$FF are the inverse-video twins of $00-$7F (see glyph_row in
- * console.c). Mode 5 gives us exactly two BG layers and both are carrying text
- * columns, so inverse glyphs are how highlighting happens — there is no spare
- * layer to do it with.
+ * Characters $80-$FF are the inverse-video twins of $00-$7F (tools/mkfont.py).
+ * Mode 5 gives us exactly two BG layers and both are carrying text columns,
+ * so inverse glyphs are how highlighting happens — there is no spare layer to
+ * do it with.
  */
 #ifndef CONSOLE_H
 #define CONSOLE_H
@@ -35,15 +36,53 @@ void con_puts(const char *s);
  * 4 rows = 8 transfers, comfortably inside the measured 10, and it is the value
  * that was in service for the whole life of the console before the arithmetic
  * above talked it upwards. con_flush also stops on the vblank flag now, so
- * being wrong here costs a frame rather than a row. */
+ * being wrong here costs a frame rather than a row.
+ *
+ * At 32 columns a row is ONE transfer (BG2 only), so the same window moves
+ * more rows. Measured the same way on 2026-10-02 (Mesen, emulator ROM, link
+ * idle): with the budget raised to 16 rows, each of 59 full flushes landed 8
+ * or 9 before vblank ended. The same probe at 64 columns landed 4 or 5 rows
+ * (8-10 transfers), which is the figure above reproduced, so 8 here sits
+ * exactly where 4 sits there. con_flush_rows() is whichever applies to the
+ * live mode, and it is what kcon.c batches by. */
 #define CON_FLUSH_ROWS 4
-void con_flush(void); /* copy up to CON_FLUSH_ROWS dirty rows during vblank */
+#define CON_FLUSH_ROWS_NARROW 8
+int con_flush_rows(void);
+void con_flush(void); /* copy up to con_flush_rows() dirty rows during vblank */
+
+/* Text colours: an index into console.c's palette, spelled the way `mode`
+ * and the Makefile's CON_COLOUR spell them. */
+#define CON_COLOUR_white 0
+#define CON_COLOUR_green 1
+#define CON_COLOUR_mint 2
+#define CON_COLOUR_amber 3
+#define CON_NCOLOURS 4
+
+/* The power-on mode. The Makefile sets these (CON_COLS, CON_COLOUR); the
+ * fallbacks are the emulator ROM's, which every screen-reading test assumes. */
+#ifndef CON_COLS_DEFAULT
+#define CON_COLS_DEFAULT 64
+#endif
+#ifndef CON_COLOUR_DEFAULT
+#define CON_COLOUR_DEFAULT CON_COLOUR_green
+#endif
+
+/* Width, 32 or 64. Changing it rebuilds the console from nothing (con_init):
+ * the ring keeps no record of where lines broke, so scrollback cannot be
+ * re-wrapped honestly. It also takes the PPU back from an application that
+ * held it. Kernel callers go through kcon_mode, which handles the keyboard
+ * panel and the scheduler around it. */
+void con_set_cols(int cols);
+/* Colour only: a palette write at the next flush, the text stays put. */
+void con_set_colour(int colour);
+int con_colour(void);
+const char *con_colour_name(int colour); /* 0 past the last */
 
 /* SNOS additions: random access, for the on-screen keyboard panel and the
  * shell cursor. Row/column are SCREEN coordinates; the scroll ring is resolved
  * internally so callers never see it. */
 int con_rows(void);
-int con_cols(void);
+int con_cols(void); /* the live width, 32 or 64; the shadow is always 64 */
 void con_getpos(int *r, int *c);
 void con_putat(int r, int c, int ch);
 int con_getat(int r, int c);
@@ -59,8 +98,9 @@ void con_set_text_rows(int n);
 int con_text_rows(void); /* usable height; shrinks when the keyboard shows */
 void con_caret(int on);
 /* The attention cell: while on, con_flush overlays an inverse '!' in the
- * top-right cell of screen row 0 — the kernel wins that one cell over any
- * application's write, which is what makes it trustworthy. */
+ * top-right cell of screen row 0 (column 63, or 31 at 32 columns) — the
+ * kernel wins that one cell over any application's write, which is what
+ * makes it trustworthy. */
 void con_notify(int on);
 void con_split_enable(int panel_top_row);
 void con_split_disable(void);
