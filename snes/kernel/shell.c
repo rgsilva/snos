@@ -400,11 +400,18 @@ static void cmd_fg(char *rest) {
   char *w = rest;
   (void)split_word(rest);
   while (*w >= '0' && *w <= '9') id = (uint16_t)(id * 10 + (*w++ - '0'));
+  int cols = con_cols();
   /* id 0 is the shell itself: waiting for our own death is not a feature. */
   if (id < 1 || proc_state((uint8_t)id) != 1) {
     kcon_puts("no such job (see `jobs`)\n");
     return;
   }
+  /* A 64-column app may be started in the background from 32 columns: it
+   * has no screen until it gets here, so this is where it gets 64, and the
+   * reclaim below gives the shell its own mode back -- the same deal a
+   * foreground launch gets in app_run. */
+  if ((proc_flags((uint8_t)id) & APP_FLAG_COLS64) && cols != 64)
+    kcon_mode(64, con_colour());
   proc_set_fg((uint8_t)id);
   while (proc_state((uint8_t)id) == 1) {
     /* The keyboard break must still work with the shell asleep: F12 sets
@@ -419,6 +426,7 @@ static void cmd_fg(char *rest) {
     kbd_idle();
   }
   proc_set_fg(0);
+  kcon_reclaim(cols);
   kcon_puts("[");
   kcon_putu(id);
   kcon_puts("] ");

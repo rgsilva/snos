@@ -8,12 +8,14 @@ app is purely a build-time act.
 
 Layout must match APPHDR_* in snes/kernel/app.h.
 
-Usage: mkappinfo.py <name> <banks> <out.s> [min-kernel-abi] [arena-page] [arena-pages]
+Usage: mkappinfo.py <name> <banks> <out.s> [min-kernel-abi] [arena-page]
+                    [arena-pages] [columns]
 """
 import os
 import sys
 
 NAME_LEN = 16
+FLAG_COLS64 = 0x01  # APP_FLAG_COLS64 in snes/kernel/app.h
 
 
 def main(argv):
@@ -25,6 +27,13 @@ def main(argv):
     # stays 32 bytes and the $20 trampoline never moves.
     arena_page = int(argv[4], 0) if len(argv) > 4 else 0
     arena_pages = int(argv[5], 0) if len(argv) > 5 else 0
+    # The width the app's screen is laid out for (APP_MODE_* in the
+    # Makefile): 64 asks the kernel for 64 columns while it runs, 0 means it
+    # takes whatever the console has. Nothing else is a mode it could get.
+    cols = int(argv[6]) if len(argv) > 6 else 0
+    if cols not in (0, 64):
+        raise SystemExit(f"app {name}: columns must be 64 or unset, not {cols}")
+    flags = FLAG_COLS64 if cols == 64 else 0
     if len(name) > NAME_LEN:
         raise SystemExit(f"app name {name!r} exceeds {NAME_LEN} characters")
     padded = name.ljust(NAME_LEN, "\0")
@@ -46,7 +55,7 @@ def main(argv):
     lines += [
         f"        .byte   {body}  ; name[16]",
         "        .byte   0                ; SRAM quota, 8 KB blocks",
-        "        .byte   0                ; flags",
+        f"        .byte   {flags}                ; flags: bit 0 = 64 columns",
         f"        .byte   {arena_page}               ; arena start page ($7Fpp00)",
         f"        .byte   {arena_pages}               ; arena pages (0 = 256)",
         "",

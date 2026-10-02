@@ -83,6 +83,7 @@ typedef struct {
   uint8_t arena_page;
   uint16_t arena_pages; /* normalised: 1..256, 0 = no arena claim */
   uint16_t exit_code;
+  uint8_t flags; /* the app header's APP_FLAG_*, for `fg` */
   char name[APP_NAME_LEN + 1];
 } proc_t;
 
@@ -131,6 +132,9 @@ const char *proc_name(uint8_t id) {
 }
 uint16_t proc_exit_code(uint8_t id) {
   return id < PROC_MAX ? procs[id].exit_code : 0;
+}
+uint8_t proc_flags(uint8_t id) {
+  return id < PROC_MAX ? procs[id].flags : 0;
 }
 
 void proc_reap_slot(uint8_t id) {
@@ -202,6 +206,7 @@ int proc_spawn_app(const app_entry_t *a) {
   procs[1].arena_page = a->arena_page;
   procs[1].arena_pages = a->arena_pages ? a->arena_pages : 256u;
   procs[1].exit_code = 0;
+  procs[1].flags = a->flags;
   for (i = 0; i <= APP_NAME_LEN; i++) procs[1].name[i] = a->name[i];
   procs[1].state = ST_LIVE; /* last: the scheduler may run it immediately */
   return 1;

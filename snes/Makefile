@@ -189,6 +189,15 @@ APP_ABI_telnetd := 11
 APP_ABI_irc    := 7
 APP_ABI_mc     := 12
 APP_ABI_speedtest := 12
+# Apps whose screens are laid out for 64 columns. The flag goes in the app
+# header, and the kernel switches the console to 64 while one holds the
+# screen -- launched from the shell, or brought back with `fg` -- and puts the
+# shell's mode back when it exits or is killed. Native 32-column layouts for
+# these two are future work (PLAN.md, M7 follow-ups item 4). vnc and view need
+# nothing here: they take the whole PPU, and giving it back rebuilds the
+# console in whatever mode it was.
+APP_MODE_irc   := 64
+APP_MODE_edit  := 64
 
 # Arena slots (M10 step 4): measured need, declared placement, build-time
 # enforcement — the app's data links inside exactly this range and the link
@@ -255,7 +264,7 @@ $(BUILD)/apps/$(1)/$(1).raw: ../apps/$(1)/$(1).c $(wildcard ../apps/$(1)/*.s) \
                              ../apps/lib/snoslib.c ../apps/lib/snoslib.h \
                              $(K)/syscall.s $(KERNEL_H) tools/mkappinfo.py \
                              tools/buildapp.sh | $(BUILD)
-	sh tools/buildapp.sh $(1) $(APP_BANK_$(1)) $(CALDIR) $(BUILD) $(or $(APP_ABI_$(1)),1) $(or $(APP_ARENA_$(1)),7f0000 7fffff)
+	sh tools/buildapp.sh $(1) $(APP_BANK_$(1)) $(CALDIR) $(BUILD) $(or $(APP_ABI_$(1)),1) $(or $(APP_ARENA_$(1)),7f0000 7fffff) $(or $(APP_MODE_$(1)),0)
 endef
 $(foreach a,$(APPS),$(eval $(call APP_template,$(a))))
 

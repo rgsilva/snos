@@ -23,7 +23,11 @@
 #define APPHDR_BANKS 0x0B   /* how many banks it occupies */
 #define APPHDR_NAME 0x0C    /* 16 bytes, NUL padded */
 #define APPHDR_SRAM 0x1C    /* SRAM quota, 8 KB blocks */
-#define APPHDR_FLAGS 0x1D
+#define APPHDR_FLAGS 0x1D   /* APP_FLAG_* */
+/* Lays its screen out for 64 columns and has no 32-column layout (yet): the
+ * kernel switches the console to 64 while it holds the screen and back when
+ * it is done. Set per app in snes/Makefile, APP_MODE_<name> := 64. */
+#define APP_FLAG_COLS64 0x01
 /* Arena slot (M10 step 4), in 256-byte pages of bank $7F: where this app's
  * data was LINKED. Two apps may co-run iff their page ranges are disjoint;
  * the kernel refuses an overlapping spawn deterministically at launch. The
@@ -38,6 +42,7 @@ typedef struct {
   uint16_t minabi;
   uint8_t banks;
   uint8_t type;
+  uint8_t flags; /* APP_FLAG_* */
   uint8_t arena_page;
   uint8_t arena_pages; /* normalised: 0-in-header stored here as full count
                         * via uint16 would not fit; kept raw, 0 = 256 */
