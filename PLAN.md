@@ -446,6 +446,13 @@ since a background job has no screen until `fg`. Fixed on the way: an app
 killed while it held the PPU (`view`, `vnc`) left the console frozen for
 good; the exit path now takes the PPU back. `test-mode` covers it all.
 
+Found by the review and fixed the same day (fd51e9e): with the adapter
+plugged in the keyboard panel never painted. Its row DMAs wait for vblank,
+but the NMI gave every vblank to the link unless the TEXT console owed VRAM,
+so each row landed in active display and was retried forever. The panel's
+dirty mask now counts for `con_dirty_pending`, bounded at six rows; `make
+LINK_HW=1 test-hwpanel` opens and moves the keyboard during a speedtest.
+
 Left: native 32-column layouts for `irc` and `edit` (both re-read
 `SYS_SCREEN` already, but lay out for 64), and the CRT's verdict on
 legibility, the colours, and whether rows 0 and 27 survive overscan.
