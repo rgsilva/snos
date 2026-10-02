@@ -109,7 +109,9 @@ static const char HINT_TOP_32[] = "A type|B bksp|X space|Y shift";
 static const char HINT_BOT_32[] = "START enter|SELECT hide";
 
 static uint8_t panel_buf[64];
-static uint8_t panel_dirty;
+/* Which rows still need drawing is con_panel_dirty, in console.c: the NMI
+ * holds the link off while any is set, or the rows never get a vblank. */
+
 /* Starts CLOSED. It costs six rows of screen and most sessions drive SNOS from
  * a host keyboard through the mailbox, so having it up by default taxes the
  * common case to serve the rare one. SELECT brings it up, and the boot message
@@ -194,13 +196,13 @@ void osk_lock(int on) { osk_locked = on; }
 
 void osk_show(void) {
   osk_on = 1;
-  panel_dirty = (1 << PANEL_ROWS) - 1;
+  con_panel_dirty = (1 << PANEL_ROWS) - 1;
   con_split_enable(PANEL_TOP);
 }
 
 void osk_hide(void) {
   osk_on = 0;
-  panel_dirty = 0;
+  con_panel_dirty = 0;
   con_split_disable();
 }
 
@@ -211,15 +213,16 @@ int osk_visible(void) { return osk_on; }
  * the entire point of the split. */
 void osk_redraw(void) {
   int i;
-  if (!osk_on || !panel_dirty) return;
+  if (!osk_on || !con_panel_dirty) return;
   for (i = 0; i < PANEL_ROWS; i++) {
-    if (panel_dirty & (1 << i)) {
+    if (con_panel_dirty & (1 << i)) {
       build_row(panel_buf, i);
-      /* Cleared only when the DMA landed inside vblank; an overrun (NMI ate
-       * the window — routine during a download) retries the row next call
-       * instead of leaving it half-painted with the flag gone. */
+      /* Cleared only when the DMA landed inside vblank; an overrun (the NMI
+       * ran long) retries the row next call instead of leaving it
+       * half-painted with the flag gone. While a bit is set the NMI leaves
+       * the link alone, which is what lets the retry land. */
       if (con_panel_row(PANEL_TOP + i, panel_buf))
-        panel_dirty &= (uint8_t)~(1 << i);
+        con_panel_dirty &= (uint8_t)~(1 << i);
       return;
     }
   }
@@ -230,12 +233,12 @@ static void move_sel(int dr, int dc) {
   if (dr) {
     sel_row = (sel_row + dr + KEY_ROWS) % KEY_ROWS;
     clamp_sel();
-    panel_dirty |= (uint8_t)((1 << (old + 1)) | (1 << (sel_row + 1)));
+    con_panel_dirty |= (uint8_t)((1 << (old + 1)) | (1 << (sel_row + 1)));
   }
   if (dc) {
     int n = keyrow_len(sel_row);
     sel_col = (sel_col + dc + n) % n;
-    panel_dirty |= (uint8_t)(1 << (sel_row + 1));
+    con_panel_dirty |= (uint8_t)(1 << (sel_row + 1));
   }
 }
 
@@ -283,7 +286,7 @@ int osk_poll(void) {
   if (p & PAD_Y) {
     osk_shift = !osk_shift;
     clamp_sel();
-    panel_dirty |= 0x1E; /* all four key rows */
+    con_panel_dirty |= 0x1E; /* all four key rows */
     return -1;
   }
   if (p & PAD_UP) move_sel(-1, 0);

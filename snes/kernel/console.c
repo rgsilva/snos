@@ -723,6 +723,14 @@ int con_dirty_pending(void) {
      * nothing had ever needed the network while holding the screen. */
     if (gfx_owned) return 0;
     if (vofs_dirty || pal_dirty) return 1;
+    /* The keyboard panel owes VRAM too, and leaving it out was not a
+     * corner case: opening the keyboard dirties no TEXT row, so with the
+     * text clean every vblank went to the link. On the hardware with the
+     * adapter up the NMI clocks an exchange every frame, ~82 lines, and each
+     * panel row's DMA landed in active display and was retried, forever:
+     * the keyboard never painted. Deferring for it is bounded: six rows,
+     * dirtied again only by the keyboard opening or a button pressed on it. */
+    if (con_panel_dirty) return 1;
     for (i = 0; i < RING; i++)
         if (dirty[i]) return 1;
     return 0;
@@ -773,16 +781,19 @@ void con_changes(uint16_t *lo, uint16_t *hi) {
     *hi = h;
 }
 
+uint8_t con_panel_dirty; /* console.h; con_dirty_pending reads it */
+
 /* Write one row of the PANEL tilemaps. Screen coordinates; the panel map is
  * unscrolled, so panel row R is simply tilemap row R.
  *
  * Returns whether the transfer finished inside vblank — the same rule
  * con_flush enforces, and for the same reason: NMI fires at the top of the
- * window and net_service can consume most of it, after which these DMAs land
- * during active display where VRAM writes are silently ignored. The caller
- * must keep the row dirty on 0 or it stays half-painted forever. */
+ * window, and whatever it runs long on pushes these DMAs into active display
+ * where VRAM writes are silently ignored. net_service was that, every frame,
+ * until con_dirty_pending learned about the panel. The caller must keep the
+ * row dirty on 0 or it stays half-painted forever. */
 int con_panel_row(int screen_row, const uint8_t *chars) {
-    int cell;
+    int cell, landed;
     if (screen_row < 0 || screen_row >= ROWS) return 1;
     if (cols == 32) {
         for (cell = 0; cell < 32; cell++)
@@ -793,10 +804,18 @@ int con_panel_row(int screen_row, const uint8_t *chars) {
             rowbuf1[0][cell] = (uint16_t)((chars[cell * 2 + 1] << 1) | 0x2000);
         }
     }
+    /* No context switch in the window, for con_flush's reason (above): one
+     * landing at the NMI that opens it resumes this after vblank, every
+     * time while anything runs in the background. Worse now that the NMI
+     * defers the link while a panel row is owed: a row that can never land
+     * holds the link off for good. */
+    proc_lock();
     while (R8(0x4212) & 0x80) ;
     while (!(R8(0x4212) & 0x80)) ;
     dma_vram(0, (uint16_t)(BG2_PANEL + screen_row * 32), rowbuf[0], 32);
     if (cols != 32)
         dma_vram(1, (uint16_t)(BG1_PANEL + screen_row * 32), rowbuf1[0], 32);
-    return (R8(0x4212) & 0x80) ? 1 : 0;
+    landed = (R8(0x4212) & 0x80) ? 1 : 0;
+    proc_unlock();
+    return landed;
 }

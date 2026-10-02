@@ -86,7 +86,9 @@ void snos_nmi_c(void) {
    * Deferring is self-balancing rather than a starvation risk: the console can
    * only stay dirty while something is printing, and something can only keep
    * printing while data keeps arriving, which requires this to run. The two
-   * alternate. */
+   * alternate. The keyboard panel counts as the console here, and is bounded
+   * without that argument: six rows, owed only once it opens or a button
+   * moves it. */
   if (!con_dirty_pending()) net_service();
 
   /* The kill switch. It lives here, in the interrupt the kernel owns

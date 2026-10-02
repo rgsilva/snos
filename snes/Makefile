@@ -91,7 +91,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-mode test-hwspeed test-hwresponse clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -467,6 +467,14 @@ test-hwresponse: $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
 	$(call check_env)
 	@test -n "$(LINK_HW)" || { echo "test-hwresponse needs LINK_HW=1"; exit 1; }
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
+
+# The keyboard panel paints on the LINK_HW ROM while the cable runs flat out,
+# and the selection moves; the NMI's exchange used to take every vblank from
+# it. `make LINK_HW=1 test-hwpanel`, at either CON_COLS.
+test-hwpanel: $(BUILD)/snos.sfc $(BUILD)/test/hwpanel.lua
+	$(call check_env)
+	@test -n "$(LINK_HW)" || { echo "test-hwpanel needs LINK_HW=1"; exit 1; }
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwpanel.lua
 
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)

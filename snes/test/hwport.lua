@@ -144,13 +144,26 @@ function P.new(gw, opt)
   emu.addMemoryCallback(function(addr, value)
     pico.hdma = value
   end, emu.callbackType.write, 0x420C)
+  -- The check's line is the one the gate compared: the V counter $2137
+  -- latched, low eight bits, as the $213D read after it returns them
+  -- (input.c, beam_line). ppu.scanline is a different clock, the debugger's,
+  -- sampled a few cycles after the read: one in the last cycles of line 131
+  -- latches 131, which the gate allows, while ppu.scanline already says 132,
+  -- and an exchange the ROM was right to start failed check_max <= gate. It
+  -- stays for one thing the eight bits cannot say, whether the check came
+  -- before vblank (check_scan < 225): lines 256-261 latch as 0-5.
   emu.addMemoryCallback(function()
     if pico.mask then
       local st = emu.getState()
-      pico.mask.check_t, pico.mask.check_line = st["masterClock"], st["ppu.scanline"]
+      pico.mask.check_t, pico.mask.check_scan = st["masterClock"], st["ppu.scanline"]
+      pico.mask.check_line = nil
       pico.mask.hdma = pico.hdma ~= 0
     end
   end, emu.callbackType.read, 0x2137)
+  emu.addMemoryCallback(function(addr, value)
+    local m = pico.mask
+    if m and m.check_t and not m.check_line then m.check_line = value end
+  end, emu.callbackType.read, 0x213D)
   emu.addMemoryCallback(function(addr, value)
     if (value & 0x80) == 0 then
       if not pico.mask and (value & 1) == 1 then
@@ -162,8 +175,8 @@ function P.new(gw, opt)
     end
     local m = pico.mask
     pico.mask = nil
-    if m and not m.nmi and m.check_t and pico.exchanges == m.exchanges and
-       m.check_line < 225 then
+    if m and not m.nmi and m.check_line and pico.exchanges == m.exchanges and
+       m.check_scan < 225 then
       local g = pico.gates[m.hdma] -- checked, and no exchange: refused
       if not g.refused_min or m.check_line < g.refused_min then g.refused_min = m.check_line end
     end
@@ -173,7 +186,7 @@ function P.new(gw, opt)
       pico.unmask_t = t
       local tail = (t - pico.last_end) / LINE
       if tail > pico.tail_max then pico.tail_max = tail end
-      if m.check_t and m.check_line < 225 then
+      if m.check_line and m.check_scan < 225 then
         local g = pico.gates[m.hdma]
         local after = (t - m.check_t) / LINE
         g.exchanges = g.exchanges + 1
