@@ -1297,7 +1297,9 @@ to: the player's name/UUID echoed into Login Success, teleport IDs, keepalive ID
    puts them back at spawn. The terrain is a RULE, not a map: the console recomputes any punched
    block from the same cones the baker used, via two 81-byte tables indexed by SQUARED distance
    so it never needs a square root, and mkmc_test compares the two rules over all 102,400 blocks
-   a player can reach.)*
+   a player can reach. Since 2026-10-02 a diamond block crowns the hill: on the grass cap of its
+   single highest column, at y 14, so its top face is still lit from section 0. It is the one
+   state id above 127 (3355), so the dig-revert's Block Change now writes a two-byte VarInt.)*
 5. **Docs**: gateway.md gets a "join it from your Mac" section (add server → the address `net
    status` prints, port 25565 forwarded via IPFWD like any listener); README status row.
 
