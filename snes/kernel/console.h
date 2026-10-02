@@ -105,6 +105,10 @@ void con_notify(int on);
 void con_split_enable(int panel_top_row);
 void con_split_disable(void);
 int con_panel_row(int screen_row, const uint8_t *chars); /* 1 = landed in vblank */
+/* The panel rows not yet in VRAM, a bit per row from the panel's top. The
+ * keyboard (input.c) sets and clears them; they live here because
+ * con_dirty_pending must count them, and it runs in NMI, so a plain byte. */
+extern uint8_t con_panel_dirty;
 void con_invalidate_all(void);
 void con_gfx(int acquire);
 
