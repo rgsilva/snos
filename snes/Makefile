@@ -55,6 +55,25 @@ ifdef LINK_HW
 CFLAGS += -DLINK_HW=1
 BUILD := build-hw
 endif
+# The console's power-on text mode; `mode` changes it at runtime. 64-column
+# Mode 5 is too fine for composite video into a CRT -- its one-dot gaps smear
+# shut -- so the hardware ROM boots 32 columns in white. The emulator ROM keeps
+# 64 in green, which every screen-reading test was written against; preview
+# the other with `make CON_COLS=32 CON_COLOUR=white`. Colours: white green
+# mint amber (kernel/console.h).
+ifdef LINK_HW
+CON_COLS ?= 32
+CON_COLOUR ?= white
+endif
+CON_COLS ?= 64
+CON_COLOUR ?= green
+ifeq ($(filter 32 64,$(CON_COLS)),)
+$(error CON_COLS must be 32 or 64, not '$(CON_COLS)')
+endif
+ifeq ($(filter white green mint amber,$(CON_COLOUR)),)
+$(error CON_COLOUR must be white, green, mint or amber, not '$(CON_COLOUR)')
+endif
+CON_DEFS := -DCON_COLS_DEFAULT=$(CON_COLS) -DCON_COLOUR_DEFAULT=CON_COLOUR_$(CON_COLOUR)
 AFLAGS := --core=65816 --target=SNES $(MODEL)
 # Generic clib to match the bare-target C objects (the -snes variants carry a
 # target attribute the linker refuses to mix). Verified to contain no
@@ -106,6 +125,17 @@ KERNEL_H := $(wildcard $(K)/*.h)
 
 $(BUILD)/%.o: $(K)/%.c $(KERNEL_H) | $(BUILD)
 	$(CC) -o $@ $< $(CFLAGS)
+
+# Only console.c reads the power-on mode. Make does not notice a changed
+# variable, so the stamp's NAME carries the values: a different mode is a
+# missing stamp, and a missing stamp rebuilds console.o.
+CON_STAMP := $(BUILD)/.conmode-$(CON_COLS)-$(CON_COLOUR)
+$(CON_STAMP): | $(BUILD)
+	rm -f $(BUILD)/.conmode-*
+	touch $@
+
+$(BUILD)/console.o: $(K)/console.c $(KERNEL_H) $(CON_STAMP) | $(BUILD)
+	$(CC) -o $@ $< $(CFLAGS) $(CON_DEFS)
 
 # Vendored uIP (kernel/uip/). Same flags as the rest of the kernel, including
 # the no---target=snes rule: uIP does 16-bit arithmetic everywhere and every
