@@ -247,6 +247,108 @@ static void t_heap_exhaustion_retry(void) {
     for (unsigned i = 0; i < count; ++i) mem_free(held[i]);
     assert(op_tcp_write(NULL, 0, data, sizeof(data)) && pcb->snd_lbb - before == sizeof(data));
 }
+/* External ICMP through real lwIP: raw_sendto leaves on the fake WiFi netif,
+ * replies enter through ip_input and reach the console only from nat_poll. */
+#define PICO_IP 0xc000020au
+#define HOST_IP 0xac100101u
+static uint8_t wifi[NAT_MTU];
+static size_t wifi_len;
+static unsigned wifi_sent;
+static err_t wifi_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *ip) {
+    (void)netif; (void)ip; assert(p->tot_len <= sizeof(wifi));
+    wifi_len = pbuf_copy_partial(p, wifi, p->tot_len, 0); ++wifi_sent; return ERR_OK;
+}
+static void console_ping(uint32_t destination, uint16_t id, uint16_t seq) {
+    uint8_t p[31] = {0}; p[0] = 0x45; put16(p + 2, sizeof(p)); p[8] = 64; p[9] = 1;
+    put32(p + 12, 0x0a00020f); put32(p + 16, destination); put16(p + 10, checksum(p, 20, 0));
+    p[20] = 8; put16(p + 24, id); put16(p + 26, seq); memcpy(p + 28, "odd", 3);
+    put16(p + 22, checksum(p + 20, 11, 0));
+    cyw43_arch_lwip_begin(); nat_core_input(core, p, sizeof(p), clock_ms); cyw43_arch_lwip_end();
+}
+/* Deliver an ICMP message to the Pico's address as the WiFi driver would. */
+static void wifi_icmp(uint32_t from, const uint8_t *icmp, size_t len) {
+    uint8_t p[NAT_MTU] = {0}; p[0] = 0x45; put16(p + 2, 20 + len); p[8] = 64; p[9] = 1;
+    put32(p + 12, from); put32(p + 16, PICO_IP); put16(p + 10, checksum(p, 20, 0));
+    memcpy(p + 20, icmp, len);
+    struct pbuf *b = pbuf_alloc(PBUF_RAW, (u16_t)(20 + len), PBUF_POOL); assert(b);
+    assert(pbuf_take(b, p, (u16_t)(20 + len)) == ERR_OK);
+    in_callback = true; assert(test_netif.input(b, &test_netif) == ERR_OK); in_callback = false;
+}
+/* The far host's answer to the request lwIP last put on WiFi. */
+static void wifi_pong(void) {
+    uint8_t r[NAT_MTU]; size_t len = wifi_len - 20;
+    memcpy(r, wifi + 20, len); r[0] = 0; put16(r + 2, 0); put16(r + 2, checksum(r, len, 0));
+    wifi_icmp(get32(wifi + 16), r, len);
+}
+static void assert_pool_free(void) {
+    struct pbuf *held[PBUF_POOL_SIZE];
+    for (unsigned i = 0; i < PBUF_POOL_SIZE; ++i) {
+        held[i] = pbuf_alloc(PBUF_RAW, 1, PBUF_POOL); assert(held[i]);
+    }
+    for (unsigned i = 0; i < PBUF_POOL_SIZE; ++i) pbuf_free(held[i]);
+}
+static void t_icmp_echo_through_raw_pcb(void) {
+    test_netif.output = wifi_output;
+    console_ping(HOST_IP, 0x534e, 7);
+    assert(wifi_sent == 1 && wifi_len == 31 && wifi[9] == 1 && icmp_pcb);
+    assert(get32(wifi + 12) == PICO_IP && get32(wifi + 16) == HOST_IP);
+    assert(checksum(wifi, 20, 0) == 0 && checksum(wifi + 20, 11, 0) == 0);
+    assert(wifi[20] == 8 && wifi[26] == 0 && wifi[27] == 7 && !memcmp(wifi + 28, "odd", 3));
+    unsigned before = outputs;
+    wifi_pong();
+    assert(!callback_emit && outputs == before); /* the callback only queued it */
+    nat_poll();
+    assert(outputs == before + 1 && packet_len == 31 && packet[9] == 1);
+    assert(get32(packet + 12) == HOST_IP && get32(packet + 16) == 0x0a00020fu);
+    assert(checksum(packet, 20, 0) == 0 && checksum(packet + 20, 11, 0) == 0);
+    assert(packet[20] == 0 && packet[24] == 0x53 && packet[25] == 0x4e);
+    assert(packet[26] == 0 && packet[27] == 7 && !memcmp(packet + 28, "odd", 3));
+    assert(nat_stats().icmp == 1);
+    assert_pool_free();
+}
+static void t_icmp_lwip_keeps_its_own(void) {
+    test_netif.output = wifi_output;
+    console_ping(HOST_IP, 0x534e, 1); nat_poll(); assert(icmp_pcb);
+    /* A LAN host pinging the Pico is still answered by lwIP itself. */
+    uint8_t request[11] = {8, 0, 0, 0, 0x12, 0x34, 0, 1, 'l', 'a', 'n'};
+    put16(request + 2, checksum(request, sizeof(request), 0));
+    unsigned sent = wifi_sent, before = outputs;
+    wifi_icmp(0xc0000277u, request, sizeof(request));
+    assert(wifi_sent == sent + 1 && wifi[20] == 0 && get32(wifi + 16) == 0xc0000277u);
+    /* ICMP errors are not mapped back to the console: they are dropped. */
+    uint8_t unreachable[36] = {3, 1};
+    put16(unreachable + 2, checksum(unreachable, sizeof(unreachable), 0));
+    wifi_icmp(0xc0000201u, unreachable, sizeof(unreachable));
+    nat_poll();
+    assert(outputs == before && !callback_emit);
+    assert_pool_free();
+}
+static void t_icmp_teardown(void) {
+    test_netif.output = wifi_output;
+    console_ping(HOST_IP, 0x534e, 1); wifi_pong(); /* a reply still queued */
+    nat_reset();
+    assert(!icmp_pcb && icmp_head == icmp_tail);
+    unsigned before = outputs; nat_poll(); assert(outputs == before);
+    assert_pool_free();
+    console_ping(HOST_IP, 0x534e, 2); wifi_pong(); assert(icmp_pcb);
+    nat_configure(false); /* WiFi loss and the switch to relay mode */
+    assert(!icmp_pcb && icmp_head == icmp_tail);
+    assert_pool_free();
+    nat_configure(true);
+    console_ping(HOST_IP, 0x534e, 3); nat_poll(); assert(icmp_pcb);
+    clock_ms += 15001; nat_poll();
+    assert(!icmp_pcb && nat_stats().icmp == 0);
+}
+static void t_icmp_reply_queue_overflow(void) {
+    test_netif.output = wifi_output;
+    console_ping(HOST_IP, 0x534e, 1);
+    for (unsigned i = 0; i < 4; ++i) wifi_pong();
+    unsigned before = outputs, drops = nat_stats().drop;
+    nat_poll();
+    assert(outputs == before + 3 && nat_stats().drop == drops + 1);
+    assert_pool_free();
+}
+
 #define TEST(name) {#name, name}
 static const struct { const char *name; void (*run)(void); } tests[] = {
     TEST(t_tcp_error_clears_freed_pcb), TEST(t_pbuf_pool_exhaustion), TEST(t_heap_exhaustion_retry),
@@ -257,7 +359,9 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     TEST(t_bug_write_output_failure_duplicates), TEST(t_bug_reset_listener),
     TEST(t_bug_mode_disable_releases_pcbs), TEST(t_bug_accepted_data_before_poll),
     TEST(t_bug_accepted_error_before_poll), TEST(t_bug_listener_allocation_failure),
-    TEST(t_bug_udp_callback_enters_link_queue)
+    TEST(t_bug_udp_callback_enters_link_queue),
+    TEST(t_icmp_echo_through_raw_pcb), TEST(t_icmp_lwip_keeps_its_own), TEST(t_icmp_teardown),
+    TEST(t_icmp_reply_queue_overflow)
 };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

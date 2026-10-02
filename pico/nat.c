@@ -3,7 +3,9 @@
 #include "link.h"
 #include "log.h"
 #include "lwip/dns.h"
+#include "lwip/icmp.h"
 #include "lwip/netif.h"
+#include "lwip/raw.h"
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
 #include "nat_core.h"
@@ -386,6 +388,59 @@ static void udp_close(void *arg, unsigned i) {
     }
     invalidate_udp_slot(i);
 }
+/* One raw PCB serves every ICMP flow: the core tells flows apart by the
+ * identifier it puts on the wire, so replies need no per-flow demux here.  The
+ * callback keeps echo replies whole for nat_poll, which owns them from then. */
+static struct raw_pcb *icmp_pcb;
+static struct pbuf *icmp_pending[4];
+static uint8_t icmp_head, icmp_tail, icmp_rx[NAT_MTU - 20];
+static unsigned icmp_lost;
+/* lwIP ignores echo replies itself, so eating all of them takes nothing from
+ * it; anything else, a request for the Pico's own address included, goes on. */
+static u8_t nat_icmp_recv(void *arg, struct raw_pcb *pcb, struct pbuf *p,
+                          const ip_addr_t *addr) {
+    (void)arg;
+    (void)pcb;
+    (void)addr;
+    if (pbuf_try_get_at(p, IPH_HL_BYTES((const struct ip_hdr *)p->payload)) != ICMP_ER)
+        return 0;
+    uint8_t next = (uint8_t)((icmp_head + 1u) & 3u);
+    if (next == icmp_tail) {
+        ++icmp_lost;
+        pbuf_free(p);
+        return 1;
+    }
+    icmp_pending[icmp_head] = p;
+    icmp_head = next;
+    return 1;
+}
+static bool icmp_send(void *arg, uint32_t addr, const uint8_t *p, size_t len) {
+    (void)arg;
+    if (!icmp_pcb) {
+        icmp_pcb = raw_new(IP_PROTO_ICMP);
+        if (!icmp_pcb)
+            return false;
+        raw_recv(icmp_pcb, nat_icmp_recv, NULL);
+    }
+    ip_addr_t ip;
+    IP_ADDR4(&ip, addr >> 24, addr >> 16, addr >> 8, addr);
+    struct pbuf *b = pbuf_alloc(PBUF_IP, (u16_t)len, PBUF_RAM);
+    if (!b)
+        return false;
+    pbuf_take(b, p, (u16_t)len);
+    err_t e = raw_sendto(icmp_pcb, b, &ip);
+    pbuf_free(b);
+    return e == ERR_OK;
+}
+static void icmp_close(void) {
+    if (icmp_pcb) {
+        raw_remove(icmp_pcb);
+        icmp_pcb = NULL;
+    }
+    for (; icmp_tail != icmp_head; icmp_tail = (uint8_t)((icmp_tail + 1u) & 3u))
+        pbuf_free(icmp_pending[icmp_tail]);
+    icmp_lost = 0;
+}
 static void ops_init(void) {
     nat_ops_t o = {
         .emit = emit,
@@ -400,6 +455,7 @@ static void ops_init(void) {
     };
     nat_core_init(core, &o);
     nat_core_set_adapter(core, emit_try, link_busy, udp_close, tcp_queued);
+    nat_core_set_icmp(core, icmp_send);
 }
 void nat_init(void) {
     memset(&store, 0, sizeof(store));
@@ -420,6 +476,7 @@ void nat_reset(void) {
     nat_core_reset(core);
     for (unsigned i = 0; i < NAT_UDP_MAX; ++i)
         udp_close(NULL, i);
+    icmp_close();
     for (unsigned i = 0; i < 4; ++i)
         if (accepted_pending[i].pcb) {
             tcp_abort(accepted_pending[i].pcb);
@@ -499,6 +556,24 @@ void ip_stream_bytes(const uint8_t *data, size_t len, ip_stream_consumer_t consu
         }
     }
 }
+static void drain_icmp(void) {
+    for (; icmp_lost; --icmp_lost)
+        nat_core_drop(core);
+    for (; icmp_tail != icmp_head; icmp_tail = (uint8_t)((icmp_tail + 1u) & 3u)) {
+        struct pbuf *p = icmp_pending[icmp_tail];
+        const struct ip_hdr *h = p->payload;
+        u16_t hlen = IPH_HL_BYTES(h);
+        size_t len = p->tot_len - hlen;
+        uint32_t from = lwip_ntohl(h->src.addr);
+        if (len > sizeof(icmp_rx))
+            nat_core_icmp_received(core, from, NULL, len, now());
+        else {
+            pbuf_copy_partial(p, icmp_rx, (u16_t)len, hlen);
+            nat_core_icmp_received(core, from, icmp_rx, len, now());
+        }
+        pbuf_free(p);
+    }
+}
 static void nat_input(const uint8_t *packet, size_t len) {
     if (up)
         nat_core_input(core, packet, len, now());
@@ -520,10 +595,13 @@ void nat_poll(void) {
     }
     cyw43_arch_lwip_begin();
     process_pending_tcp();
+    drain_icmp();
     nat_core_poll(core, now());
     for (unsigned i = 0; i < NAT_UDP_MAX; ++i)
         if (!nat_core_udp_used(core, i))
             udp_close(NULL, i);
+    if (!nat_core_stats(core).icmp)
+        icmp_close();
     flush_output();
     cyw43_arch_lwip_end();
     ctrl_poll();
@@ -550,6 +628,6 @@ nat_stats_t nat_stats(void) {
     cyw43_arch_lwip_begin();
     nat_stats_t s = nat_core_stats(core);
     cyw43_arch_lwip_end();
-    r = (nat_stats_t){s.in, s.out, s.drop, s.tcp, s.udp, s.forwards, s.speed};
+    r = (nat_stats_t){s.in, s.out, s.drop, s.tcp, s.udp, s.forwards, s.speed, s.icmp};
     return r;
 }

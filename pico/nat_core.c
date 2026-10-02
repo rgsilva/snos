@@ -19,10 +19,13 @@
 #define MAX_RETRIES 8u /* slirp.py MAX_RETRIES */
 #define TCP_IDLE 300000u /* slirp.py TCP_IDLE */
 #define UDP_IDLE 60000u /* slirp.py UDP_IDLE */
+#define ICMP_IDLE 15000u /* slirp.py ICMP_IDLE */
 #define TIME_WAIT 4000u /* slirp.py TIME_WAIT */
 #define FIN_GRACE 750u /* slirp.py FIN_GRACE */
 #define INBOUND_CAP 4u /* slirp.py INBOUND_CAP */
 #define TCP_RX (2 * MSS)
+#define ECHO_REPLY 0
+#define ECHO 8
 #define SPEED_PORT 7778u
 #define SPEED_LINE 24u
 #define SPEED_TIMEOUT 15000u
@@ -50,6 +53,16 @@ typedef struct {
     uint16_t sport, dport;
     uint32_t reply_from, touched;
 } udp_t;
+/* An echo leaves with an identifier of the NAT's choosing, as on a Linux ping
+ * socket.  Its low bits are the slot and the rest a generation bumped on every
+ * reuse, so a reply that outlives its flow cannot match the slot's next flow;
+ * wire therefore persists while the slot is free, and across reset. */
+typedef struct {
+    bool used;
+    uint16_t ident, wire;
+    uint32_t touched;
+} icmp_t;
+typedef char icmp_slots_divide_ids[(NAT_ICMP_MAX & (NAT_ICMP_MAX - 1)) == 0 ? 1 : -1];
 typedef struct {
     bool used;
     uint16_t port;
@@ -62,12 +75,14 @@ typedef struct {
     bool (*link_busy)(void *);
     void (*udp_close)(void *, unsigned);
     bool (*tcp_queued)(void *, unsigned);
+    bool (*icmp_send)(void *, uint32_t, const uint8_t *, size_t);
 } adapter_t;
 struct nat {
     nat_ops_t op;
     adapter_t adapter;
     tcp_t tcp[NAT_TCP_MAX];
     udp_t udp[NAT_UDP_MAX];
+    icmp_t icmp[NAT_ICMP_MAX];
     fwd_t fwd[NAT_TCP_MAX];
     uint32_t ident, iss, local_address, resolver[6];
     uint16_t next_eport;
@@ -117,7 +132,7 @@ static bool busy(nat_t *n) {
     return n->adapter.link_busy && n->adapter.link_busy(n->op.arg);
 }
 static void count(nat_t *n) {
-    n->stat.tcp = n->stat.udp = n->stat.forwards = n->stat.speed = 0;
+    n->stat.tcp = n->stat.udp = n->stat.forwards = n->stat.speed = n->stat.icmp = 0;
     for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
         if (n->tcp[i].state != FREE) {
             ++n->stat.tcp;
@@ -127,6 +142,9 @@ static void count(nat_t *n) {
     for (unsigned i = 0; i < NAT_UDP_MAX; ++i)
         if (n->udp[i].used)
             ++n->stat.udp;
+    for (unsigned i = 0; i < NAT_ICMP_MAX; ++i)
+        if (n->icmp[i].used)
+            ++n->stat.icmp;
     for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
         if (n->fwd[i].used)
             ++n->stat.forwards;
@@ -569,19 +587,50 @@ static void in_udp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_
     if (!n->op.udp_send(n->op.arg, (unsigned)s, target, dp, b + 8, ln - 8))
         ++n->stat.drop;
 }
-static void in_icmp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len) {
-    if (len < 8 || sum(b, len, 0) || b[0] != 8) {
+/* Flows are keyed on the console's identifier alone, as slirp.py keys its
+ * sockets: one flow carries that identifier's pings to every destination. */
+static int icmp_flow(nat_t *n, uint16_t ident, uint32_t now) {
+    int s = -1;
+    for (unsigned i = 0; s < 0 && i < NAT_ICMP_MAX; ++i)
+        if (n->icmp[i].used && n->icmp[i].ident == ident)
+            s = (int)i;
+    for (unsigned i = 0; s < 0 && i < NAT_ICMP_MAX; ++i)
+        if (!n->icmp[i].used) {
+            s = (int)i;
+            n->icmp[i].used = true;
+            n->icmp[i].ident = ident;
+            n->icmp[i].wire = (uint16_t)(n->icmp[i].wire + NAT_ICMP_MAX);
+        }
+    if (s >= 0)
+        n->icmp[s].touched = now;
+    return s;
+}
+/* Echo requests to the gateway, the DNS front and the Pico's own address are
+ * answered here.  lwIP has no loopback: forwarded, the last would go out on
+ * WiFi addressed to the Pico, and nothing there answers it. */
+static void in_icmp(nat_t *n, uint32_t dip, const uint8_t *b, size_t len, uint32_t now) {
+    if (len < 8 || len + 20 > NAT_MTU || sum(b, len, 0) || b[0] != ECHO) {
         ++n->stat.drop;
         return;
     }
-    if (dip == GW || dip == DNS) {
-        uint8_t *r = udp_scratch;
-        memcpy(r, b, len);
-        r[0] = 0;
+    uint8_t *r = udp_scratch;
+    memcpy(r, b, len);
+    if (dip == GW || dip == DNS || (n->local_address && dip == n->local_address)) {
+        r[0] = ECHO_REPLY;
         wr16(r + 2, 0);
         wr16(r + 2, sum(r, len, 0));
         (void)emit(n, dip, ICMP, r, len);
-    } else
+        return;
+    }
+    int s = n->adapter.icmp_send ? icmp_flow(n, rd16(b + 4), now) : -1;
+    if (s < 0) {
+        ++n->stat.drop;
+        return;
+    }
+    wr16(r + 4, n->icmp[s].wire);
+    wr16(r + 2, 0);
+    wr16(r + 2, sum(r, len, 0));
+    if (!n->adapter.icmp_send(n->op.arg, dip, r, len))
         ++n->stat.drop;
 }
 size_t nat_core_size(void) {
@@ -592,6 +641,8 @@ void nat_core_init(nat_t *n, const nat_ops_t *op) {
     n->op = *op;
     n->iss = 0x2000;
     n->next_eport = 40000;
+    for (unsigned i = 0; i < NAT_ICMP_MAX; ++i)
+        n->icmp[i].wire = (uint16_t)i;
 }
 void nat_core_set_resolver(nat_t *n, uint32_t address) {
     nat_core_set_resolvers(n, &address, 1);
@@ -616,11 +667,17 @@ void nat_core_set_local_address(nat_t *n, uint32_t address) {
 void nat_core_set_adapter(nat_t *n, bool (*emit_try)(void *, const uint8_t *, size_t),
                           bool (*link_busy)(void *), void (*udp_close)(void *, unsigned),
                           bool (*tcp_queued)(void *, unsigned)) {
-    n->adapter = (adapter_t){emit_try, link_busy, udp_close, tcp_queued};
+    n->adapter = (adapter_t){emit_try, link_busy, udp_close, tcp_queued, n->adapter.icmp_send};
+}
+void nat_core_set_icmp(nat_t *n, bool (*send)(void *, uint32_t, const uint8_t *, size_t)) {
+    n->adapter.icmp_send = send;
 }
 void nat_core_reset(nat_t *n) {
     nat_ops_t op = n->op;
     adapter_t adapter = n->adapter;
+    uint16_t wire[NAT_ICMP_MAX];
+    for (unsigned i = 0; i < NAT_ICMP_MAX; ++i)
+        wire[i] = n->icmp[i].wire;
     for (unsigned i = 0; i < NAT_TCP_MAX; ++i)
         if (n->tcp[i].state != FREE)
             op.tcp_abort(op.arg, i);
@@ -632,6 +689,8 @@ void nat_core_reset(nat_t *n) {
     n->adapter = adapter;
     n->iss = 0x2000;
     n->next_eport = 40000;
+    for (unsigned i = 0; i < NAT_ICMP_MAX; ++i)
+        n->icmp[i].wire = wire[i];
 }
 void nat_core_drop(nat_t *n) {
     ++n->stat.drop;
@@ -649,7 +708,7 @@ void nat_core_input(nat_t *n, const uint8_t *p, size_t len, uint32_t now) {
     ++n->stat.in;
     switch (p[9]) {
     case ICMP:
-        in_icmp(n, rd32(p + 16), p + h, total - h);
+        in_icmp(n, rd32(p + 16), p + h, total - h, now);
         break;
     case UDP:
         in_udp(n, rd32(p + 16), p + h, total - h, now);
@@ -712,6 +771,30 @@ void nat_core_udp_received(nat_t *n, unsigned i, const uint8_t *d, size_t len, u
     wr16(b + 6, c ? c : 0xffff);
     u->touched = now;
     (void)emit(n, u->reply_from, UDP, b, 8 + len);
+}
+/* Only echo replies arrive here, still carrying the NAT's identifier.  One
+ * that matches no live flow is late, not lost, so it is ignored uncounted. */
+void nat_core_icmp_received(nat_t *n, uint32_t from, const uint8_t *d, size_t len,
+                            uint32_t now) {
+    if (!d || len < 8 || len + 20 > NAT_MTU || d[0] != ECHO_REPLY) {
+        ++n->stat.drop;
+        return;
+    }
+    uint16_t wire = rd16(d + 4);
+    icmp_t *f = &n->icmp[wire % NAT_ICMP_MAX];
+    if (!f->used || f->wire != wire)
+        return;
+    if (sum(d, len, 0)) {
+        ++n->stat.drop;
+        return;
+    }
+    uint8_t *r = udp_scratch;
+    memcpy(r, d, len);
+    wr16(r + 4, f->ident);
+    wr16(r + 2, 0);
+    wr16(r + 2, sum(r, len, 0));
+    f->touched = now;
+    (void)emit(n, from, ICMP, r, len);
 }
 /* Reserve before handing a new accepted PCB to the poll path. DONE slots do
  * not count against slirp.py's per-port accept cap during their TIME_WAIT. */
@@ -912,6 +995,12 @@ static void poll_udp(nat_t *n, uint32_t now) {
         }
 }
 
+static void poll_icmp(nat_t *n, uint32_t now) {
+    for (unsigned i = 0; i < NAT_ICMP_MAX; ++i)
+        if (n->icmp[i].used && expired(now, n->icmp[i].touched, ICMP_IDLE))
+            n->icmp[i].used = false;
+}
+
 void nat_core_poll(nat_t *n, uint32_t now) {
     unsigned start = n->tcp_next;
     for (unsigned offset = 0; offset < NAT_TCP_MAX; ++offset) {
@@ -919,6 +1008,7 @@ void nat_core_poll(nat_t *n, uint32_t now) {
         poll_tcp_slot(n, i, now);
     }
     poll_udp(n, now);
+    poll_icmp(n, now);
     count(n);
 }
 nat_stats_t nat_core_stats(const nat_t *n) {
