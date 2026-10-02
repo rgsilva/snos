@@ -59,6 +59,11 @@ In NAT mode HELLO reports the Pico DHCP address and `stats` includes flows.
 that address, so it measures the console-to-Pico link. An explicit `HOST:PORT`
 still measures that remote peer. The `nat:` stats line includes `speed=`, the
 number of active built-in speedtest flows.
+In NAT mode the console's pings reach real hosts: the Pico forwards echo
+requests over lwIP raw ICMP and maps the replies back. It answers pings to
+10.0.2.2, 10.0.2.3 and its own DHCP address itself. ICMP errors (unreachable,
+TTL exceeded) are dropped, not relayed to the console. `icmp=` in the `nat:`
+line counts echo flows: at most four, each freed after 15 idle seconds.
 A mode switch never touches the link; keyboard input is delivered exactly once.
 Input is echoed, including the password in the setup command; `wifi?` masks it.
 Backspace edits input. Overlong lines are discarded.

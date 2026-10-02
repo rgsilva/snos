@@ -335,9 +335,27 @@ UDP has eight fixed flows and preserves the console-visible source address.
 `10.0.2.3` rotates the DHCP resolvers and falls back to 1.1.1.1 then 8.8.8.8;
 unchanged DHCP configuration keeps its retry cursor, and unspecified
 resolvers are ignored. Replies are restored to `10.0.2.3` and oversized
-replies are counted and dropped. Echoes to `10.0.2.2`
-and `10.0.2.3` are answered locally. External ICMP is not implemented yet:
-it needs a separate lwIP raw-ICMP request/reply demux.
+replies are counted and dropped. Echoes to `10.0.2.2`,
+`10.0.2.3` and the DHCP address are answered locally (lwIP has no loopback,
+so a forwarded echo to its own address would go unanswered).
+
+Echo requests to anything else are forwarded like `slirp.py`'s ICMP sockets:
+flows are keyed on the console's identifier alone, there are four of them,
+and each is freed after 15 s without a request or reply (`ICMP_IDLE`). The
+core rewrites the identifier on the way out, as a Linux ping socket does. The
+low two bits name the flow's slot and the rest are a generation bumped on
+every reuse and kept across reset, so a reply that outlives its flow cannot
+reach the next one. One `raw_new(IP_PROTO_ICMP)` PCB carries every flow. Its
+callback eats echo replies only, which lwIP ignores anyway, and queues them
+whole (up to three pbufs; overflow is counted as a drop). Echo requests from
+the LAN for the Pico's own address still reach lwIP's `icmp_input`. `nat_poll` drains the
+queue under the lwIP lock: the core checks the checksum, matches the wire
+identifier, restores the console's identifier and checksum, and emits the
+reply from the host that sent it. The PCB is removed when the last flow
+expires and on reset, mode switch and WiFi loss, which also free queued
+replies. ICMP errors (unreachable, TTL exceeded) are not mapped back: they
+quote the Pico's own header, which would need rewriting, so they are dropped;
+`slirp.py` does not relay them either. The `nat:` line reports `icmp=` flows.
 
 `IPFWD`/`IPUNFWD` bind/listen on the Pico and accepted sockets become inbound
 console SYNs. Accepted sockets take ownership callbacks before they are
@@ -346,11 +364,14 @@ DHCP IPv4 address. Foreground raw-API calls are under
 `cyw43_arch_lwip_begin/end`; callback output uses a four-packet handoff, and
 the link queue itself is spinlock protected for every producer. The fixed core
 is 35.4 KiB (eight TCP flows × two-MSS output buffers); its 40,000-byte store,
-receive scratch and callback handoff are static. `lwipopts.h` uses an 18 KiB
-heap, 2-MSS TCP windows, 16 pbufs, 32 TCP segments, 12 TCP PCBs, eight listen
-PCBs and 10 UDP PCBs. Packet scratch is static under the lwIP serialization;
-the ARM stack report's deepest NAT/link call chain is 296 bytes (1,032 bytes
-including `main`), and the firmware reserves
+receive scratch and callback handoff are static. ICMP adds 56 bytes to the
+core and 1,508 to the adapter, nearly all of it the 1,480-byte reply scratch.
+`lwipopts.h` uses an 18 KiB heap, 2-MSS TCP windows, 16 pbufs, 32 TCP
+segments, 12 TCP PCBs, eight listen PCBs and 10 UDP PCBs; ICMP uses one of
+lwIP's four default raw PCBs. Packet scratch is static under the lwIP
+serialization; the deepest NAT/link call chain (`-fcallgraph-info=su`,
+counting the `emit_try` → `link_push` hop) is 392 bytes, `nat_poll` to the
+link queue (1,136 bytes including `main`), and the firmware reserves
 8 KiB across the linked scratch banks for main, link and Bluetooth callbacks;
 this is a reservation, not a measured hardware stack high-water mark.
 
@@ -363,12 +384,18 @@ it is delivered to the newly selected mode. Keyboard records are delivered
 exactly once and in order across the transition.
 
 `pico/tests/nat_test.py` compiles the pure C core with a fake raw transport.
-It covers local ICMP, UDP and DNS source restoration, TCP state/data/FIN,
+It covers local ICMP, external echo with the reply's identifier, sequence and
+checksum restored, ICMP idle expiry, late replies after slot reuse and reset,
+the ICMP flow cap, UDP and DNS source restoration, TCP state/data/FIN,
 stray/refused parsing, forwarding/cap, tuple reuse, oversize UDP,
 backpressure and garbage, plus all speedtest phases, duplex flows, zero-window
 deferral, RST and FIN. The lwIP adapter test confirms that the configured DHCP
-address selects that local peer. WiFi association, DHCP, callback timing, loss
-and real inbound routing still require hardware.
+address selects that local peer, and drives echoes through a real raw PCB:
+the reply reaches the console only from `nat_poll`, lwIP still answers pings
+to the Pico, ICMP errors are dropped, and reset, WiFi loss and idle expiry
+remove the PCB without leaking queued pbufs. WiFi association, DHCP, callback
+timing, loss, real inbound routing and a real `ping` to a LAN or Internet host
+still require hardware.
 
 ## 6. The `wire` test, and the SNOS-side changes
 
