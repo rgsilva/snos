@@ -85,14 +85,18 @@
 #define SYS_READLINE 0x14 /* p0/p1 = buffer, A = size -> length */
 #define SYS_PUTU 0x15     /* A = value, unsigned decimal */
 #define SYS_PUTHEX 0x16   /* A = value, 4 hex digits */
-/* ABI 2. Writes a string at an absolute screen position, clipped to the row:
- * it never moves the cursor and never scrolls. That last part is the point —
- * SYS_PUTS landing on the last column of the last row scrolls the display,
- * which quietly destroys any full-screen layout. */
+/* ABI 2. Writes a string at an absolute screen position, clipped to the row
+ * (the live width, SYS_SCREEN): it never moves the cursor and never scrolls.
+ * That last part is the point — SYS_PUTS landing on the last column of the
+ * last row scrolls the display, which quietly destroys any full-screen
+ * layout. */
 #define SYS_PUTS_AT 0x17 /* p0/p1 = string, A = (row << 8) | col */
 /* ABI 2. -> (usable text rows << 8) | columns. The usable height is NOT fixed:
  * it drops from 28 to 22 when the on-screen keyboard appears, underneath a
- * running application, so anything drawing a full screen has to ask. */
+ * running application, so anything drawing a full screen has to ask. Nor is
+ * the width: 64 or 32, the shell's `mode` (the hardware ROM boots at 32). An
+ * app with no 32-column layout says so in its header (APP_MODE_<name> := 64
+ * in snes/Makefile) and is given 64 while it holds the screen. */
 #define SYS_SCREEN 0x18
 /* ABI 5. Hand the PPU to the application, or give it back.
  *
@@ -108,6 +112,8 @@
 #define SYS_GFX 0x19
 /* ABI 10. Snapshot one console row (64 shadow chars; >= $80 = inverse twin
  * of the low 7 bits) into an app buffer: A = row, p0/p1 = 64-byte buffer.
+ * Always 64 bytes whatever the width: bytes at or past the live column count
+ * (SYS_SCREEN) are spaces.
  * Diffing rows makes telnetd a mirror of STATE, not a replay of events --
  * overflow-proof, coalescing, and clears/positioned writes/scrolls all fall
  * out uniformly. SYS_ERR while an app owns the PPU (nothing to mirror). */
