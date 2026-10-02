@@ -64,6 +64,7 @@ local counts = {}
 local kept = { chat = nil, blockchange = nil }
 
 local DIG_X, DIG_Y, DIG_Z = 2, 3, 18   -- grass, south of the letters
+local GEM_X, GEM_Y, GEM_Z = -22, 14, 4  -- the diamond on the hill's summit
 local function pos_pack(x, y, z)
   local v = ((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF)
   local out = ""
@@ -188,6 +189,10 @@ emu.addEventCallback(function()
   -- it has no FPU to read the rest with -- so this is X=0.0, Y=-100.0,
   -- Z=0.0, not on the ground.
   if step == 6.3 then
+    -- First the summit's diamond: the one state id (3355) that needs a
+    -- two-byte VarInt in the Block Change that puts it back.
+    play_sock:send(pkt(0x1B, varint(0) .. pos_pack(GEM_X, GEM_Y, GEM_Z) ..
+                       string.char(1)))
     -- 0x12 is Player Position in 1.16.5 (0x11 is Lock Difficulty), and
     -- Y = -2048.0 is past the kill depth of -1024.
     play_sock:send(pkt(0x12, string.rep("\0", 8) ..
@@ -285,6 +290,14 @@ emu.addEventCallback(function()
   r.check(kept.blockchange ~= nil and
           kept.blockchange:byte(#kept.blockchange) == 9,
           "dig was not reverted to grass (state 9)")
+  do
+    local gem = pos_pack(GEM_X, GEM_Y, GEM_Z) .. varint(3355)
+    local back = false
+    for _, p in ipairs(walk(play_sock.rx, 1)) do
+      if p.id == 0x0B and p.body == gem then back = true end
+    end
+    r.check(back, "the summit's diamond was not put back (state 3355)")
+  end
   r.check(kept.chat ~= nil, "chat was not echoed")
   r.check(text:find("<snesbot> hello from the outside", 1, true) ~= nil,
           "chat did not reach the console screen")

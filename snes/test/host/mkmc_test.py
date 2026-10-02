@@ -120,6 +120,8 @@ def console_block(x, y, z):
         top = MOUNT[d2]
         if top != 0 and mkmc.SURFACE_Y < y <= top:
             return mkmc.B_GRASS if y == top else mkmc.B_STONE
+        if d2 == 0 and y == top + 1:
+            return mkmc.B_DIAMOND
     d2 = d2_of(mkmc.LAKE_CX, mkmc.LAKE_CZ)
     if 0 <= d2 < len(LAKE):
         f = LAKE[d2]
@@ -243,8 +245,26 @@ def main():
     peak = max(mkmc.height_at(x, z)
                for x in range(-32, 48) for z in range(-16, 64))
     check(4 < peak < 16, f"the hill peaks at {peak}: flat, or out of section 0")
-    check(mkmc.block_at(mkmc.MOUNT_CX, peak - 1, mkmc.MOUNT_CZ)
+    check(mkmc.block_at(mkmc.MOUNT_CX, peak - 2, mkmc.MOUNT_CZ)
           == mkmc.B_GRASS, "the hill has no grass cap")
+
+    # One diamond, standing on the summit's grass cap, its top face still
+    # lit from section 0, and in its section's palette as a two-byte VarInt.
+    check(mkmc.block_at(mkmc.MOUNT_CX, peak - 1, mkmc.MOUNT_CZ)
+          == mkmc.B_DIAMOND, "no diamond on the summit")
+    check(mkmc.DIAMOND[1] + 1 < 16, "the diamond's top face leaves section 0")
+    diamonds = [(x, y, z) for x in range(-32, 48) for z in range(-16, 64)
+                for y in range(16) if mkmc.block_at(x, y, z) == mkmc.B_DIAMOND]
+    check(diamonds == [mkmc.DIAMOND], f"expected one diamond, got {diamonds}")
+    sec = mkmc.section_bytes(mkmc.MOUNT_CX // 16, mkmc.MOUNT_CZ // 16, 0)
+    off = 3                                       # block count, bits
+    plen, off = read_varint(sec, off)
+    palette = []
+    for _ in range(plen):
+        p, off = read_varint(sec, off)
+        palette.append(p)
+    check(mkmc.B_DIAMOND in palette,
+          f"the summit's section palette {palette} lacks the diamond")
 
     # Death and respawn frame cleanly, and respawn really is a Respawn.
     check(walk_packets(blobs["death"], "death") ==

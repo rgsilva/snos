@@ -192,6 +192,7 @@ B_DIRT = 10
 B_BEDROCK = 33
 B_WATER = 34   # water[level=0], the source block: 16 states follow bedrock
 B_SAND = 66    # ...then lava's 16, then sand
+B_DIAMOND = 3355   # diamond_block: after redstone_wire's 1296 and diamond_ore
 BIOME_PLAINS = 1
 
 # ------------------------------------------------------------- the world
@@ -237,6 +238,12 @@ def mount_top(x, z):
         return None
     h = MOUNT_H - (math.isqrt(d2) * MOUNT_H) // MOUNT_R
     return SURFACE_Y + h if h > 0 else None
+
+
+# One diamond block on the summit, standing on the grass cap of the hill's
+# single highest column (its centre: the cone's top falls by one at the very
+# next ring). y 14, so its top face still samples light inside section 0.
+DIAMOND = (MOUNT_CX, mount_top(MOUNT_CX, MOUNT_CZ) + 1, MOUNT_CZ)
 
 
 def lake_floor(x, z):
@@ -318,6 +325,8 @@ def block_at(x, y, z):
     top = mount_top(x, z)
     if top is not None and SURFACE_Y < y <= top:
         return B_GRASS if y == top else B_STONE
+    if (x, y, z) == DIAMOND:
+        return B_DIAMOND
     floor = lake_floor(x, z)
     if floor is not None:
         if y < floor:
@@ -645,7 +654,8 @@ def bake():
         "surface_y": SURFACE_Y,
         "sculpt_z": SCULPT_Z,
         "blocks": {"air": B_AIR, "stone": B_STONE, "grass": B_GRASS,
-                   "dirt": B_DIRT, "bedrock": B_BEDROCK},
+                   "dirt": B_DIRT, "bedrock": B_BEDROCK,
+                   "diamond": B_DIAMOND},
         "sizes": {k: len(v) for k, v in blobs.items()},
     }
     return blobs, manifest
@@ -732,6 +742,9 @@ def emit_header(path, blobs, manifest, placed, order):
                 w(" \\\n  ")
         w(" \\\n}\n")
         w(f"#define MC_B_WATER {B_WATER}\n#define MC_B_SAND {B_SAND}\n")
+        w("/* On the summit's grass cap: the centre column (d2 0), one above\n")
+        w(" * its MOUNT_TOP. The one state id >= 128, a two-byte VarInt. */\n")
+        w(f"#define MC_B_DIAMOND {B_DIAMOND}\n")
         w("/* Below this, the world has ended. The console only ever tests\n")
         w(" * the SIGN and EXPONENT of the client's 64-bit Y, so the depth is\n")
         w(" * a power of two by construction. */\n")

@@ -254,10 +254,11 @@ static int feature_d2(int32_t x, int32_t z, int32_t cx, int32_t cz) {
   return (int)(dx * dx + dz * dz);
 }
 
-/* The world, as the same RULE the baker used — hill, pond, shore, letters,
- * superflat — so a punched block is answered from arithmetic rather than
- * from a copy of the map. The order of the tests mirrors mkmc.block_at
- * exactly; a divergence here would restore the wrong block. */
+/* The world, as the same RULE the baker used — hill and its diamond, pond,
+ * shore, letters, superflat — so a punched block is answered from
+ * arithmetic rather than from a copy of the map. The order of the tests
+ * mirrors mkmc.block_at exactly; a divergence here would restore the wrong
+ * block. */
 static uint16_t world_block(int32_t x, int32_t y, int32_t z) {
   int d2;
   if (y == 0) return MC_B_BEDROCK;
@@ -267,6 +268,7 @@ static uint16_t world_block(int32_t x, int32_t y, int32_t z) {
     int32_t top = (int32_t)MOUNT_TOP[d2];
     if (top != 0 && y > MC_SURFACE_Y && y <= top)
       return (y == top) ? MC_B_GRASS : MC_B_STONE;
+    if (d2 == 0 && y == top + 1) return MC_B_DIAMOND;
   }
   d2 = feature_d2(x, z, MC_LAKE_CX, MC_LAKE_CZ);
   if (d2 >= 0 && d2 < MC_LAKE_D2MAX) {
@@ -311,7 +313,7 @@ static void handle_position(uint16_t off) {
 static void handle_digging(uint16_t off) {
   uint32_t hi, lo;
   int32_t x, y, z;
-  uint16_t o = off, i, state;
+  uint16_t o = off, i, n, state;
   uint32_t status = rd_varint(&o);
   if (status != 0 && status != 2) return;  /* only a break needs undoing */
   if (!have(o, 8)) return;                 /* no position: not ours to answer */
@@ -326,13 +328,19 @@ static void handle_digging(uint16_t off) {
   if (y & 0x800) y |= (int32_t)0xFFFFF000l;
 
   /* Block Change 0x0B: the position echoed straight back (the 8 bytes are
-   * already exactly right), then the original state. The world is a RULE,
-   * so "original" is computed, not looked up. */
+   * already exactly right), then the original state as a VarInt. The world
+   * is a RULE, so "original" is computed, not looked up. Every state id is
+   * one byte except the diamond's, which is two. */
   state = world_block(x, y, z);
   buf[1] = 0x0B;
   for (i = 0; i < 8; i++) buf[2 + i] = cur->rx[o + i];
-  buf[10] = (uint8_t)state;          /* every world state id is < 128 */
-  send_small(10);
+  n = 10;
+  if (state >= 0x80u) {
+    buf[n++] = (uint8_t)(state | 0x80u);
+    state >>= 7;
+  }
+  buf[n] = (uint8_t)state;
+  send_small(n);
   digs++;
   say("dig - put it back\n");
 }
