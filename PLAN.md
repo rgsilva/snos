@@ -299,6 +299,12 @@ hardware. The NAT core now terminates port 7778 itself with a peer speaking
 is round-robin across all flows so an always-ready local source cannot starve
 a real connection. In relay mode `speedtest.py` on the PC is still the peer.
 
+**Small, open: ICMP through the NAT.** The Pico answers pings to its own
+10.0.2.2 / 10.0.2.3 but drops echo requests for real hosts (left out of tier
+2 on purpose); relay mode forwards them because slirp.py does. lwIP's raw API
+can send the echo and map the reply back to the console. Found on the console
+2026-10-02 (`ping 172.16.1.1` silent in NAT mode).
+
 **Tier 3 PARKED** until a W5500 is at hand (Ricardo, 2026-09-30): wired
 Ethernet on the Pico, so the console gets a real LAN address.
 

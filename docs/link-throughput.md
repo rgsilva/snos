@@ -376,6 +376,29 @@ in. If silicon misbehaves,
 `net tune exch 1` takes out the kick and the foreground exchange first, and
 `net tune window 1` everything else; both are runtime, no reflash.
 
+## Measured on silicon, 2026-10-02
+
+Ricardo ran the four configurations on the real console, Pico in NAT mode,
+fresh boot between runs (settings reset on restart). Zero checksum failures
+and zero desyncs in every run.
+
+| run | settings | download | upload | both (down + up) | Mesen predicted |
+|---|---|---|---|---|---|
+| before | the 2026-10-01 protocol | 876 | 919 | 876 + 561 | |
+| 1 | defaults: window 4, exch 2 | **3504** | **2966** | **3066 + 1943** | 3650 / 3375 / 3066 + 2148 |
+| 2 | exch 1 | 2620 | 2352 | 2402 + 1636 | 2628 / 2352 / 2482 + 1739 |
+| 3 | exch 1, window 1 | 1022 | 920 | 1160 + 613 | 1460 / 1329 / 1460 + 1023 |
+| 4 | window 1, exch 2 | 1460 | 1339 | 1460 + 920 | |
+
+4.0x down and 3.2x up at the defaults; the duplex upload is 3.5x. Runs 1 and
+2 land within 4-12% of the model, so the model can be trusted for the next
+round. Run 3 is the outlier: 30% under the prediction, with heavy resends in
+its duplex phase (599 -> 1353 over the run). Nobody will use that setting,
+but it says the model is missing something at window 1 that it does not
+miss at window 4 -- worth understanding before the next optimisation pass
+leans on it. Not yet reported: how typing and the kill switch feel during a
+transfer.
+
 ## After validation
 
 ### The unmask, not the last clock
