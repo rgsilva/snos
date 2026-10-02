@@ -305,6 +305,15 @@ a real connection. In relay mode `speedtest.py` on the PC is still the peer.
 can send the echo and map the reply back to the console. Found on the console
 2026-10-02 (`ping 172.16.1.1` silent in NAT mode).
 
+**8. Minecraft: mobs, and persisting what the player changes.** Today the
+world is a RULE baked into ROM and recomputed on every punch, which is what
+keeps `mc` honest at 3.58 MHz. Persistence means a bounded diff over the rule
+-- a cap on changed blocks, scoped to the chunks the player can reach -- kept
+in SRAM so it survives a power cycle, replayed into the baked chunk packets on
+join. Mobs need a tick loop the server does not have yet (spawn, path, the
+entity packets), so they are the larger half; both are demo polish, after the
+link is fast and the console readable. (Ricardo, 2026-10-02.)
+
 **Tier 3 PARKED** until a W5500 is at hand (Ricardo, 2026-09-30): wired
 Ethernet on the Pico, so the console gets a real LAN address.
 
