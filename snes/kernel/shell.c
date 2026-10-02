@@ -80,7 +80,7 @@ static void cmd_help(void) {
   kcon_puts("restart       reboot SNOS, preserving files\n");
   kcon_puts("mem           memory and cartridge SRAM usage\n");
   kcon_puts("echo ...      print arguments\n");
-  kcon_puts("apps          list applications\n");
+  kcon_puts("apps          list applications; N [A] [&] runs one\n");
   kcon_puts("run N [A] [&] run an application; & = in the background\n");
   kcon_puts("jobs          list background jobs\n");
   kcon_puts("kill N        kill background job N\n");
@@ -345,11 +345,18 @@ static int strip_amp(char *args) {
   return 0;
 }
 
+/* An application launch, `run` or bare, after the name is split off. The `&`
+ * can land in either half: `pad &` leaves it alone in the args, `pad&` on the
+ * name. Builtins never come through here, so `echo a &` still prints the `&`. */
+static int strip_bg(char *name, char *args) {
+  return strip_amp(args) | strip_amp(name);
+}
+
 static void cmd_run(char *cmdline) {
   const app_entry_t *a;
   char *name = cmdline;
   char *args = split_word(cmdline);
-  int bg = strip_amp(args) | strip_amp(name); /* `run pad &` with no args */
+  int bg = strip_bg(name, args);
 
   if (*name == 0) {
     kcon_puts("usage: run NAME [ARGS] [&]\n");
@@ -1405,10 +1412,14 @@ void shell_run(void) {
        * sequence inside cmd_run() has always worked. Both are far pointers
        * through Calypsi's shared direct-page scratch, and the extra call frame
        * is the only difference; keeping the lookup and the launch in one
-       * function is the shape that is known to survive. */
-      const app_entry_t *app = app_find(line);
+       * function is the shape that is known to survive. A trailing `&` puts
+       * it in the background exactly as `run NAME &` does. */
+      const app_entry_t *app;
+      int bg = strip_bg(line, rest);
+      app = app_find(line);
       if (app != 0) {
-        run_app_entry(app, rest);
+        if (bg) run_app_bg(app, rest);
+        else run_app_entry(app, rest);
       } else {
         kcon_puts("unknown command: ");
         kcon_puts(line);
