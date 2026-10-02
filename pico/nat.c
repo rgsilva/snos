@@ -550,6 +550,6 @@ nat_stats_t nat_stats(void) {
     cyw43_arch_lwip_begin();
     nat_stats_t s = nat_core_stats(core);
     cyw43_arch_lwip_end();
-    r = (nat_stats_t){s.in, s.out, s.drop, s.tcp, s.udp, s.forwards, s.speed};
+    r = (nat_stats_t){s.in, s.out, s.drop, s.tcp, s.udp, s.forwards, s.speed, s.icmp};
     return r;
 }

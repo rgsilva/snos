@@ -412,6 +412,149 @@ static void t_speedtest_reset_and_other_port(void) {
     assert(connects == 1 && connect_addr == PICO && connect_port == 23);
 }
 
+/* External ICMP: the console's echo leaves through the raw-ICMP hook and the
+ * far host's reply comes back mapped to the console's identifier. */
+#define HOST 0xac100101u /* 172.16.1.1, the address first pinged from the console */
+static unsigned icmp_sends;
+static uint32_t icmp_addr;
+static unsigned char icmp_sent[NAT_MTU];
+static size_t icmp_len;
+static bool icmp_ok = true;
+static bool icmp_(void *arg, uint32_t addr, const unsigned char *p, size_t len) {
+    (void)arg; assert(len <= sizeof(icmp_sent));
+    ++icmp_sends; icmp_addr = addr; icmp_len = len; memcpy(icmp_sent, p, len);
+    return icmp_ok;
+}
+static void ping_n(uint32_t dst, uint16_t id, uint16_t seq, const unsigned char *data,
+                   size_t len) {
+    unsigned char b[NAT_MTU - 20] = {8, 0};
+    assert(len + 8 <= sizeof(b));
+    wr16(b + 4, id); wr16(b + 6, seq); memcpy(b + 8, data, len);
+    wr16(b + 2, fold(b, len + 8, 0));
+    send_ip(1, dst, b, len + 8);
+}
+static void ping(uint32_t dst, uint16_t id, uint16_t seq) {
+    ping_n(dst, id, seq, (const unsigned char *)"odd", 3);
+}
+/* What the far host sends back: the request as it left the NAT, retyped. */
+static void pong(uint32_t from, const unsigned char *request, size_t len) {
+    unsigned char b[NAT_MTU];
+    memcpy(b, request, len); b[0] = 0; wr16(b + 2, 0); wr16(b + 2, fold(b, len, 0));
+    nat_core_icmp_received(n, from, b, len, tick);
+}
+static void t_icmp_external_echo(void) {
+    nat_core_set_icmp(n, icmp_);
+    ping(HOST, 0x534e, 7);
+    assert(icmp_sends == 1 && icmp_addr == HOST && icmp_len == 11 && emitted == 0);
+    assert(icmp_sent[0] == 8 && fold(icmp_sent, icmp_len, 0) == 0);
+    assert(rd16(icmp_sent + 6) == 7 && !memcmp(icmp_sent + 8, "odd", 3));
+    pong(HOST, icmp_sent, icmp_len); /* emit() checks the IP and ICMP checksums */
+    assert(emitted == 1 && last_len == 31 && last[9] == 1 && rd32(last + 12) == HOST);
+    assert(last[20] == 0 && rd16(last + 24) == 0x534e && rd16(last + 26) == 7);
+    assert(!memcmp(last + 28, "odd", 3));
+    /* The same identifier to another host shares the flow, as in slirp.py. */
+    ping(0x08080808u, 0x534e, 8);
+    assert(icmp_sends == 2 && icmp_addr == 0x08080808u);
+    pong(0x08080808u, icmp_sent, icmp_len);
+    assert(emitted == 2 && rd32(last + 12) == 0x08080808u);
+    assert(rd16(last + 24) == 0x534e && rd16(last + 26) == 8);
+    nat_core_poll(n, tick); assert(nat_core_stats(n).icmp == 1);
+}
+static void t_icmp_largest_echo(void) {
+    unsigned char data[NAT_MTU - 28];
+    for (size_t i = 0; i < sizeof(data); ++i) data[i] = (unsigned char)(i * 7 + 1);
+    nat_core_set_icmp(n, icmp_);
+    ping_n(HOST, 0x534e, 1, data, sizeof(data));
+    assert(icmp_sends == 1 && icmp_len == NAT_MTU - 20);
+    pong(HOST, icmp_sent, icmp_len);
+    assert(emitted == 1 && last_len == NAT_MTU && !memcmp(last + 28, data, sizeof(data)));
+}
+static void t_icmp_local_echo_stays_local(void) {
+    const uint32_t local[] = {GW, DNS, PICO};
+    nat_core_set_icmp(n, icmp_);
+    for (unsigned i = 0; i < 3; ++i) {
+        ping(local[i], 0x534e, (uint16_t)i);
+        assert(emitted == i + 1 && rd32(last + 12) == local[i] && last[20] == 0);
+        assert(rd16(last + 24) == 0x534e && rd16(last + 26) == i);
+        assert(!memcmp(last + 28, "odd", 3));
+    }
+    nat_core_poll(n, tick);
+    assert(icmp_sends == 0 && nat_core_stats(n).icmp == 0);
+}
+static void t_icmp_idle_expiry(void) {
+    nat_core_set_icmp(n, icmp_);
+    ping(HOST, 0x534e, 1);
+    unsigned char request[64]; size_t len = icmp_len; memcpy(request, icmp_sent, len);
+    tick += 10000; pong(HOST, request, len); /* a reply keeps the flow alive */
+    assert(emitted == 1);
+    nat_core_poll(n, tick + 15000); assert(nat_core_stats(n).icmp == 1);
+    tick += 15001; nat_core_poll(n, tick); assert(nat_core_stats(n).icmp == 0);
+    unsigned drops = nat_core_stats(n).drop;
+    pong(HOST, request, len);
+    assert(emitted == 1 && nat_core_stats(n).drop == drops);
+}
+static void t_icmp_late_reply_after_reuse(void) {
+    nat_core_set_icmp(n, icmp_);
+    unsigned char first[64]; size_t len;
+    ping(HOST, 0x1111, 1); len = icmp_len; memcpy(first, icmp_sent, len);
+    tick += 15001; nat_core_poll(n, tick);
+    ping(HOST, 0x2222, 1); /* the freed slot again */
+    pong(HOST, first, len);
+    assert(emitted == 0); /* the dead flow's reply must not reach its successor */
+    pong(HOST, icmp_sent, icmp_len);
+    assert(emitted == 1 && rd16(last + 24) == 0x2222 && rd16(last + 26) == 1);
+}
+static void t_icmp_late_reply_after_reset(void) {
+    nat_core_set_icmp(n, icmp_);
+    unsigned char before[64]; size_t len;
+    ping(HOST, 0x534e, 1); len = icmp_len; memcpy(before, icmp_sent, len);
+    nat_core_reset(n);
+    ping(HOST, 0x534e, 2); /* same identifier, same slot, after the reset */
+    pong(HOST, before, len);
+    assert(emitted == 0);
+    pong(HOST, icmp_sent, icmp_len);
+    assert(emitted == 1 && rd16(last + 24) == 0x534e && rd16(last + 26) == 2);
+}
+static void t_icmp_flow_cap(void) {
+    unsigned char requests[NAT_ICMP_MAX][64];
+    nat_core_set_icmp(n, icmp_);
+    for (unsigned i = 0; i < NAT_ICMP_MAX; ++i) {
+        ping(HOST, (uint16_t)(0x100 + i), 1); memcpy(requests[i], icmp_sent, icmp_len);
+    }
+    unsigned drops = nat_core_stats(n).drop;
+    ping(HOST, 0x200, 1);
+    assert(icmp_sends == NAT_ICMP_MAX && nat_core_stats(n).drop == drops + 1);
+    nat_core_poll(n, tick); assert(nat_core_stats(n).icmp == NAT_ICMP_MAX);
+    for (unsigned i = NAT_ICMP_MAX; i-- > 0;) {
+        pong(HOST, requests[i], icmp_len);
+        assert(rd16(last + 24) == 0x100 + i);
+    }
+    tick += 15001; nat_core_poll(n, tick); assert(nat_core_stats(n).icmp == 0);
+    ping(HOST, 0x200, 2); assert(icmp_sends == NAT_ICMP_MAX + 1);
+}
+static void t_icmp_bad_replies(void) {
+    nat_core_set_icmp(n, icmp_);
+    ping(HOST, 0x534e, 1);
+    unsigned char b[64]; size_t len = icmp_len;
+    memcpy(b, icmp_sent, len); b[0] = 0; wr16(b + 2, 0); wr16(b + 2, fold(b, len, 0));
+    unsigned drops = nat_core_stats(n).drop;
+    b[8] ^= 1; nat_core_icmp_received(n, HOST, b, len, tick); b[8] ^= 1;
+    nat_core_icmp_received(n, HOST, NULL, NAT_MTU, tick); /* too big for the adapter */
+    b[0] = 3; nat_core_icmp_received(n, HOST, b, len, tick); b[0] = 0;
+    nat_core_icmp_received(n, HOST, b, 7, tick);
+    assert(emitted == 0 && nat_core_stats(n).drop == drops + 4);
+    nat_core_icmp_received(n, HOST, b, len, tick);
+    assert(emitted == 1 && rd16(last + 24) == 0x534e);
+}
+static void t_icmp_send_failure(void) {
+    unsigned drops = nat_core_stats(n).drop;
+    ping(HOST, 0x534e, 1); /* no raw-ICMP hook: the old drop */
+    assert(icmp_sends == 0 && nat_core_stats(n).drop == drops + 1);
+    nat_core_set_icmp(n, icmp_); icmp_ok = false;
+    ping(HOST, 0x534e, 2);
+    assert(icmp_sends == 1 && nat_core_stats(n).drop == drops + 2 && emitted == 0);
+}
+
 typedef struct { const char *name; void (*run)(void); } test_t;
 #define TEST(name) {#name, name}
 static const test_t tests[] = {
@@ -423,7 +566,11 @@ static const test_t tests[] = {
     TEST(t_all_flows_busy), TEST(t_retry_limits), TEST(t_bug_async_refused),
     TEST(t_bug_forward_after_five_minutes), TEST(t_bug_data_before_handshake),
     TEST(t_bug_reset_releases_forwards), TEST(t_speedtest_phases),
-    TEST(t_speedtest_reset_and_other_port)
+    TEST(t_speedtest_reset_and_other_port),
+    TEST(t_icmp_external_echo), TEST(t_icmp_largest_echo), TEST(t_icmp_local_echo_stays_local),
+    TEST(t_icmp_idle_expiry), TEST(t_icmp_late_reply_after_reuse),
+    TEST(t_icmp_late_reply_after_reset), TEST(t_icmp_flow_cap),
+    TEST(t_icmp_bad_replies), TEST(t_icmp_send_failure)
 };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;

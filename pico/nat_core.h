@@ -7,6 +7,7 @@
 
 #define NAT_TCP_MAX 8
 #define NAT_UDP_MAX 8
+#define NAT_ICMP_MAX 4
 #define NAT_MTU 1500
 
 typedef struct nat nat_t;
@@ -26,11 +27,11 @@ typedef struct {
 
 typedef struct {
     uint32_t in, out, drop;
-    uint8_t tcp, udp, forwards, speed;
+    uint8_t tcp, udp, forwards, speed, icmp;
 } nat_stats_t;
 size_t nat_core_size(void);
 
-/* All state is fixed-size: 8 TCP flows, 8 UDP flows, no heap. */
+/* All state is fixed-size: 8 TCP flows, 8 UDP flows, 4 ICMP flows, no heap. */
 struct nat;
 void nat_core_init(nat_t *nat, const nat_ops_t *ops);
 void nat_core_set_resolver(nat_t *nat, uint32_t address);
@@ -39,6 +40,8 @@ void nat_core_set_local_address(nat_t *nat, uint32_t address);
 void nat_core_set_adapter(nat_t *nat, bool (*emit_try)(void *, const uint8_t *, size_t),
                           bool (*link_busy)(void *), void (*udp_close)(void *, unsigned),
                           bool (*tcp_queued)(void *, unsigned));
+void nat_core_set_icmp(nat_t *nat, bool (*send)(void *, uint32_t ip, const uint8_t *data,
+                                                size_t len));
 void nat_core_reset(nat_t *nat);
 void nat_core_drop(nat_t *nat);
 void nat_core_input(nat_t *nat, const uint8_t *packet, size_t len, uint32_t now);
@@ -50,6 +53,8 @@ void nat_core_tcp_eof(nat_t *nat, unsigned slot, uint32_t now);
 void nat_core_tcp_error(nat_t *nat, unsigned slot);
 void nat_core_udp_received(nat_t *nat, unsigned slot, const uint8_t *data, size_t len,
                            uint32_t now);
+void nat_core_icmp_received(nat_t *nat, uint32_t from, const uint8_t *data, size_t len,
+                            uint32_t now);
 int nat_core_inbound_accept(nat_t *nat, uint16_t port, uint32_t now);
 int nat_core_inbound_reserve(nat_t *nat, uint16_t port, uint32_t now);
 void nat_core_inbound_start(nat_t *nat, unsigned slot, uint32_t now);
