@@ -497,13 +497,9 @@ static const char *hist_get(int back) {
   return hist[(hist_head + HIST_N - back) % HIST_N];
 }
 
-/* Wipe what is on screen and put `src` there instead.
- *
- * Erasing with backspaces cannot cross a row boundary — con_putc's backspace
- * stops at column 0 — so a line that wrapped would leave its first row behind.
- * Shell commands are far shorter than 64 columns in practice, and the
- * alternative is repainting the whole row from the shadow buffer, which the
- * line editor has no business reaching into. Noted rather than solved. */
+/* Wipe what is on screen and put `src` there instead. The cursor must be at
+ * the end of the line. Backspace steps back across a wrapped row (con_putc),
+ * so a line longer than the screen is erased whole. */
 static int line_replace(char *buf, int n, const char *src, int max) {
   int i;
   while (n) {
@@ -520,9 +516,36 @@ static int line_replace(char *buf, int n, const char *src, int max) {
   return i;
 }
 
+/* Reprint buf[from..to) over itself, which moves the cursor right past it. */
+static void line_show(const char *buf, int from, int to) {
+  while (from < to) kcon_putc(buf[from++]);
+}
+
+static void line_back(int k) {
+  while (k-- > 0) kcon_putc('\b');
+}
+
+/* Take buf[at] out: the tail moves left one, a space covers the cell it
+ * vacated, and the cursor comes back to `at`. Returns the new length. */
+static int line_delete(char *buf, int n, int at) {
+  int i;
+  for (i = at; i < n - 1; i++) buf[i] = buf[i + 1];
+  n--;
+  line_show(buf, at, n);
+  kcon_putc(' ');
+  line_back(n - at + 1);
+  return n;
+}
+
+/* The cursor is the console's own: `at` is where it sits in the line, and
+ * every edit reprints the tail from there and backspaces over it. Typing
+ * inserts; at the end of the line, which is all typing ever did before Left,
+ * Right, Home, End and Delete existed, the bytes echoed are what they were. */
 int kbd_readline(char *buf, int max) {
   int n = 0;
+  int at = 0;   /* the cursor, 0..n */
   int back = 0; /* 0 = the line being typed, 1.. = walking back */
+  int i;
 
   for (;;) {
     int c;
@@ -532,40 +555,70 @@ int kbd_readline(char *buf, int max) {
 
     if (c < 0) break; /* the app is being killed; see kbd_getchar */
     if (c == '\n' || c == '\r') {
+      line_show(buf, at, n);
       kcon_putc('\n');
       break;
     }
     if (c == '\b') {
-      if (n) {
-        n--;
+      if (at) {
         kcon_putc('\b');
-        kcon_putc(' ');
-        kcon_putc('\b');
+        n = line_delete(buf, n, --at);
       }
+      continue;
+    }
+    if (c == SNOS_KEY_DELETE) {
+      if (at < n) n = line_delete(buf, n, at);
+      continue;
+    }
+    if (c == SNOS_KEY_LEFT) {
+      if (at) {
+        kcon_putc('\b');
+        at--;
+      }
+      continue;
+    }
+    if (c == SNOS_KEY_RIGHT) {
+      if (at < n) kcon_putc(buf[at++]);
+      continue;
+    }
+    if (c == SNOS_KEY_HOME) {
+      line_back(at);
+      at = 0;
+      continue;
+    }
+    if (c == SNOS_KEY_END) {
+      line_show(buf, at, n);
+      at = n;
       continue;
     }
     if (c == SNOS_KEY_UP) {
       const char *h = hist_get(back + 1);
       if (h) {
         back++;
-        n = line_replace(buf, n, h, max);
+        line_show(buf, at, n);
+        at = n = line_replace(buf, n, h, max);
       }
       continue;
     }
     if (c == SNOS_KEY_DOWN) {
+      if (back) line_show(buf, at, n);
       if (back > 1) {
         back--;
-        n = line_replace(buf, n, hist_get(back), max);
+        at = n = line_replace(buf, n, hist_get(back), max);
       } else if (back == 1) {
         back = 0;
-        n = line_replace(buf, n, 0, max); /* back to an empty line */
+        at = n = line_replace(buf, n, 0, max); /* back to an empty line */
       }
       continue;
     }
     if (c < 0x20 || c > 0x7E) continue;
     if (n >= max - 1) continue;
-    buf[n++] = (char)c;
-    kcon_putc(c);
+    for (i = n; i > at; i--) buf[i] = buf[i - 1];
+    buf[at] = (char)c;
+    n++;
+    line_show(buf, at, n);
+    at++;
+    line_back(n - at);
   }
 
   buf[n] = 0;

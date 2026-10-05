@@ -150,6 +150,7 @@ static void write_palette(void) {
 /* Where the caret was last drawn, as a RING row so it survives scrolling. */
 static int caret_ring = -1;
 static uint8_t caret_col;
+static uint8_t caret_under; /* the character the caret covers */
 
 /* Both font banks are baked at build time by tools/mkfont.py, which owns what
  * used to be glyph_row()/rev()/box_glyphs here: the box-drawing slots $01-$06,
@@ -644,10 +645,20 @@ void con_set_text_rows(int n) {
  * CURRENT position — but showing or hiding the keyboard scrolls the view
  * between those two moments, so the erase missed and left a stray block behind.
  * Remembering the ring row makes the erase land where the caret actually is, no
- * matter what the view did in between. */
+ * matter what the view did in between.
+ *
+ * It sits ON a character once the line editor can move back into the line, so
+ * it shows that character inverted and puts it back after, rather than the
+ * space it could assume while it only ever sat past the end. A cell that no
+ * longer holds the caret was rewritten in between, and is left alone. */
 void con_caret(int on) {
     if (caret_ring >= 0) {
-        shadow[caret_ring][caret_col] = ' ';
+        /* A byte variable, not the cast inline: Calypsi compiles
+         * `== (uint8_t)(0x80 | caret_under)` sign-extended ($FFA0 for an
+         * inverse space), so the comparison never held. */
+        uint8_t shown = (uint8_t)(0x80 | caret_under);
+        if (shadow[caret_ring][caret_col] == shown)
+            shadow[caret_ring][caret_col] = caret_under;
         dirty[caret_ring] = 1;
         snap[caret_ring] = 1;
         caret_ring = -1;
@@ -655,7 +666,8 @@ void con_caret(int on) {
     if (on) {
         caret_ring = (top + row) & (RING - 1);
         caret_col = col;
-        shadow[caret_ring][caret_col] = 0x80 | ' ';
+        caret_under = (uint8_t)(shadow[caret_ring][caret_col] & 0x7F);
+        shadow[caret_ring][caret_col] = (uint8_t)(0x80 | caret_under);
         dirty[caret_ring] = 1;
         snap[caret_ring] = 1;
     }
