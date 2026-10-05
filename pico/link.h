@@ -10,6 +10,7 @@
 #define CH_CTRL 0
 #define CH_IP 0x10
 #define CH_KBD 0x11
+#define CH_KBDPAD 0x12 /* the keyboard as a controller: 2 bytes, PAD_* LE */
 #define CH_PAD 0xff
 #define LINK_MTU 1500
 typedef struct { uint8_t ch, len; const uint8_t *data; } link_record_t;

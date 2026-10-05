@@ -9,6 +9,7 @@
 #include "ctrl.h"
 #include "btkbd.h"
 #include "kbd.h"
+#include "hidkeys.h"
 #include "relay.h"
 #include "nat.h"
 #include "log.h"
@@ -102,6 +103,29 @@ static void wifi_poll(void) {
         }
     }
 }
+/* `kbd map` shows the keyboard's controller buttons; `kbd map <button>
+ * <key>` moves one and `kbd map reset` puts them all back, both saved. */
+static void kbd_map_command(const char *args) {
+    char button[8], key[HIDKEYS_NAME_MAX], text[160], extra;
+    config_t next = settings;
+    while (*args == ' ') ++args;
+    if (!strcmp(args, "reset")) memset(next.pad_map, 0, sizeof(next.pad_map));
+    else if (*args) {
+        int b = -1, n = sscanf(args, "%7s %9s %c", button, key, &extra);
+        uint8_t usage = n == 2 ? hidkeys_usage_parse(key) : 0;
+        if (n != 2 || (b = hidpad_button_parse(button)) < 0 || !usage) {
+            puts("kbd: map <B|Y|SELECT|START|UP|DOWN|LEFT|RIGHT|A|X|L|R> <key>, or map reset");
+            return;
+        }
+        next.pad_map[b] = usage;
+    }
+    if (*args) {
+        if (!config_save(&next)) { puts("kbd: flash save failed"); return; }
+        settings = next; kbd_set_map(settings.pad_map);
+    }
+    kbd_map_text(text, sizeof(text));
+    printf("kbd map: %s\n", text);
+}
 static void console_command(char *line) {
     if (btkbd_command(line)) return;
     if (!strcmp(line, "stats")) { print_stats(true); return; }
@@ -117,6 +141,7 @@ static void console_command(char *line) {
     if (!strcmp(line, "type")) { puts(kbd_type("") ? "kbd: sent" : "kbd: queue full"); return; }
     if (!strcmp(line, "kbd test on")) { kbd_test(true); puts("kbd: test pattern on"); return; }
     if (!strcmp(line, "kbd test off")) { kbd_test(false); puts("kbd: test pattern off"); return; }
+    if (!strcmp(line, "kbd map") || !strncmp(line, "kbd map ", 8)) { kbd_map_command(line + 7); return; }
     if (!strcmp(line, "wifi?")) {
         printf("wifi: ssid=%s password=******** host=%s\n", settings.ssid, settings.host);
         return;
@@ -145,13 +170,14 @@ static void console_command(char *line) {
             if (*ssid && strlen(ssid) <= 32 && strlen(pass) <= 64 &&
                 strlen(host) <= 63 && !strchr(host, '|') && !strchr(host, ' ')) {
                 config_t next = {0};
+                memcpy(next.pad_map, settings.pad_map, sizeof(next.pad_map));
                 strcpy(next.ssid, ssid); strcpy(next.pass, pass); strcpy(next.host, host);
                 if (!config_save(&next)) { puts("wifi: flash save failed"); return; }
                 settings = next; wifi_changed(); puts("wifi: settings saved"); return;
             }
         }
     }
-    puts("commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text>, kbd test on|off");
+    puts("commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text>, kbd test on|off, kbd map [<button> <key>|reset]");
 }
 static void console_poll(void) {
     static char line[168];
@@ -182,7 +208,7 @@ int main(void) {
     config_load(&settings);
     link_init();
     uint8_t rx[LINK_FRAME], tx[LINK_FRAME];
-    link_next_out(tx); port_set_tx(tx); port_init(); kbd_init();
+    link_next_out(tx); port_set_tx(tx); port_init(); kbd_init(); kbd_set_map(settings.pad_map);
     uint32_t stats_at = to_ms_since_boot(get_absolute_time()) + 2000;
     uint32_t last_valid_at = 0;
     for (;;) {
@@ -190,7 +216,7 @@ int main(void) {
         if (moved) {
             link_rx_t result = link_on_rx(rx);
             if (result.valid) { last_valid_at = to_ms_since_boot(get_absolute_time()); port_set_idle(false); }
-            if (result.reset) { ctrl_reset(); relay_reset(); nat_reset(); log_puts("link: SNES restarted"); }
+            if (result.reset) { ctrl_reset(); relay_reset(); nat_reset(); kbd_link_restart(); log_puts("link: SNES restarted"); }
             for (size_t i = 0; i < result.count; ++i) {
                 link_record_t *r = &result.records[i];
                 if (r->ch == CH_CTRL) ctrl_bytes(r->data, r->len);
