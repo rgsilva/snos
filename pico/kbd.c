@@ -43,12 +43,12 @@ static bool take_report(uint8_t report[HIDKEYS_REPORT_LEN]) {
 }
 void kbd_poll(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    uint8_t report[HIDKEYS_REPORT_LEN], out[6];
+    uint8_t report[HIDKEYS_REPORT_LEN], out[12];
     while (take_report(report)) {
         size_t n = hidkeys_report(&hidkeys, now, report, out, sizeof(out));
         if (n && !link_push(CH_KBD, out, n)) break;
     }
-    size_t n = hidkeys_repeat(&hidkeys, now, out, 1);
+    size_t n = hidkeys_repeat(&hidkeys, now, out, sizeof(out));
     if (n) (void)link_push(CH_KBD, out, n);
     if (test_mode && (int32_t)(now - next) >= 0 && link_push(CH_KBD, (const uint8_t *)"abcdef", 6)) next = now + 5000;
 }

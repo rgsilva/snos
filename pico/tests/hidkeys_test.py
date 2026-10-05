@@ -83,3 +83,41 @@ assert repeat(k, 1290) == b""
 assert report(k, 1300) == b""
 
 print("hidkeys: translation, new-key rollover, release, and repeat timing passed")
+
+# The rest of the keyboard: F-keys, the navigation block, Delete and Alt.
+F1, INSERT, HOME, END, PAGEUP, PAGEDOWN, DELETE = 0x81, 0x8D, 0x8E, 0x8F, 0x90, 0x91, 0x7F
+k = Keys()
+lib.hidkeys_init(ctypes.byref(k))
+assert report(k, 0, codes=list(range(0x3A, 0x40))) == bytes(range(F1, F1 + 6))
+assert report(k, 10) == b""
+assert report(k, 20, codes=list(range(0x40, 0x46))) == bytes(range(F1 + 6, F1 + 12))
+assert report(k, 30) == b""
+assert report(k, 40, 0x02, [0x3A]) == bytes([F1])           # Shift+F1 is F1
+assert report(k, 50) == b""
+assert report(k, 60, codes=[0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E]) == \
+    bytes([INSERT, HOME, PAGEUP, DELETE, END, PAGEDOWN])
+assert report(k, 70) == b""
+assert report(k, 80, 0x04, [0x1B]) == b"\x1bx"               # left Alt
+assert report(k, 90) == b""
+assert report(k, 100, 0x40, [0x52]) == b"\x1b\x1c"           # right Alt + Up
+assert report(k, 110) == b""
+assert report(k, 120, 0x06, [0x04]) == b"\x1bA"              # Alt+Shift
+assert report(k, 130) == b""
+assert report(k, 140, 0x05, [0x06]) == b"\x1b\x03"           # Ctrl+Alt+c
+assert report(k, 150) == b""
+assert report(k, 160, 0x04, [0x4A]) == bytes([0x1B, HOME])
+assert report(k, 170) == b""
+# Alt+x held repeats as the pair; a pair that does not fit is not half-sent.
+assert report(k, 200, 0x04, [0x1B]) == b"\x1bx"
+assert repeat(k, 700) == b"\x1bx"
+one = (ctypes.c_uint8 * 1)()
+assert lib.hidkeys_repeat(ctypes.byref(k), 800, one, 1) == 0
+assert repeat(k, 800) == b"\x1bx"
+assert report(k, 810) == b""
+r = (ctypes.c_uint8 * 8)(0x04, 0, 0x1B)
+assert lib.hidkeys_report(ctypes.byref(k), 820, r, one, 1) == 0
+assert report(k, 840, 0x04, [0x1B, 0x1C]) == b"\x1by"        # the held x is not new
+assert report(k, 850) == b""
+
+
+print("hidkeys: F-keys, navigation, Delete and Alt passed")

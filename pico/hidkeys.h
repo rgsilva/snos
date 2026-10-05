@@ -17,6 +17,7 @@ typedef struct {
 } hidkeys_t;
 
 void hidkeys_init(hidkeys_t *keys);
+/* Up to two bytes per newly pressed key: Alt sends Escape first. */
 size_t hidkeys_report(hidkeys_t *keys, uint32_t now_ms, const uint8_t report[HIDKEYS_REPORT_LEN],
                       uint8_t *out, size_t out_cap);
 size_t hidkeys_repeat(hidkeys_t *keys, uint32_t now_ms, uint8_t *out, size_t out_cap);
