@@ -83,6 +83,9 @@ extern char net_text[NET_TEXT_MAX + 1];
 extern volatile uint16_t net_gw_version;
 /* Bumped by the NMI each time it adopts a peer restart (F_SYN). */
 extern volatile uint8_t net_peer_restarts;
+/* The adapter keyboard's buttons (LINK_CH_KBDPAD): as last reported, and the
+ * bits reported pressed since input.c's pad_read last cleared them. */
+extern volatile uint16_t net_kbdpad, net_kbdpad_rose;
 int net_hello(void);
 int net_connect(const char *hostport);
 int net_listen(uint16_t port);

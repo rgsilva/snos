@@ -51,7 +51,14 @@ void pad_latch(void) {
   pad_edge |= (uint16_t)(v & ~prev);
 }
 
-uint16_t pad_held(void) { return pad_cur; }
+/* The controller, and the adapter's keyboard as one (LINK_CH_KBDPAD, whose
+ * words net.c keeps as they arrive). The keyboard's never reach pad_cur and
+ * pad_edge, which are also the on-screen keyboard's: SELECT opens the panel
+ * and the d-pad walks it, and a game played from the keyboard must not open
+ * the panel on Right Shift. */
+uint16_t pad_held(void) { return (uint16_t)(pad_cur | net_kbdpad); }
+
+uint16_t pad_phys(void) { return pad_cur; }
 
 /* Read-and-clear has to be atomic against the NMI that ORs into pad_edge, or a
  * button press landing in the window is silently dropped. NMI is not maskable
@@ -63,6 +70,20 @@ uint16_t pad_pressed(void) {
   pad_edge = 0;
   R8(0x4200) = 0x81;
   return e;
+}
+
+/* The controller is sampled once a frame, so a press shorter than that never
+ * existed for it; the keyboard's arrive as records, and a press and its
+ * release can land between two of an app's reads -- queued behind a
+ * datagram, two records in one frame. So a keyboard press shows here once
+ * even if it is already over. Masked like pad_pressed, for the same reason. */
+uint16_t pad_read(void) {
+  uint16_t v;
+  R8(0x4200) = 0x01;
+  v = (uint16_t)(pad_held() | net_kbdpad_rose);
+  net_kbdpad_rose = 0;
+  R8(0x4200) = 0x81;
+  return v;
 }
 
 /* ------------------------------------------------------------------ OSK */
@@ -244,7 +265,7 @@ static void move_sel(int dr, int dc) {
 
 int osk_poll(void) {
   uint16_t p = pad_pressed();
-  uint16_t h = pad_held();
+  uint16_t h = pad_cur; /* the controller's, never the keyboard's: pad_held */
 
   /* Auto-repeat: without it, crossing the keyboard one press at a time is
    * miserable. Hold for ~1/3 s, then repeat every 4 frames. */

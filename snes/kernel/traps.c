@@ -111,8 +111,10 @@ void snos_nmi_c(void) {
     }
   }
 
+  /* The controller's chord, not the adapter keyboard's: Right Shift + Enter
+   * held through a run of typed newlines would kill an unsaved edit. */
   if (SNOS_EXEC_RUN) {
-    if ((pad_held() & (PAD_START | PAD_SELECT)) == (PAD_START | PAD_SELECT)) {
+    if ((pad_phys() & (PAD_START | PAD_SELECT)) == (PAD_START | PAD_SELECT)) {
       if (++kill_held >= SNOS_KILL_FRAMES) {
         SNOS_EXEC_CODE = SNOS_EXIT_KILLED;
         SNOS_EXEC_FLAG = 1;
@@ -284,7 +286,10 @@ uint16_t snos_cop_c(uint16_t sp) {
     return (uint16_t)(osk_visible() ? 1 : 0);
 
   case SYS_PAD:
-    return is_fg ? pad_held() : 0;
+    return is_fg ? pad_read() : 0;
+
+  case SYS_PAD_PHYS:
+    return is_fg ? pad_phys() : 0;
 
   case SYS_OPEN: {
     char nm[FS_NAME_LEN + 1];

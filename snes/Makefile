@@ -197,7 +197,8 @@ APP_AT_wire    := 0x150000   # bank $d5
 APP_AT_speedtest := 0x160000
 # The editor needs the ABI-2 full-screen calls and says so in its header, so an
 # older kernel refuses to run it rather than failing on a missing syscall.
-APP_ABI_edit   := 2
+# 13 since it reads its buttons with SYS_PAD_PHYS.
+APP_ABI_edit   := 13
 # `get` needs SYS_FS_FREE and the image flag on SYS_NET_STATE. Declaring the
 # minimum here is what makes the kernel refuse to launch it rather than let it
 # call into a syscall that does not exist.

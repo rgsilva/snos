@@ -65,7 +65,9 @@
  * an HTTP request the application composes itself over SYS_NET_CONNECT), and
  * SYS_NET_STATE stopped writing p0/p1 — there is no gateway to report an
  * HTTP status or an image flag, only bytes in the stream. */
-#define SNOS_ABI_VERSION 12
+/* Version 13: SYS_PAD also reports the Pico adapter's keyboard as a
+ * controller (LINK_CH_KBDPAD), and SYS_PAD_PHYS is the controller alone. */
+#define SNOS_ABI_VERSION 13
 
 /* ----------------------------------------------------------- call numbers */
 /* $00-$0F  process */
@@ -128,7 +130,12 @@
  * mirror diffs before sending. -> 0, or SYS_ERR while an app owns the PPU. */
 #define SYS_CONDIRTY 0x1B
 /* $20-$2F  input */
-#define SYS_PAD 0x20 /* -> held-button bitmask (PAD_* below) */
+/* -> held-button bitmask (PAD_* below). Since ABI 13 that is the controller
+ * in port 1 OR'd with the buttons the adapter's keyboard holds (the default
+ * map is arrows, Z X A S, Q W, Enter and Right Shift; `kbd map` on the Pico),
+ * and a press the keyboard made and let go since the last call shows once,
+ * so a tap shorter than the caller's poll is not lost. */
+#define SYS_PAD 0x20
 /* ABI 2. Non-blocking counterpart to SYS_GETC: returns SYS_ERR when nothing is
  * pending, so an app can poll the keyboard and the d-pad in one loop instead of
  * blocking on one of them. */
@@ -142,6 +149,11 @@
  * NOT foreground-gated: feeding the console from a background process is
  * exactly telnetd's job. -> 0, or SYS_ERR when the queue is full. */
 #define SYS_KBDPUSH 0x23
+/* ABI 13. The controller in port 1 alone, held bits, as SYS_PAD was before.
+ * For an app that reads keys as text and buttons as commands: with the
+ * keyboard in SYS_PAD, the editor's L (Q) would open its menu under every
+ * typed q. Foreground only, like SYS_PAD. */
+#define SYS_PAD_PHYS 0x24
 /* $30-$3F  files. One open file PER PROCESS since M10 (ABI 9), with a single
  * system-wide WRITE handle — the bump allocator commits size-on-close through
  * one cursor, so a second simultaneous writer gets SYS_ERR. */
@@ -283,6 +295,7 @@ uint16_t sys_puthex(uint16_t v);
 uint16_t sys_frames(void);
 uint16_t sys_waitvbl(void);
 uint16_t sys_pad(void);
+uint16_t sys_pad_phys(void);
 uint16_t sys_puts_at_raw(uint16_t rowcol); /* ABI 2 */
 uint16_t sys_screen(void);
 uint16_t sys_pollkey(void);

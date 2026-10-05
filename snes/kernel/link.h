@@ -91,6 +91,12 @@
  * only; an older kernel steps over it by length like any unknown channel. */
 #define LINK_CH_KBD 0x11
 
+/* The same keyboard as a controller: the PAD_* bits its held keys map to, a
+ * 16-bit little-endian word per change and once whenever the link (re)starts,
+ * so a press never outlives a Pico reset. Peer -> console only. A byte stream
+ * like every channel: the Pico's packer can split a word across two frames. */
+#define LINK_CH_KBDPAD 0x12
+
 /* The emulated backend's mailbox, mirroring the physical exchange exactly.
  * Carved out of HiRAM in calypsi/linker.scm. The host claims the link by
  * writing the magic; the kernel zeroes it at boot, so on real hardware nothing

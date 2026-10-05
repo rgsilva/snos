@@ -24,7 +24,7 @@
               .public sys_conrow_raw, sys_condirty, sys_kbdpush
               .public sys_putc, sys_puts_raw, sys_getc, sys_cls
               .public sys_readline_raw, sys_putu, sys_puthex
-              .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad
+              .public sys_frames, sys_waitvbl, sys_trace_raw, sys_pad, sys_pad_phys
               .public sys_open, sys_getc_f, sys_putc_f, sys_close
               .public sys_fsize, sys_dir, sys_unlink
               .public sys_net_up, sys_net_read_raw
@@ -78,6 +78,8 @@ sys_pad:        cop     #0x20
 sys_pollkey:    cop     #0x21
                 rtl
 sys_osk:        cop     #0x22
+                rtl
+sys_pad_phys:   cop     #0x24
                 rtl
 
 sys_open:       cop     #0x30

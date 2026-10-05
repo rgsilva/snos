@@ -223,6 +223,12 @@ static uint16_t cmsg_got;
 static uint8_t cmsg_type;
 static uint8_t cmsg_len;
 static uint8_t cmsg_state; /* 0 want type, 1 want len, 2 collecting */
+/* LINK_CH_KBDPAD: little-endian words, assembled across records because the
+ * peer's packer splits one when it lands on a frame's last byte. The words
+ * are kept here, where they arrive, and input.c says what they mean -- and
+ * so net.c still links without input.c, as the Pico's host tests build it. */
+static uint8_t kbdpad_lo, kbdpad_half;
+volatile uint16_t net_kbdpad, net_kbdpad_rose;
 
 /* ------------------------------------------------------- the send window
  *
@@ -368,6 +374,7 @@ static void session_init(void) {
   iptx_out = 0;
   cmsg_got = 0;
   cmsg_state = 0;
+  kbdpad_half = 0;
   tx_base = 0;
   tx_next = 0;
   tx_cursor = 0;
@@ -1079,6 +1086,23 @@ static int frame_fits(const uint8_t *f) {
   return 1;
 }
 
+/* Runs in net_service: in the NMI, or with it masked (net_service_fg). That
+ * is the writer's side of pad_read's masked read-and-clear, the side
+ * pad_latch is on, so no reader can come between the two stores. */
+static void kbdpad_word(uint16_t v) {
+  net_kbdpad_rose |= (uint16_t)(v & ~net_kbdpad);
+  net_kbdpad = v;
+}
+
+static void kbdpad_bytes(const uint8_t *p, uint8_t n) {
+  uint8_t i;
+  for (i = 0; i < n; i++) {
+    if (kbdpad_half) kbdpad_word((uint16_t)(kbdpad_lo | ((uint16_t)p[i] << 8)));
+    else kbdpad_lo = p[i];
+    kbdpad_half = (uint8_t)!kbdpad_half;
+  }
+}
+
 static void frame_deliver(const uint8_t *f) {
   int o = LINK_HDR;
   while (o + 2 <= LINK_FRAME) {
@@ -1093,6 +1117,11 @@ static void frame_deliver(const uint8_t *f) {
     else if (ch == LINK_CH_KBD) {
       uint8_t i;
       for (i = 0; i < len; i++) kbd_push(f[o + 2 + i]);
+    }
+    /* Held like IP: a stream cut mid-word would pair every word after it
+     * wrongly. The peer sends its whole word again once it has seen us. */
+    else if (ch == LINK_CH_KBDPAD) {
+      if (!rx_hold) kbdpad_bytes(&f[o + 2], len);
     }
     /* Anything else is a record type this kernel no longer speaks: skipped. */
     o += 2 + len;
@@ -1310,6 +1339,9 @@ void net_service(void) {
            * an explicit resync for this; the control side had nothing. */
           cmsg_state = 0;
           cmsg_got = 0;
+          /* And whatever its keyboard held died with it; it says again. */
+          kbdpad_half = 0;
+          kbdpad_word(0);
           iptx_tail = iptx_head;
           iptx_out = 0;
           for (n = 0; n < NET_WINDOW_MAX; n++) txwin_ip[n] = 0;

@@ -414,13 +414,17 @@ static int file_save(const char *name) {
 
 /* The editor does its own edge detection on the HELD bitmask rather than
  * relying on the kernel's, because the kernel consumes button edges for the
- * on-screen keyboard and the editor still needs to see the same presses. */
+ * on-screen keyboard and the editor still needs to see the same presses.
+ *
+ * The controller's alone (SYS_PAD_PHYS): SYS_PAD also has the adapter's
+ * keyboard as a controller, where Q is L and W is R, and every typed q would
+ * open the menu under the text. */
 static uint16_t pad_prev;
 static uint16_t rep_mask;
 static uint16_t rep_at;
 
 static uint16_t pad_edges(void) {
-  uint16_t now = sys_pad();
+  uint16_t now = sys_pad_phys();
   uint16_t e = (uint16_t)(now & ~pad_prev);
   uint16_t dirs = (uint16_t)(now & (PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT));
   uint16_t frames = sys_frames();
