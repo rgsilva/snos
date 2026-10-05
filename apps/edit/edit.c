@@ -303,6 +303,36 @@ static void backspace(void) {
   }
 }
 
+/* Forward delete: the character under the cursor, or at the end of a line
+ * the break after it -- backspace from the other side, join and all. */
+static void delete_char(void) {
+  if (cur_col < linelen[cur_line]) {
+    cur_col++;
+    backspace();
+  } else if (cur_line + 1 < nlines) {
+    cur_line++;
+    cur_col = 0;
+    backspace();
+  }
+}
+
+/* A screenful less one line, so the last line of a page is the first of the
+ * next. The view moves with the cursor, so the cursor keeps its screen row
+ * and PageUp undoes PageDown, until an end of the document stops either. */
+static void page(int dir) {
+  uint16_t step = (uint16_t)(scr_rows - 2);
+  uint16_t body = (uint16_t)(scr_rows - 1);
+  uint16_t last_top = (uint16_t)(nlines > body ? nlines - body : 0);
+  if (dir > 0) {
+    cur_line = (uint16_t)(cur_line + step < nlines ? cur_line + step : nlines - 1);
+    top_line = (uint16_t)(top_line + step < last_top ? top_line + step : last_top);
+  } else {
+    cur_line = (uint16_t)(cur_line > step ? cur_line - step : 0);
+    top_line = (uint16_t)(top_line > step ? top_line - step : 0);
+  }
+  if (cur_col > linelen[cur_line]) cur_col = linelen[cur_line];
+}
+
 /* ------------------------------------------------------------------ files */
 
 static int file_load(const char *name) {
@@ -384,13 +414,17 @@ static int file_save(const char *name) {
 
 /* The editor does its own edge detection on the HELD bitmask rather than
  * relying on the kernel's, because the kernel consumes button edges for the
- * on-screen keyboard and the editor still needs to see the same presses. */
+ * on-screen keyboard and the editor still needs to see the same presses.
+ *
+ * The controller's alone (SYS_PAD_PHYS): SYS_PAD also has the adapter's
+ * keyboard as a controller, where Q is L and W is R, and every typed q would
+ * open the menu under the text. */
 static uint16_t pad_prev;
 static uint16_t rep_mask;
 static uint16_t rep_at;
 
 static uint16_t pad_edges(void) {
-  uint16_t now = sys_pad();
+  uint16_t now = sys_pad_phys();
   uint16_t e = (uint16_t)(now & ~pad_prev);
   uint16_t dirs = (uint16_t)(now & (PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT));
   uint16_t frames = sys_frames();
@@ -890,11 +924,8 @@ int main(void) {
      * cursor twice for every press. One path, and a host keyboard and a
      * controller are indistinguishable by the time they reach it. */
     if (!sys_osk(2) && (e & PAD_R)) { /* page down, the one spare button */
-      uint16_t page = (uint16_t)(scr_rows - 2);
-      cur_line = (uint16_t)(cur_line + page);
-      if (cur_line >= nlines) cur_line = (uint16_t)(nlines - 1);
-      if (cur_col > linelen[cur_line]) cur_col = linelen[cur_line];
-      moved = 1;
+      page(1);
+      redraw_all = 1;
     }
 
     while ((c = (int)sys_pollkey()) != (int)SYS_ERR) {
@@ -926,6 +957,17 @@ int main(void) {
           cur_line++;
           cur_col = 0;
         }
+      } else if (c == SNOS_KEY_HOME) {
+        cur_col = 0;
+      } else if (c == SNOS_KEY_END) {
+        cur_col = linelen[cur_line];
+      } else if (c == SNOS_KEY_PAGEUP || c == SNOS_KEY_PAGEDOWN) {
+        page(c == SNOS_KEY_PAGEDOWN ? 1 : -1);
+        redraw_all = 1;
+      } else if (c == SNOS_KEY_DELETE) {
+        uint16_t before = nlines;
+        delete_char();
+        if (nlines != before) redraw_all = 1;
       } else if (shortcut(c)) {
         redraw_all = 1;
       } else if (c >= 0x20 && c <= 0x7E) {

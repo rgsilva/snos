@@ -21,8 +21,12 @@
 #include "snos_abi.h"
 
 void pad_latch(void); /* called from the NMI handler, once per frame */
-uint16_t pad_held(void);
-uint16_t pad_pressed(void); /* rising edges since the last call; consumes them */
+uint16_t pad_held(void);    /* the controller and the adapter's keyboard */
+uint16_t pad_pressed(void); /* the controller's rising edges since the last call */
+uint16_t pad_phys(void);    /* the controller alone */
+/* SYS_PAD: pad_held(), plus keyboard presses already released since the last
+ * call; consumes those. */
+uint16_t pad_read(void);
 
 void kbd_init(void);
 int kbd_getchar_nonblock(void);

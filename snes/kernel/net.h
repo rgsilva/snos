@@ -83,6 +83,13 @@ extern char net_text[NET_TEXT_MAX + 1];
 extern volatile uint16_t net_gw_version;
 /* Bumped by the NMI each time it adopts a peer restart (F_SYN). */
 extern volatile uint8_t net_peer_restarts;
+/* The adapter keyboard's buttons (LINK_CH_KBDPAD): as last reported, the
+ * bits reported pressed since input.c's pad_read last cleared them, and the
+ * frame the last of those came. A press is that fresh for NET_KBDPAD_TAP
+ * frames: long enough for an app polling once a frame, short enough that
+ * keys pressed at the shell are not a game's first presses. */
+#define NET_KBDPAD_TAP 2u
+extern volatile uint16_t net_kbdpad, net_kbdpad_rose, net_kbdpad_rose_at;
 int net_hello(void);
 int net_connect(const char *hostport);
 int net_listen(uint16_t port);

@@ -159,16 +159,55 @@ ROM under Mesen. 128 was measured too and loses -- one ~160-line exchange a
 frame and an NMI of 210 lines -- and it would change the wire for both ends
 at once (docs/link-throughput.md). The Pico takes it from the same constant.
 
-**Channels.** `LINK_CH_CTRL 0`, `LINK_CH_IP $10` as today, plus one new one:
+**Channels.** `LINK_CH_CTRL 0`, `LINK_CH_IP $10` as today, plus two new ones:
 
 ```
-LINK_CH_KBD  $11   keyboard bytes, Pico → SNES only
+LINK_CH_KBD     $11   keyboard bytes, Pico → SNES only
+LINK_CH_KBDPAD  $12   the keyboard as a controller, Pico → SNES only
 ```
 
-Payload is ASCII plus the `SNOS_KEY_*` codes ($1C-$1F) already defined in
-`snos_abi.h`; the kernel pushes every byte into the input ring with
-`kbd_push()`, the same funnel the harness and telnetd use. An old kernel skips
-the record by its length byte, as every parser on both sides always has.
+`LINK_CH_KBD` is ASCII plus the `SNOS_KEY_*` codes in `snos_abi.h`: the
+arrows $1C-$1F, Delete $7F, F1-F12 $81-$8C, Insert $8D, Home $8E, End $8F,
+PageUp $90 and PageDown $91. Ctrl+letter is the control code; Alt+key is
+Escape then the key ($1B 'x'), the terminal convention. The kernel pushes
+every byte into the input ring with `kbd_push()`, the same funnel the harness
+and telnetd use. An old kernel skips the record by its length byte, as every
+parser on both sides always has.
+
+`LINK_CH_KBDPAD` is two bytes, the `PAD_*` bitmask in `SYS_PAD`'s layout (B
+$8000, Y $4000, SELECT $2000, START $1000, Up $0800, Down $0400, Left $0200,
+Right $0100, A $0080, X $0040, L $0020, R $0010), little-endian: which buttons
+the held keys map to. The Pico sends it whenever the mask changes -- per
+report, so a press and release queued together still arrive as two -- once at
+its boot, again whenever the console restarts, and as 0 when the keyboard
+disconnects, so the console never keeps a press across a reset; the console
+lets go by itself when the adapter does (unplugged, or the link's 120 bad
+exchanges). A change costs 4 bytes of a 64-byte frame. The letters keep typing
+on `LINK_CH_KBD`; the controller is additive. A word may straddle two frames,
+like any record, and the console assembles it.
+
+On the console `SYS_PAD` is the controller OR'd with this word, and a press
+that came and went between two reads shows once, if it is no more than two
+frames old. The on-screen keyboard (SELECT, its d-pad), the START+SELECT kill
+switch and `SYS_PAD_PHYS` see the controller alone: a game played from the
+keyboard does not open the panel on Right Shift, and `edit`, which reads its
+buttons with `SYS_PAD_PHYS`, does not open its menu on every typed `q`.
+
+| Button | Key | | Button | Key |
+|---|---|---|---|---|
+| d-pad | arrows | | START | Enter |
+| B | Z | | SELECT | Right Shift |
+| A | X | | L | Q |
+| Y | A | | R | W |
+| X | S | | | |
+
+`kbd map` on the Pico's USB console prints the map; `kbd map <button> <key>`
+moves one button (`kbd map start space`, `kbd map select f1`; keys are
+letters, digits, `enter`, `esc`, `space`, `tab`, `backspace`, the arrows,
+`insert` `home` `end` `pageup` `pagedown` `delete`, `f1`-`f12`, `lshift`
+`rshift` `lctrl` `rctrl` `lalt` `ralt` `lgui` `rgui`, punctuation as itself,
+or a HID usage as `0x2c`), and `kbd map reset` puts them all back. The map is
+saved with the other settings.
 
 ## 4. The bit-level exchange
 
@@ -275,7 +314,10 @@ before the console booted fed the menu phantom pad-2 presses.
                          record packing (greedy fill, CH_PAD), next_out(), and
                          the window of frames in flight
    ctrl.c/.h             the control verbs: HELLO (v2), IPFWD, IPUNFWD, LINKWIN
-   kbd.c/.h              keyboard source; TEST MODE: "abcdef" every 5 s
+   kbd.c/.h              keyboard source: KBD bytes and KBDPAD words; TEST
+                         MODE: "abcdef" every 5 s
+   hidkeys.c/.h          HID reports to bytes, repeat, the controller mask
+                         and `kbd map`'s names; host-tested
    relay.c/.h            tier 1: TCP client to the host, carries IP datagrams
                          and forward requests; the host runs slirp.py
    wifi_secrets.h.in     SSID / password / relay host, copied to wifi_secrets.h
@@ -428,8 +470,10 @@ Changes, all done:
    reserves input-ring room the same way it does for IP. This part is in the
    default build and covered by `test/kbd.lua` (the gwip peer pushes
    `help\n` as a KBD record; the shell echo and the prompt after it are the
-   verdict).
-4. `kernel/link.h`: `LINK_CH_KBD 0x11`; `LINK_FRAME` is 64 under `LINK_HW`.
+   verdict). `LINK_CH_KBDPAD` words land in `net_kbdpad` for `SYS_PAD`
+   (`kernel/input.c`); `test/keys.lua` covers both with the new keys.
+4. `kernel/link.h`: `LINK_CH_KBD 0x11`, `LINK_CH_KBDPAD 0x12`; `LINK_FRAME`
+   is 64 under `LINK_HW`.
    `kernel/input.c`: under `LINK_HW` kbd_idle takes one foreground exchange
    right after the NMI's, where it still fits before the next vblank
    (`link_serial_fg_fits`, `net tune exch`; docs/link-throughput.md).

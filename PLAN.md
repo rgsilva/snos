@@ -497,6 +497,21 @@ silences it, `log on` restores it, `log` reports the state. Default ON at every
 boot, not saved to flash. Command replies, the typed echo and `stats` on demand
 always print.
 
+**8. The whole keyboard, and the keyboard as a controller. ✅ (2026-10-05;
+untested on a real keyboard)** `hidkeys.c` dropped every key it had no byte
+for. Now Delete is $7F, F1-F12 are $81-$8C and Insert, Home, End, PageUp,
+PageDown $8D-$91 (`snos_abi.h`), and Alt+key is Escape then the key. The
+shell's line editor got a cursor (Left, Right, Home, End, Delete, insert
+anywhere), `edit` Home/End/PageUp/PageDown/Delete, `irc` PageUp/PageDown
+through a window's backlog. Keys an app does not know fail its printable
+test and are dropped, never echoed as inverse glyphs. Held keys also ride
+a new channel, `LINK_CH_KBDPAD $12`, as a `SYS_PAD` mask (arrows, Z X A S, Q
+W, Enter, Right Shift; `kbd map` on the Pico changes and saves it), sent on
+change, on every link start and as 0 on disconnect. `SYS_PAD` (ABI 13) ORs it
+in, so `pad` and any game see it unchanged; the on-screen keyboard, the kill
+switch and `edit` (through the new `SYS_PAD_PHYS`) see the controller alone.
+`test-keys`, `pico/tests/kbdpad_test.py`; [docs/pico-adapter.md](docs/pico-adapter.md) §3.
+
 ### M8 — IRC client
 Port Contiki's IRC app onto uIP + the SNOS console.
 **Done when:** join a channel from a SNES and send a message.

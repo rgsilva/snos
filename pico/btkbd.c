@@ -69,6 +69,11 @@ static uint32_t target_store_generation;
 
 static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet,
                           uint16_t size);
+/* Weak: the BLE harnesses link this file without kbd.c (the link.c idiom). */
+extern void kbd_hid_release(void) __attribute__((weak));
+static void keys_released(void) {
+    if (kbd_hid_release) kbd_hid_release();
+}
 
 /* The controller provides these when BTstack's full BLE stack is linked. */
 extern uint8_t gap_load_resolving_list_from_le_device_db(void) __attribute__((weak));
@@ -227,6 +232,7 @@ static void disconnect_current_target(void) {
     le_handle = HCI_CON_HANDLE_INVALID;
     hid_cid = 0;
     connected = connecting = descriptor_available = false;
+    keys_released();
 
     if (target_transport == TRANSPORT_LE) {
         if (old_le_handle != HCI_CON_HANDLE_INVALID) gap_disconnect(old_le_handle);
@@ -689,6 +695,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 le_handle = HCI_CON_HANDLE_INVALID;
                 connected = connecting = false;
                 reset_le_session();
+                keys_released();
                 log_puts("bt: LE keyboard disconnected");
                 if (target_valid && radio_on) connect_target(3000);
             }
@@ -730,6 +737,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 case HID_SUBEVENT_CONNECTION_CLOSED:
                     connected = connecting = descriptor_available = false;
                     hid_cid = 0;
+                    keys_released();
                     log_puts("bt: keyboard disconnected [BR]");
                     if (target_valid && radio_on) connect_target(3000);
                     break;
@@ -918,6 +926,7 @@ bool btkbd_command(const char *line) {
         le_handle = HCI_CON_HANDLE_INVALID;
         cancel_deferred_actions();
         radio_on = working = connected = connecting = false;
+        keys_released();
         if (initialized) hci_power_control(HCI_POWER_OFF);
         puts("bt: off");
         return true;

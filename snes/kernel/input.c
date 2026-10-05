@@ -51,7 +51,14 @@ void pad_latch(void) {
   pad_edge |= (uint16_t)(v & ~prev);
 }
 
-uint16_t pad_held(void) { return pad_cur; }
+/* The controller, and the adapter's keyboard as one (LINK_CH_KBDPAD, whose
+ * words net.c keeps as they arrive). The keyboard's never reach pad_cur and
+ * pad_edge, which are also the on-screen keyboard's: SELECT opens the panel
+ * and the d-pad walks it, and a game played from the keyboard must not open
+ * the panel on Right Shift. */
+uint16_t pad_held(void) { return (uint16_t)(pad_cur | net_kbdpad); }
+
+uint16_t pad_phys(void) { return pad_cur; }
 
 /* Read-and-clear has to be atomic against the NMI that ORs into pad_edge, or a
  * button press landing in the window is silently dropped. NMI is not maskable
@@ -63,6 +70,23 @@ uint16_t pad_pressed(void) {
   pad_edge = 0;
   R8(0x4200) = 0x81;
   return e;
+}
+
+/* The controller is sampled once a frame, so a press shorter than that never
+ * existed for it; the keyboard's arrive as records, and a press and its
+ * release can land between two of an app's reads -- queued behind a
+ * datagram, two records in one frame. So a keyboard press shows here once
+ * even if it is already over, if it is recent (NET_KBDPAD_TAP): nothing
+ * reads SYS_PAD at the shell, and what was pressed there is not news to the
+ * next app. Masked like pad_pressed, for the same reason. */
+uint16_t pad_read(void) {
+  uint16_t v;
+  R8(0x4200) = 0x01;
+  v = pad_held();
+  if ((uint16_t)(snos_frames - net_kbdpad_rose_at) <= NET_KBDPAD_TAP) v |= net_kbdpad_rose;
+  net_kbdpad_rose = 0;
+  R8(0x4200) = 0x81;
+  return v;
 }
 
 /* ------------------------------------------------------------------ OSK */
@@ -244,7 +268,7 @@ static void move_sel(int dr, int dc) {
 
 int osk_poll(void) {
   uint16_t p = pad_pressed();
-  uint16_t h = pad_held();
+  uint16_t h = pad_cur; /* the controller's, never the keyboard's: pad_held */
 
   /* Auto-repeat: without it, crossing the keyboard one press at a time is
    * miserable. Hold for ~1/3 s, then repeat every 4 frames. */
@@ -497,13 +521,9 @@ static const char *hist_get(int back) {
   return hist[(hist_head + HIST_N - back) % HIST_N];
 }
 
-/* Wipe what is on screen and put `src` there instead.
- *
- * Erasing with backspaces cannot cross a row boundary — con_putc's backspace
- * stops at column 0 — so a line that wrapped would leave its first row behind.
- * Shell commands are far shorter than 64 columns in practice, and the
- * alternative is repainting the whole row from the shadow buffer, which the
- * line editor has no business reaching into. Noted rather than solved. */
+/* Wipe what is on screen and put `src` there instead. The cursor must be at
+ * the end of the line. Backspace steps back across a wrapped row (con_putc),
+ * so a line longer than the screen is erased whole. */
 static int line_replace(char *buf, int n, const char *src, int max) {
   int i;
   while (n) {
@@ -520,9 +540,36 @@ static int line_replace(char *buf, int n, const char *src, int max) {
   return i;
 }
 
+/* Reprint buf[from..to) over itself, which moves the cursor right past it. */
+static void line_show(const char *buf, int from, int to) {
+  while (from < to) kcon_putc(buf[from++]);
+}
+
+static void line_back(int k) {
+  while (k-- > 0) kcon_putc('\b');
+}
+
+/* Take buf[at] out: the tail moves left one, a space covers the cell it
+ * vacated, and the cursor comes back to `at`. Returns the new length. */
+static int line_delete(char *buf, int n, int at) {
+  int i;
+  for (i = at; i < n - 1; i++) buf[i] = buf[i + 1];
+  n--;
+  line_show(buf, at, n);
+  kcon_putc(' ');
+  line_back(n - at + 1);
+  return n;
+}
+
+/* The cursor is the console's own: `at` is where it sits in the line, and
+ * every edit reprints the tail from there and backspaces over it. Typing
+ * inserts; at the end of the line, which is all typing ever did before Left,
+ * Right, Home, End and Delete existed, the bytes echoed are what they were. */
 int kbd_readline(char *buf, int max) {
   int n = 0;
+  int at = 0;   /* the cursor, 0..n */
   int back = 0; /* 0 = the line being typed, 1.. = walking back */
+  int i;
 
   for (;;) {
     int c;
@@ -532,40 +579,70 @@ int kbd_readline(char *buf, int max) {
 
     if (c < 0) break; /* the app is being killed; see kbd_getchar */
     if (c == '\n' || c == '\r') {
+      line_show(buf, at, n);
       kcon_putc('\n');
       break;
     }
     if (c == '\b') {
-      if (n) {
-        n--;
+      if (at) {
         kcon_putc('\b');
-        kcon_putc(' ');
-        kcon_putc('\b');
+        n = line_delete(buf, n, --at);
       }
+      continue;
+    }
+    if (c == SNOS_KEY_DELETE) {
+      if (at < n) n = line_delete(buf, n, at);
+      continue;
+    }
+    if (c == SNOS_KEY_LEFT) {
+      if (at) {
+        kcon_putc('\b');
+        at--;
+      }
+      continue;
+    }
+    if (c == SNOS_KEY_RIGHT) {
+      if (at < n) kcon_putc(buf[at++]);
+      continue;
+    }
+    if (c == SNOS_KEY_HOME) {
+      line_back(at);
+      at = 0;
+      continue;
+    }
+    if (c == SNOS_KEY_END) {
+      line_show(buf, at, n);
+      at = n;
       continue;
     }
     if (c == SNOS_KEY_UP) {
       const char *h = hist_get(back + 1);
       if (h) {
         back++;
-        n = line_replace(buf, n, h, max);
+        line_show(buf, at, n);
+        at = n = line_replace(buf, n, h, max);
       }
       continue;
     }
     if (c == SNOS_KEY_DOWN) {
+      if (back) line_show(buf, at, n);
       if (back > 1) {
         back--;
-        n = line_replace(buf, n, hist_get(back), max);
+        at = n = line_replace(buf, n, hist_get(back), max);
       } else if (back == 1) {
         back = 0;
-        n = line_replace(buf, n, 0, max); /* back to an empty line */
+        at = n = line_replace(buf, n, 0, max); /* back to an empty line */
       }
       continue;
     }
     if (c < 0x20 || c > 0x7E) continue;
     if (n >= max - 1) continue;
-    buf[n++] = (char)c;
-    kcon_putc(c);
+    for (i = n; i > at; i--) buf[i] = buf[i - 1];
+    buf[at] = (char)c;
+    n++;
+    line_show(buf, at, n);
+    at++;
+    line_back(n - at);
   }
 
   buf[n] = 0;
