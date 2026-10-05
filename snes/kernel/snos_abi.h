@@ -344,6 +344,33 @@ uint16_t sys_read_vram(uint16_t count);
 #define SNOS_KEY_LEFT 0x1E
 #define SNOS_KEY_RIGHT 0x1F
 
+/* The rest of a PC keyboard (the Pico adapter's, docs/pico-adapter.md).
+ * Delete is plain ASCII DEL. Insert, Home, End, PageUp, PageDown and F1-F12
+ * are $81-$91, F1-F12 first so that SNOS_KEY_F(n) is $80 + n.
+ *
+ * Not the control range: $01-$1A are Ctrl+letter, and the editor already
+ * binds ^A ^K ^L ^N ^O ^Q ^S, so any byte there is somebody's command
+ * already; $1B is Escape and $1C-$1F are the arrows. Above $7F nothing can
+ * be typed text, and every app's printable test (c >= $20 && c <= $7E)
+ * already rejects the whole range, so an app that never heard of these keys
+ * ignores them instead of inserting them.
+ *
+ * $80 is left unassigned. As OUTPUT, $80-$FF are the inverse twins below, so
+ * an app that echoes a key without that test shows it as an inverse glyph,
+ * and an inverse space is exactly what the line editor's caret looks like.
+ *
+ * Alt has no code of its own: Alt+x arrives as Escape then x ($1B 'x'), the
+ * terminal convention, and Alt+Up as $1B $1C. */
+#define SNOS_KEY_DELETE 0x7F
+#define SNOS_KEY_F(n) (0x80 + (n)) /* F1-F12: $81-$8C */
+#define SNOS_KEY_F1 0x81
+#define SNOS_KEY_F12 0x8C
+#define SNOS_KEY_INSERT 0x8D
+#define SNOS_KEY_HOME 0x8E
+#define SNOS_KEY_END 0x8F
+#define SNOS_KEY_PAGEUP 0x90
+#define SNOS_KEY_PAGEDOWN 0x91
+
 #define SNOS_INVERSE 0x80u
 #define SNOS_BOX_H 1
 #define SNOS_BOX_V 2
