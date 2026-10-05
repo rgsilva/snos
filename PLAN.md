@@ -512,6 +512,14 @@ in, so `pad` and any game see it unchanged; the on-screen keyboard, the kill
 switch and `edit` (through the new `SYS_PAD_PHYS`) see the controller alone.
 `test-keys`, `pico/tests/kbdpad_test.py`; [docs/pico-adapter.md](docs/pico-adapter.md) §3.
 
+**9. `mc`: mobs, and world changes that persist.** The world is baked into
+ROM and forgotten at exit. Keep a bounded set of changed chunks (block
+edits as a journal in SRAMFS, replayed over the ROM world at load), and
+some mobs: a few passive animals on the surface with the simplest AI the
+tick budget allows, spawned and despawned per loaded chunk. Both need a
+budget before a design: the server already spends most of a frame on one
+player.
+
 ### M8 — IRC client
 Port Contiki's IRC app onto uIP + the SNOS console.
 **Done when:** join a channel from a SNES and send a message.
