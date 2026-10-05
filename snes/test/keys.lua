@@ -15,7 +15,9 @@
 --      not the kill switch;
 --   4. the keyboard's SELECT does not open the on-screen keyboard and its Up
 --      does not reach the shell as an arrow from the panel's d-pad, while the
---      controller's SELECT still does open it.
+--      controller's SELECT still does open it;
+--   5. a key held when the adapter goes away (the mailbox unclaimed here, a
+--      pulled cable or a dead link on the hardware) is let go.
 local L = dofile("test/lib.lua")
 local G = dofile("test/gwip.lua")
 
@@ -48,7 +50,9 @@ local function row_exact(want)
   return nil
 end
 
-local press_select = 0 -- frames left to hold the CONTROLLER's SELECT
+-- The CONTROLLER's buttons, held from inputPolled: name -> frames left.
+local hold = {}
+local unplugged = false
 
 local STEPS = {
   -- 1. the shell
@@ -133,18 +137,31 @@ local STEPS = {
     end, 20 },
   { function() pad(0) end, 20 },
   { function() key("\n") end, 120 },     -- an arrow from the panel would recall `run pad`
-  { function() press_select = 5 end, 90 },
+  { function() hold.select = 5 end, 90 },
   { function()
       r.check(text_rows() == 22, "the controller's SELECT did not open the on-screen keyboard")
-      press_select = 5
+      hold.select = 5
     end, 90 },
+
+  -- 5. the adapter goes away with A held
+  { function() key("run pad\n") end, 200 },
+  { function() pad(A) end, 40 },
+  { function()
+      emu.write16(0xE000, 0, emu.memType.snesWorkRam) -- the link's magic
+      unplugged = true
+    end, 60 },
+  { function() hold.b = 5 end, 120 },     -- and the controller ends pad
 }
 
 emu.addEventCallback(function()
-  if press_select > 0 then
-    emu.setInput({ select = true }, 0)
-    press_select = press_select - 1
+  local input = {}
+  for button, left in pairs(hold) do
+    if left > 0 then
+      input[button] = true
+      hold[button] = left - 1
+    end
   end
+  if next(input) then emu.setInput(input, 0) end
 end, emu.eventType.inputPolled)
 
 local frame, step, at, claimed = 0, 1, nil, false
@@ -162,7 +179,7 @@ emu.addEventCallback(function()
     at = frame + 120 -- let HELLO settle so the frames carry data
     return
   end
-  gw:service()
+  if not unplugged then gw:service() end
   if frame < at then return end
 
   if step <= #STEPS then
@@ -187,13 +204,18 @@ emu.addEventCallback(function()
 
   local function count(s) local _, n = text:gsub(s:gsub("%p", "%%%0"), ""); return n end
   r.check(text:find("PAD-RAN", 1, true) ~= nil, "pad never started")
-  r.check(count("pad=0080\n") == 1, "a held KBDPAD press showed " .. count("pad=0080\n") ..
-          " times, not once")
+  r.check(count("pad=0080\n") == 2, "a held KBDPAD press showed " .. count("pad=0080\n") ..
+          " times in two runs, not once in each")
   r.check(count("pad=0040\n") == 1, "a tap within one frame showed " .. count("pad=0040\n") ..
           " times, not once")
   r.check(count("pad=3000\n") == 1, "the keyboard's START+SELECT did not reach pad")
   r.check(text:find("[pad killed]", 1, true) == nil, "the keyboard's START+SELECT killed pad")
   r.check(text:find("pad: clean exit", 1, true) ~= nil, "the keyboard's B did not end pad")
-  r.check(count("pad test: B exits") == 1, "the keyboard's Up reached the shell as an arrow")
+  r.check(count("pad test: B exits") == 2, "the keyboard's Up reached the shell as an arrow")
+  local last = text:match(".*PAD%-RAN(.*)") or ""
+  r.check(last:find("^\npad=0000\n") ~= nil,
+          "pad's first read saw keys pressed at the shell before it ran")
+  r.check(last:find("pad=0080\npad=0000\npad=8000\npad: clean exit", 1, true) ~= nil,
+          "A was still held after the adapter went away")
   r.finish()
 end, emu.eventType.endFrame)

@@ -76,11 +76,14 @@ uint16_t pad_pressed(void) {
  * existed for it; the keyboard's arrive as records, and a press and its
  * release can land between two of an app's reads -- queued behind a
  * datagram, two records in one frame. So a keyboard press shows here once
- * even if it is already over. Masked like pad_pressed, for the same reason. */
+ * even if it is already over, if it is recent (NET_KBDPAD_TAP): nothing
+ * reads SYS_PAD at the shell, and what was pressed there is not news to the
+ * next app. Masked like pad_pressed, for the same reason. */
 uint16_t pad_read(void) {
   uint16_t v;
   R8(0x4200) = 0x01;
-  v = (uint16_t)(pad_held() | net_kbdpad_rose);
+  v = pad_held();
+  if ((uint16_t)(snos_frames - net_kbdpad_rose_at) <= NET_KBDPAD_TAP) v |= net_kbdpad_rose;
   net_kbdpad_rose = 0;
   R8(0x4200) = 0x81;
   return v;

@@ -228,7 +228,7 @@ static uint8_t cmsg_state; /* 0 want type, 1 want len, 2 collecting */
  * are kept here, where they arrive, and input.c says what they mean -- and
  * so net.c still links without input.c, as the Pico's host tests build it. */
 static uint8_t kbdpad_lo, kbdpad_half;
-volatile uint16_t net_kbdpad, net_kbdpad_rose;
+volatile uint16_t net_kbdpad, net_kbdpad_rose, net_kbdpad_rose_at;
 
 /* ------------------------------------------------------- the send window
  *
@@ -1090,7 +1090,13 @@ static int frame_fits(const uint8_t *f) {
  * is the writer's side of pad_read's masked read-and-clear, the side
  * pad_latch is on, so no reader can come between the two stores. */
 static void kbdpad_word(uint16_t v) {
-  net_kbdpad_rose |= (uint16_t)(v & ~net_kbdpad);
+  uint16_t rose = (uint16_t)(v & ~net_kbdpad);
+  if (rose) {
+    /* Presses nobody read in time are not carried into a fresh one. */
+    if ((uint16_t)(snos_frames - net_kbdpad_rose_at) > NET_KBDPAD_TAP) net_kbdpad_rose = 0;
+    net_kbdpad_rose |= rose;
+    net_kbdpad_rose_at = snos_frames;
+  }
   net_kbdpad = v;
 }
 
@@ -1262,7 +1268,14 @@ void net_tune_announce(void) {
  * link.h. Nothing may touch the link mailbox between the two calls. */
 void net_service(void) {
   uint8_t n, k, flying, w;
-  if (!net_ready || !net_up()) return;
+  if (!net_ready) return;
+  if (!net_up()) {
+    /* No adapter -- unplugged, or 120 bad exchanges (link_serial.c) -- so no
+     * keyboard either, and nothing will ever say its keys came up. */
+    kbdpad_half = 0;
+    if (net_kbdpad) kbdpad_word(0);
+    return;
+  }
 
   if (link_recv(rxframe)) {
     net_stat_rx_frames++;
