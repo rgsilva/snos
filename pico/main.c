@@ -159,7 +159,7 @@ static void console_command(char *line) {
     }
     if (!strcmp(line, "wifi clear")) {
         if (!config_clear()) { puts("wifi: flash erase failed"); return; }
-        memset(&settings, 0, sizeof(settings)); wifi_changed();
+        memset(&settings, 0, sizeof(settings)); wifi_changed(); kbd_set_map(settings.pad_map);
         puts("wifi: saved settings cleared"); return;
     }
     if (!strncmp(line, "wifi ", 5)) {
