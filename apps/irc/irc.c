@@ -964,19 +964,20 @@ static void do_command(char *line) {
     emit((int)cur, "/join #c  /part  /msg nick text  /nick n  /names");
     emit((int)cur, "/close  /raw LINE  /quit [reason]");
     emit((int)cur, "^N ^P switch  TAB windows  ^U users  ^Q quit");
-    emit((int)cur, "up/down scrolls back through this window");
+    emit((int)cur, "up/down, PgUp/PgDn scroll back through this window");
     return;
   }
   emitv((int)cur, "* unknown command: /", cmd, 0, 0);
 }
 
-/* Half a screen per press. A line at a time is precise and tedious; a whole
- * screen leaves no overlap to read across. */
-static void pane_scroll(int dir) {
+/* Half a screen per arrow. A line at a time is precise and tedious; a whole
+ * screen leaves no overlap to read across, so PageUp and PageDown move a
+ * screen less one line. */
+static void pane_scroll(int dir, int page) {
   int ph = (int)rows - 2;
   int n = (int)lcount[cur];
   int max = n - ph;
-  int back = (int)scroll + dir * (ph / 2);
+  int back = (int)scroll + dir * (page ? ph - 1 : ph / 2);
   if (max < 0) max = 0;
   if (back > max) back = max;
   if (back < 0) back = 0;
@@ -1079,12 +1080,12 @@ static void on_key(uint16_t k) {
     switch_tab(-1);
     return;
   }
-  if (k == SNOS_KEY_UP) {
-    pane_scroll(1);
+  if (k == SNOS_KEY_UP || k == SNOS_KEY_PAGEUP) {
+    pane_scroll(1, k == SNOS_KEY_PAGEUP);
     return;
   }
-  if (k == SNOS_KEY_DOWN) {
-    pane_scroll(-1);
+  if (k == SNOS_KEY_DOWN || k == SNOS_KEY_PAGEDOWN) {
+    pane_scroll(-1, k == SNOS_KEY_PAGEDOWN);
     return;
   }
   if (k == KEY_TABS) {
