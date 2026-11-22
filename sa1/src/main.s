@@ -159,8 +159,8 @@ page_loop:
               sta     abs:NMITIMEN
               rep     #0x20
 pl_frame$:    jsr     wait_vblank
-pl_joy$:      lda     abs:HVBJOY
-              and     ##1
+pl_joy$:      lda     abs:HVBJOY              ; read after the blank: the
+              and     ##0x80                  ; auto-read is long finished
               bne     pl_joy$
               lda     abs:JOY1L
               and     ##0xc0f0                ; B Y A X L R
