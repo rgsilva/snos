@@ -119,7 +119,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel test-sa1 clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -341,6 +341,9 @@ $(ROM): $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin too
 	python3 tools/raw2sfc.py $< $@ $(SFC_FLAGS) $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
 
 test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-mc test-kbd test-keys test-wire test-speedtest test-mode
+ifdef SA1
+test: test-sa1
+endif
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -514,6 +517,17 @@ test-hwpanel: $(ROM) $(BUILD)/test/hwpanel.lua
 	$(call check_env)
 	@test -n "$(LINK_HW)" || { echo "test-hwpanel needs LINK_HW=1"; exit 1; }
 	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/hwpanel.lua
+
+# The SA-1 image's own checks (docs/sa1-notes.md): the 192 KB volume, the
+# SA-1's 64 KB left alone, the chip held in reset, and a file across an
+# emulator reset, `restart` and, in the second run, a power-on from the
+# battery save. `make SA1=1 test-sa1`.
+test-sa1: $(ROM) $(BUILD)/test/sa1.lua $(BUILD)/test/sa1persist.lua
+	$(call check_env)
+	@test -n "$(SA1)" || { echo "test-sa1 needs SA1=1"; exit 1; }
+	rm -f "$(MESEN_SRM)"
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/sa1.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/sa1persist.lua
 
 test-irc: $(ROM) $(BUILD)/test/irc.lua
 	$(call check_env)
