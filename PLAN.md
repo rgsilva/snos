@@ -1389,6 +1389,18 @@ drain) is discovered live against the real client, which is why step 1 front-loa
 host. Step 2 is the milestone's early exit: if the risks bite, login-only already matches the
 UNIVAC.
 
+### SA-1 cartridge, phase 1: the memory map ✅ *(2026-11-22, in the emulator; the cart run is next)*
+
+**`make SA1=1` builds the whole system for an SA-1 cartridge, from the same
+sources.** Map `$23`; the bank-`$00` window (trap shims, vectors, startup) at
+ROM `$0000` instead of `$8000`; the filesystem on the first 192 KB of BW-RAM
+at `$40:0000`, the last 64 KB left to the SA-1; the chip held in reset, no IRQ
+from it. The stock images are byte-identical to before, and the full suite
+passes on both. `test-sa1` adds what only the SA-1 image can show. The plan
+and its decisions are [docs/sa1-port-plan.md](docs/sa1-port-plan.md); what
+moved where, and the checklist for the cart, [docs/sa1-notes.md](docs/sa1-notes.md).
+Phase 2, an app that starts a routine on the SA-1, waits for that run.
+
 ---
 
 ## 5. Why kernel-owned NMI is the load-bearing decision

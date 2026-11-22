@@ -194,3 +194,115 @@ photo of an sd2snes SA-1 core run to compare against.
 4. Power-cycle and photograph page 1 again: `bwboot` must read `boots=2`.
 5. If it hangs: the line it stopped after is the culprit; every wait in the
    ROM is bounded, so a hang means a crash, not a missing answer.
+
+## The kernel on SA-1 (phase 1)
+
+`make SA1=1` (2026-11-22) builds the whole system, kernel, apps, ROMFS and
+the `mc` world, as `snes/build-sa1/snos-sa1.sfc`; with `LINK_HW=1` it is
+`snes/build-hw-sa1/snos-sa1.sfc`. The SA-1 is held in reset all the time; the
+change is only the memory map. Without `SA1` both stock images are
+byte-identical to `main`'s.
+
+### What changed
+
+- `calypsi/linker-sa1.scm`: linker.scm's RAM forms; the bank-`$00` window
+  (`code`, `switch`, `data_init_table`: trap shims, vector targets, Calypsi
+  startup, `app_exec`, the app-side syscall stubs) stored at `$C0:0000`,
+  header `$C0:7FB0`, vectors `$C0:7FE0`, far code and constants from
+  `$C0:8000`.
+- `calypsi/header-sa1.s`: map `$23`, type `$35`, RAM `$08`. The vectors and
+  shims moved from `header.s` to `calypsi/traps.inc`, which both headers
+  `#include` (the assembler runs the C preprocessor; `.include` is not an
+  instruction).
+- `tools/raw2sfc.py --sa1`: size byte and checksum at `$7FD7`/`$7FDC`.
+- `kernel/sram.c`: `sa1_hold()`, first in `hw_init`: CCNT `$20`, SIE 0, SIC
+  `$A0`, CXB-FXB 0-3, SBWE `$80`, SIWP `$FF`, and a write/read of I-RAM
+  `$3000` (put back) as the presence test. `sram_ptr()` is `$40:0000 + off`;
+  `sram_probe()` steps 8 KB through the first 192 KB only (`SA1_FS_KB` in
+  `sram.h`, the one constant). `fs.c` clips its BW-RAM DMA at the bank end.
+  `exec.s` writes CCNT `$20` in `snos_restart` before the runtime restarts.
+- `shell.c`: three `mem` lines and the `ver` line, `#ifdef SA1`.
+- Makefile: `SA1=1`, the build directories, `ROM` (the image name), and
+  `MESEN_SRM` rewritten from `snos.srm` to `snos-sa1.srm`: Mesen names the
+  save after the ROM file, so neither suite deletes the other's save.
+- Tests: `fs.lua` and `restart.lua` asserted 256 KB; they now read
+  `@SRAM_KB@`, spliced like `@XFER_LAST@` (256 stock, `SA1_FS_KB` on SA-1).
+  New `test-sa1` (in `make SA1=1 test`, refused without `SA1=1`).
+
+Apps, `apps/app.scm.in` and `tools/buildapp.sh` are unchanged: every app
+`.raw`, `romfs.bin` and `mcdata.bin` is byte-identical between the two
+images. Only ROM banks `$C0-$C1` differ. Nothing in the kernel or the apps
+has a literal address in `$2200-$23FF`, `$3000-$37FF` (`console.c`'s `$3000`
+is a VRAM word address) or banks `$80-$BF`.
+
+### Where things are
+
+| Kernel region | Stock (HiROM `$31`) | SA-1 (`$23`) |
+|---|---|---|
+| `code` etc. as the CPU runs it | `$00:8000-$838D` | `$00:8000-$8393` |
+| ... stored at (ROM offset) | `$C0:8000` (`$008000`) | `$C0:0000` (`$000000`) |
+| header, vectors | `$C0:FFB0-$FFFF` | `$C0:7FB0-$7FFF` |
+| far code and constants | `$C0:0000-$7FFF`, `$C1:0000-$FD47` | `$C0:8000-$FFFF`, `$C1:0000-$FF0D` |
+| apps, ROMFS, `mc` data | `$C8-$D6` (ROMFS `$CF`), `$E0:0000-$E2:45C8` | same |
+| filesystem | SRAM `$A0-$BF:6000-$7FFF`, 256 KB | BW-RAM `$40:0000-$42:FFFF`, 192 KB |
+| SA-1 work area | none | BW-RAM `$43:0000-$43:FFFF`, untouched |
+| bank `$00` RAM, `$7E`, `$7F` | unchanged | unchanged |
+
+### The cable gates on the new map
+
+The LINK_HW tests were measured on the stock map; run on both images
+(2026-11-22, `make LINK_HW=1` and `make SA1=1 LINK_HW=1`, all PASS):
+
+| | stock | SA-1 |
+|---|---|---|
+| hwspeed download / upload | 3650 / 3375 B/s | 3650 / 3375 B/s |
+| hwspeed both ways down / up | 2920 / 2148 B/s | 3066 / 2148 B/s |
+| latest checked exchange, HDMA off (gate 131) | line 131 | line 131 |
+| NMI unmasked before vblank, at least | 4.0 lines | 4.0 lines |
+| hwresponse key / START+SELECT stop | 21 / 47 frames | 21 / 47 frames |
+| hwpanel SELECT to panel / RIGHT to highlight | 18 / 4 frames | 20 / 4 frames |
+| hwpanel latest checked, HDMA on (gate 128) | line 128 | line 128 |
+
+The kernel code is the same and the ROM speed the same (FastROM, the trap
+shims in slow bank `$00` on both), so the gates hold unchanged; the small
+differences are where the frames fall in a run, not timing.
+
+### What surprised
+
+- Nothing in the kernel relied on `$00:8000` = `$C0:8000` beyond the linker
+  placement: the full suite passes on the new map with no other change.
+- Mesen picks the `$7FC0` header although ROM `$FFC0` now holds kernel code
+  rather than `$FF` filler, and loads the cart as SA-1 with a 256 KB battery
+  save (`emu.getMemorySize(snesSaveRam)`).
+- Mesen's state has the chip in `emu.getState()` as `cart.coprocessor.*`:
+  `sa1Reset`, the SA-1's `cpu.pc`, and the S-CPU side registers
+  (`cpuBwWriteEnabled`, `cpuIRamWriteProtect`, `cpuIrqEnabled`, `banks[n]`),
+  so `test-sa1` asserts on them. `cpu.cycleCount` advances in reset; it
+  proves nothing.
+- `sram_probe` puts back what it finds, so a final-state check cannot see it
+  overrun the limit. `test-sa1` also watches the bus: no S-CPU write to
+  `$43:0000-$43:FFFF` or its mirrors, no access to a `$6000` window.
+  A probe changed to 32 windows fails it, on the bus watch among others.
+
+### On the real cart
+
+1. `make SA1=1 LINK_HW=1` and copy `snes/build-hw-sa1/snos-sa1.sfc` to the
+   SD card (32 columns, keyboard and network through the Pico on port 2;
+   `snes/build-sa1/snos-sa1.sfc` is the emulator image and works with the
+   on-screen keyboard only). Delete any `snos-sa1.srm` an earlier copy left.
+2. Boot it. Expected: `v0.1`, `192K SRAM`, `SELECT opens the keyboard`, the
+   prompt. A hang or a black screen here is the map: note whether the
+   sd2snes menu named the cart SA-1.
+3. `mem`. The last four lines must be:
+   `cart SRAM 192 KB, free 190 KB, ...` (wrapped at 32 columns),
+   `SA-1 yes, held in reset`, `BW-RAM files 192K at $400000`,
+   `BW-RAM SA-1   64K at $430000`.
+4. `debug ver`: `65816 native, SA-1 cart fastrom, SA-1 in reset`.
+5. `ls`, `cat MOTD.TXT`, `run hello` (`[hello exited 42]`): ROMFS at `$CF`
+   and an app at `$C8`.
+6. `write KEEP.TXT survived a power cycle`, then `cat KEEP.TXT`. Wait ten
+   seconds so the sd2snes writes the save to the card, then power off.
+7. Power on, boot it again, `cat KEEP.TXT`: the line must be there. Then
+   `restart` and `cat KEEP.TXT` once more.
+8. With the adapter up, `get URL DEST` of a small file and `cat DEST`: the
+   network path writing BW-RAM.

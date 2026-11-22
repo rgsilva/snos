@@ -56,6 +56,8 @@ cd snes
 make            # -> build/snos.sfc
 make test       # run the automated Mesen tests
 make LINK_HW=1  # -> build-hw/snos.sfc, the real-hardware ROM (port-2 adapter)
+make SA1=1      # -> build-sa1/snos-sa1.sfc, for an SA-1 cartridge (docs/sa1-notes.md);
+                #    with LINK_HW=1 -> build-hw-sa1/snos-sa1.sfc
 ```
 
 On Linux the toolchain and Mesen live elsewhere; `CALDIR`, `MESEN` and
