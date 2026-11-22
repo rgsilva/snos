@@ -112,7 +112,7 @@ local function judge(all)
   end
   for _, need in ipairs({ "iram", "start", "s>a", "a>s", "mul", "div", "sum", "bwram",
                           "bwwin", "bwboot", "00:8000", "C0:8000", "fxb=80", "sa1rom",
-                          "cc8", "cc4", "ccrate", "a:S", "d:Bb", "a:F" }) do
+                          "cc8", "cc4", "cc2", "ccrate", "a:S", "d:Bb", "a:F" }) do
     check(seen[need] ~= nil, "no line for " .. need)
   end
   local boots = seen.bwboot and seen.bwboot:match("boots=(%d+)")

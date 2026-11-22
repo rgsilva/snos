@@ -1163,6 +1163,26 @@ cc_cp4$:      lda     abs:img4,x
               ldx     ##nm_cc4
               jsr     cc_line
 
+              ;; type 2: the SA-1 converts one tile into I-RAM
+              stz     dp:V_T6
+              stz     dp:V_T4
+              lda     ##CMD_CC2
+              jsr     sa1_cmd
+              bcs     cc2_line$
+              inc     dp:V_T6
+              ldx     ##0
+cc2_cmp$:     sep     #0x20
+              lda     abs:IRAM+CC_BUF,x
+              cmp     abs:exp8,x
+              rep     #0x20
+              beq     cc2_ok$
+              inc     dp:V_T4
+cc2_ok$:      inx
+              cpx     ##64
+              bne     cc2_cmp$
+cc2_line$:    ldx     ##nm_cc2
+              jsr     cc_line1
+
               ;; throughput: 256 tiles at 8bpp (128 x 128, 16 chars wide)
               lda     ##BW_RATE
               ldx     ##0x10
@@ -1362,6 +1382,10 @@ ccc_ok$:      inx
 
 ;;; X = name. Uses V_T4 (bad bytes), V_T6 (ready flag).
 cc_line:
+              lda     ##s_32t
+              bra     cl_go
+cc_line1:     lda     ##s_1t
+cl_go:        sta     dp:V_T7
               lda     ##STATUS_FAIL
               ldy     dp:V_T4
               bne     cl_st$
@@ -1373,7 +1397,7 @@ cl_st$:       jsr     line_start
               bne     cl_rdy$
               ldx     ##s_noirq
               jsr     ln_str
-cl_rdy$:      ldx     ##s_32t
+cl_rdy$:      ldx     dp:V_T7
               jsr     ln_str
               lda     dp:V_T4
               sta     dp:V_NUM
@@ -1428,6 +1452,7 @@ nm_fxb80:     .asciz  "fxb=80"
 nm_sa1rom:    .asciz  "sa1rom"
 nm_cc8:       .asciz  "cc8"
 nm_cc4:       .asciz  "cc4"
+nm_cc2:       .asciz  "cc2"
 nm_ccrate:    .asciz  "ccrate"
 nm_ccplain:   .asciz  "ccplain"
 s_iram_ok:    .asciz  "2048 B"
@@ -1460,6 +1485,7 @@ s_a0:         .asciz  "a0="
 s_f0:         .asciz  " f0="
 s_of5:        .asciz  "/5 same"
 s_32t:        .asciz  "32 tiles "
+s_1t:         .asciz  "1 tile "
 s_noirq:      .asciz  "no flag "
 s_frm:        .asciz  "/frm "
 s_vbl:        .asciz  "/vbl"

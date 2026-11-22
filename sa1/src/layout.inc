@@ -37,7 +37,8 @@ CMD_BWMAP     .equ    4               ; ARG0 -> BMAP, word at $6010 -> IM_RES
 CMD_CBWE      .equ    5               ; ARG0 -> CBWE
 CMD_DCNT      .equ    6               ; ARG1 (if nonzero) -> CDMA, ARG0 -> DCNT
 CMD_ROMREAD   .equ    7               ; markers seen by the SA-1 -> IM_RES
-CMD_LAST      .equ    7
+CMD_CC2       .equ    8               ; img8's first tile through type 2 -> CC_BUF
+CMD_LAST      .equ    8
 
 ;;; Benchmark direct page, relative to D (I-RAM, BW-RAM or WRAM).
 B_CNT         .equ    0x00            ; 32-bit completed iterations

@@ -83,6 +83,7 @@ BMAP          .equ    0x2225          ; SA-1 $6000-$7FFF window: 7 bitmap, 0-6 b
 CBWE          .equ    0x2227          ; 7 SA-1 BW-RAM write enable
 CIWP          .equ    0x222a          ; SA-1 I-RAM write enable, bit n = $0n00
 DCNT          .equ    0x2230          ; 7 enable, 5 char conv, 4 type 1, 2 dst, 0-1 src
+BRF           .equ    0x2240          ; type 2 pixels: 2240-2247 row n, 2248-224F row n+1
 MCNT          .equ    0x2250          ; 0 mul, 1 div, 2 cumulative sum (resets sum)
 MA            .equ    0x2251          ; signed multiplicand / dividend
 MB            .equ    0x2253          ; signed multiplier / unsigned divisor, high starts

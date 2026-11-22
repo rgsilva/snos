@@ -14,7 +14,7 @@
               .section code, root
               .public sa1_reset, sa1_nmi, sa1_irq
               .extern bench_a, bench_b, bench_c_sa1, bench_d, rom_mark
-              .extern arith_tbl, rom_probes_sa1
+              .extern arith_tbl, rom_probes_sa1, img8
 
 sa1_reset:
               sei
@@ -246,7 +246,50 @@ crr$:         lda     abs:rom_probes_sa1,x
               bne     crr$
               rts
 
+;;; Type 2 conversion: the first 8 x 8 tile of img8 written pixel by pixel
+;;; into BRF, rows alternating between its two halves; each completed row
+;;; lands as planar bytes in the I-RAM buffer at DDA (CC_BUF).
+cmd_cc2:
+              sep     #0x20
+              stz     abs:CDMA                ; 8bpp
+              lda     #0xa0                   ; enable, char conv, type 2
+              sta     abs:DCNT
+              stz     abs:DDA
+              lda     #CC_BUF >> 8
+              sta     abs:DDA+1
+              rep     #0x20
+              stz     dp:V_T2                 ; row
+cc2_row$:     lda     dp:V_T2
+              xba
+              lsr     a
+              lsr     a
+              tax                             ; row * 64: source
+              lda     dp:V_T2
+              and     ##1
+              asl     a
+              asl     a
+              asl     a
+              tay                             ; BRF half
+              lda     ##8
+              sta     dp:V_T3
+              sep     #0x20
+cc2_px$:      lda     abs:img8,x
+              sta     abs:BRF,y
+              inx
+              iny
+              dec     dp:V_T3
+              bne     cc2_px$
+              rep     #0x20
+              inc     dp:V_T2
+              lda     dp:V_T2
+              cmp     ##8
+              bne     cc2_row$
+              sep     #0x20
+              stz     abs:DCNT
+              rep     #0x20
+              rts
+
 sa1_cmd_tbl:  .word   0, cmd_bench, cmd_arith, cmd_signal, cmd_bwmap, cmd_cbwe
-              .word   cmd_dcnt, cmd_romread
+              .word   cmd_dcnt, cmd_romread, cmd_cc2
 sa1_bench_tbl:
               .word   bench_a, bench_b, bench_c_sa1, bench_d
