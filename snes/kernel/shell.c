@@ -187,8 +187,26 @@ static void cmd_restart(void) {
 static void cmd_ver(void) {
   kcon_puts("SNOS " SNOS_VERSION_STR ", kernel ABI ");
   kcon_putu(SNOS_ABI_VERSION);
+#ifdef SA1
+  kcon_puts("\n65816 native, SA-1 cart fastrom, SA-1 in reset\n");
+#else
   kcon_puts("\n65816 native, HiROM fastrom, no SA-1\n");
+#endif
 }
+
+#ifdef SA1
+/* One BW-RAM region of `mem`: at most 28 columns. Both start on a whole KB,
+ * so the address's low byte is 00. */
+static void put_bwram(const char *what, uint16_t kb, uint32_t at) {
+  kcon_puts("BW-RAM ");
+  kcon_puts(what);
+  if (kb < 100u) kcon_putc(' ');
+  kcon_putu(kb);
+  kcon_puts("K at $");
+  kcon_puthex16((uint16_t)(at >> 8));
+  kcon_puts("00\n");
+}
+#endif
 
 /* The bank-$00 budget is the design's binding constraint, so the shell reports
  * it directly rather than making anyone go and read linker.scm. */
@@ -227,6 +245,11 @@ static void cmd_mem(void) {
     field_sep(" ", 13);
     kcon_puts("(see compact)\n");
   }
+#ifdef SA1
+  kcon_puts(sa1_present() ? "SA-1 yes, held in reset\n" : "SA-1 not found\n");
+  put_bwram("files ", SA1_FS_KB, SRAM_BASE);
+  put_bwram("SA-1  ", SA1_WORK_KB, SA1_WORK_BASE);
+#endif
 }
 
 static void cmd_echo(const char *rest) {
