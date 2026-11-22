@@ -9,6 +9,9 @@ Optional embedded blobs: `--at 0xOFFSET path/to/file` places a binary at a
 fixed ROM byte offset before checksumming. HiROM maps SNES $C00000+N linearly
 to ROM byte N, so the Mac ROM (--at 0x080000 => $C80000) and floppy image
 (--at 0x100000 => $D00000) are reachable by fixed far pointers (macmem.c).
+
+`--sa1`: the header is at ROM $7FC0, not $FFC0 (an SA-1 cart maps ROM $0000
+at $00:8000), and must already say map $23. Banks $C0+ are linear there too.
 """
 import sys
 
@@ -16,9 +19,13 @@ import sys
 def main(argv) -> None:
     src, dst = argv[0], argv[1]
     blobs = []                       # (offset, bytes)
+    hdr = 0xFFC0
     i = 2
     while i < len(argv):
-        if argv[i] == "--at":
+        if argv[i] == "--sa1":
+            hdr = 0x7FC0
+            i += 1
+        elif argv[i] == "--at":
             off = int(argv[i + 1], 0)
             blobs.append((off, open(argv[i + 2], "rb").read()))
             i += 3
@@ -26,6 +33,8 @@ def main(argv) -> None:
             raise SystemExit(f"unknown arg {argv[i]}")
 
     data = bytearray(open(src, "rb").read())
+    if hdr == 0x7FC0 and (len(data) < 0x8000 or data[hdr + 0x15] != 0x23):
+        raise SystemExit("raw2sfc: --sa1, but ROM $7FD5 is not map mode $23")
     # Overlap check: blobs are pasted in argv order, and a grown romfs (or a
     # multi-bank app) would silently overwrite its neighbour. Loud beats
     # subtle here -- this is the last step before the ROM exists.
@@ -46,27 +55,28 @@ def main(argv) -> None:
         size *= 2
     data.extend(b"\xff" * (size - len(data)))
 
-    # ROM-size byte ($FFD7) = log2(KB). Patch it to match the image we actually
-    # produced rather than hand-maintaining it in header.s: a header that claims
-    # 4 MB for a 256 KB file lowers Mesen's header-scoring confidence, which
-    # surfaces as an unhelpful "cartridge not detected" instead of a size warning.
+    # ROM-size byte (header + $17: $FFD7 on HiROM) = log2(KB). Patch it to
+    # match the image we actually produced rather than hand-maintaining it in
+    # header.s: a header that claims 4 MB for a 256 KB file lowers Mesen's
+    # header-scoring confidence, which surfaces as an unhelpful "cartridge not
+    # detected" instead of a size warning.
     kb = size // 1024
-    data[0xFFD7] = kb.bit_length() - 1
+    data[hdr + 0x17] = kb.bit_length() - 1
 
     # checksum: sum of all bytes with checksum fields preset
-    data[0xFFDC:0xFFDE] = b"\xff\xff"  # complement placeholder
-    data[0xFFDE:0xFFE0] = b"\x00\x00"  # checksum placeholder
+    data[hdr + 0x1C:hdr + 0x1E] = b"\xff\xff"  # complement placeholder
+    data[hdr + 0x1E:hdr + 0x20] = b"\x00\x00"  # checksum placeholder
     chk = sum(data) & 0xFFFF
-    data[0xFFDC] = ~chk & 0xFF
-    data[0xFFDD] = (~chk >> 8) & 0xFF
-    data[0xFFDE] = chk & 0xFF
-    data[0xFFDF] = (chk >> 8) & 0xFF
+    data[hdr + 0x1C] = ~chk & 0xFF
+    data[hdr + 0x1D] = (~chk >> 8) & 0xFF
+    data[hdr + 0x1E] = chk & 0xFF
+    data[hdr + 0x1F] = (chk >> 8) & 0xFF
 
     open(dst, "wb").write(data)
     extra = "".join(f" +{len(b)//1024}KB@{o:#08x}" for o, b in blobs)
     print(
         f"{dst}: {len(data) // 1024} KB, checksum {chk:#06x}, "
-        f"romsize byte {data[0xFFD7]:#04x}{extra}"
+        f"romsize byte {data[hdr + 0x17]:#04x}{extra}"
     )
 
 
