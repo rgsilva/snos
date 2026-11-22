@@ -58,17 +58,20 @@ local lines, pages, press = nil, {}, 0
 local boots_expected = 1
 
 local function expected_pages(all)
-  local p, seg, verdict = {}, nil, {}
+  local p, seg, verdict, fails = {}, nil, nil, nil
   for _, l in ipairs(all) do
     if l:find("^SA1PROBE") or l:find("^ROM MAP") or l:find("^SPEED") then
       seg = { l }; p[#p + 1] = seg
-    elseif l:find("^verdict") or l:find("^fails:") then
-      verdict[#verdict + 1] = l
+    elseif l:find("^verdict") then verdict = l
+    elseif l:find("^fails:") then fails = l
     elseif not l:find("^chk ") and seg then
       seg[#seg + 1] = l
     end
   end
-  for _, s in ipairs(p) do for _, v in ipairs(verdict) do s[#s + 1] = v end end
+  for i, s in ipairs(p) do
+    s[#s + 1] = verdict
+    if i == 1 then s[#s + 1] = fails end
+  end
   return p
 end
 
@@ -109,7 +112,7 @@ local function judge(all)
   end
   for _, need in ipairs({ "iram", "start", "s>a", "a>s", "mul", "div", "sum", "bwram",
                           "bwwin", "bwboot", "00:8000", "C0:8000", "fxb=80", "sa1rom",
-                          "cc8", "cc4", "ccrate", "a:S", "d:Bb" }) do
+                          "cc8", "cc4", "ccrate", "a:S", "d:Bb", "a:F" }) do
     check(seen[need] ~= nil, "no line for " .. need)
   end
   local boots = seen.bwboot and seen.bwboot:match("boots=(%d+)")

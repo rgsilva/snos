@@ -88,6 +88,8 @@ rs_ram$:      stz     abs:0x0200,x
               jsr     title_line
               ldx     ##s_legend2
               jsr     title_line
+              ldx     ##s_legend3
+              jsr     title_line
               jsr     check_speed
 
               jsr     verdict
@@ -103,7 +105,8 @@ title_line:
               jsr     ln_str
               jmp     ln_end
 
-;;; The verdict, two lines on every page, in the transcript once.
+;;; The verdict on every page, the list of failed checks on page 1 only;
+;;; both in the transcript once.
 verdict:
               lda     ##2
               sta     dp:V_PAGE
@@ -132,6 +135,9 @@ vd_st$:       jsr     ln_str
               ldx     ##s_vfail2
               jsr     ln_str
               jsr     ln_end
+              lda     dp:V_PAGE
+              bne     vd_next$
+              stz     dp:V_LNMODE
               jsr     ln_begin
               ldx     ##s_fails
               jsr     ln_str
@@ -144,11 +150,12 @@ vd_fl$:       cpy     dp:V_FLEN
               iny
               bra     vd_fl$
 vd_fl_end$:   jsr     ln_end
-              lda     ##1                     ; transcript only once
+              stz     dp:V_LNMODE
+              rts
+vd_next$:     lda     ##1                     ; transcript only once
               sta     dp:V_LNMODE
               dec     dp:V_PAGE
-              bpl     vd_page$
-              stz     dp:V_LNMODE
+              bra     vd_page$
               stz     dp:V_PAGE
               rts
 
@@ -402,8 +409,9 @@ zero_word:    .word   0
 s_title1:     .asciz  "SA1PROBE p1/3 A:next"
 s_title2:     .asciz  "ROM MAP p2/3 A:next"
 s_title3:     .asciz  "SPEED 16 fr/run p3/3 A:next"
-s_legend1:    .asciz  "S S-CPU; I/B SA-1 IRAM/BWRAM"
-s_legend2:    .asciz  "i S idle in WRAM, b busy in ROM"
+s_legend1:    .asciz  "S/F S-CPU in SlowROM/FastROM"
+s_legend2:    .asciz  "I/B SA-1, data in IRAM/BWRAM"
+s_legend3:    .asciz  "i/b S-CPU idle in WRAM/busy ROM"
 s_verdict:    .asciz  "verdict"
 s_vok:        .asciz  "OK"
 s_vfail:      .asciz  "FAIL"

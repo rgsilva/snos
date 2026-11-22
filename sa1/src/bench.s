@@ -232,7 +232,7 @@ csp_line$:    jsr     speed_line
               lda     dp:V_T6
               cmp     ##4
               bne     csp_bench$
-              rts
+              jmp     fast_line
 
 ;;; Index of the current result slot * 4 -> X.
 slot:
@@ -282,8 +282,12 @@ run_s:
               phd
               lda     ##B_IDP
               tcd
+              lda     abs:V_FAST
+              bne     rs_fast$
               jsr     (abs:s_bench_tbl,x)
-              pld
+              bra     rs_ran$
+rs_fast$:     jsl     long:fast_a + 0x800000
+rs_ran$:      pld
               lda     abs:B_IDP+B_CNT
               sta     dp:V_NUM
               lda     abs:B_IDP+B_CNT+2
@@ -301,6 +305,58 @@ rs_out$:      sep     #0x20
               stz     abs:NMITIMEN
               rep     #0x20
               rts
+
+;;; Bank $80 entry for the FastROM run: with EXB = $80, $80:8000-$FFFF is
+;;; this ROM bank, so the same bench_a runs from there at 3.58 MHz.
+fast_a:       jsr     bench_a
+              rtl
+
+;;; "a:F     OK   3290     x1.3": bench_a on the S-CPU in FastROM. SNOS runs
+;;; FastROM today; fullsnes doubts it is usable on an SA-1 cart.
+fast_line:
+              sep     #0x20
+              lda     #0x80
+              sta     abs:EXB
+              lda     #1
+              sta     abs:MEMSEL
+              rep     #0x20
+              lda     ##1
+              sta     dp:V_FAST
+              stz     dp:V_T6                 ; bench a
+              jsr     run_s
+              stz     dp:V_FAST
+              sep     #0x20
+              stz     abs:MEMSEL
+              lda     #0x02
+              sta     abs:EXB
+              rep     #0x20
+              jsr     ln_begin
+              ldx     ##s_fast
+              jsr     ln_str
+              ldx     ##STATUS_OK
+              lda     dp:V_NUM
+              ora     dp:V_NUM+2
+              bne     fl_st$
+              ldx     ##STATUS_FAIL
+fl_st$:       txa
+              jsr     ln_status
+              lda     dp:V_NUM
+              sta     dp:V_T4
+              lda     dp:V_NUM+2
+              sta     dp:V_T5
+              jsr     ln_dec
+              lda     ##22
+              jsr     ln_col
+              lda     dp:V_T4
+              sta     dp:V_NUM
+              lda     dp:V_T5
+              sta     dp:V_NUM+2
+              lda     abs:RESULTS
+              sta     dp:V_DEN
+              lda     abs:RESULTS+2
+              sta     dp:V_DEN+2
+              jsr     ln_ratio
+              jmp     ln_end
 
 ;;; An SA-1 run with config V_T7 (1-4). Same results as run_s.
 run_a:
@@ -463,3 +519,4 @@ s_cbi:        .asciz  "Bi"
 s_cib:        .asciz  "Ib"
 s_cbb:        .asciz  "Bb"
 s_chk:        .asciz  "chk "
+s_fast:       .asciz  "a:F"

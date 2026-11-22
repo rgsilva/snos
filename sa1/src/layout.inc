@@ -95,6 +95,7 @@ V_L1          .equ    0x5a
 V_L2          .equ    0x5c
 V_L3          .equ    0x5e
 V_L4          .equ    0x60
+V_FAST        .equ    0x62            ; run_s from bank $80 in FastROM
 
 LINEBUF       .equ    0x0800          ; 32 chars
 FAILLIST      .equ    0x0840          ; names of failed checks, 64 chars
