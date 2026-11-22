@@ -363,10 +363,10 @@ int fs_delete(const char *name) {
  * The caller must have the screen in forced blank and must have set the VRAM
  * address and $2115 already — this only supplies the bytes.
  *
- * Each DMA is clipped to the end of its 8 KB SRAM window (or its ROM bank),
- * because the DMA controller increments the A-bus address WITHOUT carrying into
- * the bank: a transfer that ran past $7FFF would wrap to $6000 of the same
- * window and quietly repeat 8 KB of the picture.
+ * Each DMA is clipped to the end of its 8 KB SRAM window (or its ROM bank, or
+ * on SA-1 its BW-RAM bank), because the DMA controller increments the A-bus
+ * address WITHOUT carrying into the bank: a transfer that ran past $7FFF would
+ * wrap to $6000 of the same window and quietly repeat 8 KB of the picture.
  */
 static void dma_block(uint16_t bank, uint16_t addr, uint16_t bytes) {
   R8(0x4300) = 0x01; /* A->B, two registers ($2118/$2119) */
@@ -401,10 +401,17 @@ uint16_t fs_read_vram(uint16_t count) {
       addr = (uint16_t)phys;
       space = 0x10000ul - (uint32_t)addr;
     } else {
+#ifdef SA1
+      uint32_t phys = SRAM_BASE + e->off + pos; /* BW-RAM: clip at the bank */
+      bank = (uint16_t)(phys >> 16);
+      addr = (uint16_t)phys;
+      space = 0x10000ul - (uint32_t)addr;
+#else
       uint32_t off = e->off + pos;
       bank = (uint16_t)(SRAM_BANK0 + (uint16_t)(off >> SRAM_WINDOW_BITS));
       addr = (uint16_t)(0x6000u + ((uint16_t)off & (uint16_t)(SRAM_WINDOW_SIZE - 1)));
       space = 0x8000ul - (uint32_t)addr;
+#endif
     }
     if (space > remain) space = remain;
     if (space > 0x2000ul) space = 0x2000ul;

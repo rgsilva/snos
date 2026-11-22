@@ -8,3 +8,5 @@ build/
 .DS_Store
 __pycache__/
 snes/build-hw/
+snes/build-sa1/
+snes/build-hw-sa1/

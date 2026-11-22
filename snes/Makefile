@@ -78,8 +78,33 @@ AFLAGS := --core=65816 --target=SNES $(MODEL)
 # Generic clib to match the bare-target C objects (the -snes variants carry a
 # target attribute the linker refuses to mix). Verified to contain no
 # $4202/$4204 hardware-ALU references, same as the -snes-noppu one did.
-LNFLAGS = calypsi/linker.scm --output-format=raw --rtattr exit=simplified \
+LNFLAGS = $(LINKER) --output-format=raw --rtattr exit=simplified \
           $(CALDIR)/lib/clib-lc-ld.a
+LINKER := calypsi/linker.scm
+HEADER := calypsi/header.s
+ROM_NAME := snos
+
+# The SA-1 cartridge (docs/sa1-port-plan.md, phase 1): map $23, its own
+# linker file and header, BW-RAM at $40:0000 for the filesystem. `make SA1=1`
+# builds into build-sa1/ (build-hw-sa1/ with LINK_HW=1) as snos-sa1.sfc: Mesen
+# names the battery save after the ROM file, so the SA-1 tests delete
+# snos-sa1.srm and never the stock image's snos.srm, nor the other way round.
+ifdef SA1
+CFLAGS += -DSA1=1
+AFLAGS += -DSA1=1
+BUILD := $(BUILD)-sa1
+LINKER := calypsi/linker-sa1.scm
+HEADER := calypsi/header-sa1.s
+ROM_NAME := snos-sa1
+SFC_FLAGS := --sa1
+SRM_NAME := $(notdir $(lastword $(MESEN_SRM)))
+ifeq ($(SRM_NAME),snos.srm)
+override MESEN_SRM := $(subst /snos.srm,/snos-sa1.srm,$(MESEN_SRM))
+else ifneq ($(SRM_NAME),snos-sa1.srm)
+$(error SA1=1 needs MESEN_SRM to name snos.srm or snos-sa1.srm, not '$(SRM_NAME)')
+endif
+endif
+ROM := $(BUILD)/$(ROM_NAME).sfc
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
             $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c $(K)/net.c \
@@ -97,7 +122,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
 # invisible. Mesen loads exactly one script at a time, so this is the file to
 # point its Script Window at.
 all: kernel $(BUILD)/snosbridge.lua
-kernel: $(BUILD)/snos.sfc
+kernel: $(ROM)
 
 $(BUILD):
 	mkdir -p $(BUILD) $(BUILD)/test
@@ -146,7 +171,7 @@ $(BUILD)/%.o: $(K)/uip/%.c $(KERNEL_H) $(wildcard $(K)/uip/*.h) | $(BUILD)
 $(BUILD)/%.o: $(K)/%.s | $(BUILD)
 	$(AS) -o $@ $< $(AFLAGS)
 
-$(BUILD)/header.o: calypsi/header.s calypsi/traps.inc | $(BUILD)
+$(BUILD)/header.o: $(HEADER) calypsi/traps.inc | $(BUILD)
 	$(AS) -o $@ $< $(AFLAGS)
 
 # The console fonts, baked at build time so con_init DMAs them from ROM
@@ -159,7 +184,7 @@ $(BUILD)/fontvram.o: $(BUILD)/fontvram.c
 
 # linker.scm IS the kernel memory map; editing it without this prerequisite
 # shipped a stale ROM silently -- the same bug class KERNEL_H exists to stop.
-$(BUILD)/snos.raw: $(KERNEL_O) calypsi/linker.scm
+$(BUILD)/snos.raw: $(KERNEL_O) $(LINKER)
 	$(LN) -o $@ $(LNFLAGS) --list-file=$(BUILD)/snos.map $(KERNEL_O)
 
 # ---------------------------------------------------------------- applications
@@ -307,8 +332,8 @@ $(BUILD)/mcdata.bin $(BUILD)/mcdata.h &: tools/mkmc.py | $(BUILD)
 # generic template, so only the extra dependency is stated here.
 $(BUILD)/apps/mc/mc.raw: $(BUILD)/mcdata.h
 
-$(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
-	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
+$(ROM): $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
+	python3 tools/raw2sfc.py $< $@ $(SFC_FLAGS) $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
 
 test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-mc test-kbd test-keys test-wire test-speedtest test-mode
 
@@ -322,130 +347,130 @@ test-host:
 	python3 test/host/mkmc_test.py
 	python3 test/host/speedtest_test.py
 
-test-boot: $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
+test-boot: $(ROM) $(BUILD)/test/boot.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/boot.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/boot.lua
 
-test-input: $(BUILD)/snos.sfc $(BUILD)/test/input.lua
+test-input: $(ROM) $(BUILD)/test/input.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/input.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/input.lua
 
-test-shell: $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
+test-shell: $(ROM) $(BUILD)/test/shell.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/shell.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/shell.lua
 
-test-apps: $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
+test-apps: $(ROM) $(BUILD)/test/apps.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/apps.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/apps.lua
 
 # Mesen persists cart SRAM to a .srm; a stale one from a previous run would
 # make the persistence assertion pass for the wrong reason.
-test-fs: $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
+test-fs: $(ROM) $(BUILD)/test/fs.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/fs.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/fs.lua
 
 # Start with room for the persistence fixture; neither restart in the test
 # deletes the save or resets the emulator.
-test-restart: $(BUILD)/snos.sfc $(BUILD)/test/restart.lua
+test-restart: $(ROM) $(BUILD)/test/restart.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/restart.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/restart.lua
 
-test-basic: $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
+test-basic: $(ROM) $(BUILD)/test/basic.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/basic.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/basic.lua
 
-test-panel: $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
+test-panel: $(ROM) $(BUILD)/test/panel.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/panel.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/panel.lua
 
-test-editor: $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
+test-editor: $(ROM) $(BUILD)/test/editor.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/editor.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/editor.lua
 
 # Downloads write the SRAM volume, and SRAMFS is a bump allocator: without a
 # wipe, the accumulated DLTEST/BIG/WINLOSS of every previous run eventually
 # fill the 256 K and `get` starts refusing with "not enough room" — a failure
 # of the HARNESS state, not of the code under test.
-test-net: $(BUILD)/snos.sfc $(BUILD)/test/net.lua
+test-net: $(ROM) $(BUILD)/test/net.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/net.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/net.lua
 
-test-netreset: $(BUILD)/snos.sfc $(BUILD)/test/netreset.lua
+test-netreset: $(ROM) $(BUILD)/test/netreset.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/netreset.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/netreset.lua
 
-test-speedtest: $(BUILD)/snos.sfc $(BUILD)/test/speedtest.lua
+test-speedtest: $(ROM) $(BUILD)/test/speedtest.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/speedtest.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/speedtest.lua
 
-test-pager: $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
+test-pager: $(ROM) $(BUILD)/test/pager.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/pager.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/pager.lua
 
 # M10 step 1: the context-switch primitive, proven by two never-yielding
 # kernel workers both making progress under the NMI round-robin.
-test-mtask: $(BUILD)/snos.sfc $(BUILD)/test/mtask.lua
+test-mtask: $(ROM) $(BUILD)/test/mtask.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mtask.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/mtask.lua
 
 # telnetd v2: the screen-diff mirror, driven through the real link protocol.
-test-telnetd: $(BUILD)/snos.sfc $(BUILD)/test/telnetd.lua
+test-telnetd: $(ROM) $(BUILD)/test/telnetd.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/telnetd.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/telnetd.lua
 
-test-ip: $(BUILD)/snos.sfc $(BUILD)/test/ip.lua
+test-ip: $(ROM) $(BUILD)/test/ip.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/ip.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/ip.lua
 
 # M10 step 5: the milestone -- a background server answers over the link
 # WHILE a foreground app runs, plus the arena-refusal and kill/reap story.
-test-bg: $(BUILD)/snos.sfc $(BUILD)/test/bg.lua
+test-bg: $(ROM) $(BUILD)/test/bg.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/bg.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/bg.lua
 
 # The same background launch typed without `run`: `netecho 7777 &`.
-test-bgbare: $(BUILD)/snos.sfc $(BUILD)/test/bgbare.lua
+test-bgbare: $(ROM) $(BUILD)/test/bgbare.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/bgbare.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/bgbare.lua
 
 # A Lua ircd on the far side of the emulated link, speaking the real protocol.
 # In the suite rather than beside it, unlike test-vnc: this moves a few hundred
 # bytes, not a 48 KB framebuffer.
-test-httpd: $(BUILD)/snos.sfc $(BUILD)/test/httpd.lua
+test-httpd: $(ROM) $(BUILD)/test/httpd.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/httpd.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/httpd.lua
 
 # M13: the Minecraft server, driven by a scripted protocol-754 client. The
 # 146 KB join burst rides uIP stop-and-wait, so this is a long test - the
 # vnc class, not the netecho class.
-test-mc: $(BUILD)/snos.sfc $(BUILD)/test/mc.lua
+test-mc: $(ROM) $(BUILD)/test/mc.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mc.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/mc.lua
 
 # Keystrokes over the link (LINK_CH_KBD, the hardware adapter's keyboard path),
 # driven through the same gwip peer the network tests use.
-test-kbd: $(BUILD)/snos.sfc $(BUILD)/test/kbd.lua
+test-kbd: $(ROM) $(BUILD)/test/kbd.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/kbd.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/kbd.lua
 
 # The rest of the keyboard (Delete, Home, End, PageUp, PageDown, F-keys) in the
 # shell and edit, and LINK_CH_KBDPAD, the keyboard as a controller, through
 # SYS_PAD but not the on-screen keyboard. Edit saves a file.
-test-keys: $(BUILD)/snos.sfc $(BUILD)/test/keys.lua
+test-keys: $(ROM) $(BUILD)/test/keys.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/keys.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/keys.lua
 
 # apps/wire, the port-2 cable test, run with no adapter: the loop, the stats
 # line and the B exit are what the emulator can check.
-test-wire: $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
+test-wire: $(ROM) $(BUILD)/test/wire.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/wire.lua
 
 # The LINK_HW ROM's real cable path (linkxfer.s, NMI timing, the foreground
 # poll gate) against a model of the Pico on port 2 -- `make LINK_HW=1
@@ -457,7 +482,7 @@ test-wire: $(BUILD)/snos.sfc $(BUILD)/test/wire.lua
 HWPROF_FUNCS ?= snos_nmi_c net_service ip_service snos_cop_c kbd_idle uip_process \
                 net_read net_write link_serial_recv link_serial_send build_frame \
                 net_service_fg pad_latch proc_tick uip_len
-test-hwspeed: $(BUILD)/snos.sfc $(BUILD)/test/hwspeed.lua
+test-hwspeed: $(ROM) $(BUILD)/test/hwspeed.lua
 	$(call check_env)
 	@test -n "$(LINK_HW)" || { echo "test-hwspeed needs LINK_HW=1"; exit 1; }
 	sed 's|^-- @CONFIG@.*|CONFIG = {$(HWSPEED)}|' $(BUILD)/test/hwspeed.lua \
@@ -467,40 +492,40 @@ test-hwspeed: $(BUILD)/snos.sfc $(BUILD)/test/hwspeed.lua
 	  sed -i "s|^CONFIG = {\(.*\)}$$|CONFIG = {\1}; CONFIG.prof = $$prof|" \
 	    $(BUILD)/test/hwspeed-run.lua; \
 	fi
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwspeed-run.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/hwspeed-run.lua
 
 # Responsiveness on the LINK_HW ROM while the cable runs flat out: a key from
 # the adapter's keyboard and START+SELECT each stop a download in bounded
 # time, and the link answers afterwards. `make LINK_HW=1 test-hwresponse`.
-test-hwresponse: $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
+test-hwresponse: $(ROM) $(BUILD)/test/hwresponse.lua
 	$(call check_env)
 	@test -n "$(LINK_HW)" || { echo "test-hwresponse needs LINK_HW=1"; exit 1; }
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwresponse.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/hwresponse.lua
 
 # The keyboard panel paints on the LINK_HW ROM while the cable runs flat out,
 # and the selection moves; the NMI's exchange used to take every vblank from
 # it. `make LINK_HW=1 test-hwpanel`, at either CON_COLS.
-test-hwpanel: $(BUILD)/snos.sfc $(BUILD)/test/hwpanel.lua
+test-hwpanel: $(ROM) $(BUILD)/test/hwpanel.lua
 	$(call check_env)
 	@test -n "$(LINK_HW)" || { echo "test-hwpanel needs LINK_HW=1"; exit 1; }
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/hwpanel.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/hwpanel.lua
 
-test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
+test-irc: $(ROM) $(BUILD)/test/irc.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/irc.lua
 
-test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
+test-history: $(ROM) $(BUILD)/test/history.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/history.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/history.lua
 
 # The `mode` command and the 32-column console: wrap, the narrow keyboard
 # panel, a 64-column app's switch and restore, palette writes, and a picture
 # killed while it held the PPU. Written against the emulator ROM's 64-column
 # power-on mode, which it switches away from and back to.
-test-mode: $(BUILD)/snos.sfc $(BUILD)/test/mode.lua
+test-mode: $(ROM) $(BUILD)/test/mode.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/mode.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/mode.lua
 
 # Deliberately NOT in `test`: it receives a whole 48 KB framebuffer through the
 # emulated link, which is two minutes on its own — as long as the other twelve
@@ -508,14 +533,14 @@ test-mode: $(BUILD)/snos.sfc $(BUILD)/test/mode.lua
 # to paint: it is the only coverage `vnc` has, and it asserts the two things that
 # went wrong there, that the picture is right THROUGH THE TILEMAP and that no
 # forced blank lands where the picture is displayed.
-test-vnc: $(BUILD)/snos.sfc $(BUILD)/test/vnc.lua
+test-vnc: $(ROM) $(BUILD)/test/vnc.lua
 	$(call check_env)
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/vnc.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/vnc.lua
 
-test-shadow: $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
+test-shadow: $(ROM) $(BUILD)/test/shadow.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/shadow.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/shadow.lua
 
 # One script for the Mesen Script Window that starts BOTH the host keyboard and
 # the gateway link, since the Script Window runs only one at a time.

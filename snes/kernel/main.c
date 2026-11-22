@@ -16,6 +16,9 @@
 #define R8(a) (*(volatile uint8_t *)(a))
 
 static void hw_init(void) {
+#ifdef SA1
+  sa1_hold(); /* before NMI and before anything touches BW-RAM */
+#endif
   /* FastROM. Reset always begins slow with PB=$00 (the $00:8000 mirror), so
    * this is the first thing worth doing — the linker puts our code in $C0+,
    * which is exactly the window MEMSEL accelerates. Measured ~14% in snesmac

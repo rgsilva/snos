@@ -115,7 +115,8 @@ snos_exec_state:
 ;;; The shell has already pinned scheduling and killed the background jobs.
 ;;; NMI stays off until main has cleared the fixed exec/scheduler words; SEI
 ;;; alone cannot protect the runtime's stack/DP/DB replacement from NMI.
-;;; SRAM is outside the runtime's RAM sections and is mounted normally.
+;;; SRAM is outside the runtime's RAM sections and is mounted normally. On
+;;; SA-1, main's sa1_hold() writes the chip's registers again.
               .public snos_restart
               .extern __program_start
 snos_restart:
@@ -124,5 +125,9 @@ snos_restart:
               lda     #0
               sta     long:0x004200        ; NMI, IRQ and auto-joypad off
               sta     long:0x00420c        ; stop HDMA before reinitialising PPU
+#ifdef SA1
+              lda     #0x20
+              sta     long:0x002200        ; CCNT: SA-1 in reset before anything
+#endif
               lda     long:0x004210        ; acknowledge the old vblank
               jmp     long:__program_start
