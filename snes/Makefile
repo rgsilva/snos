@@ -146,7 +146,7 @@ $(BUILD)/%.o: $(K)/uip/%.c $(KERNEL_H) $(wildcard $(K)/uip/*.h) | $(BUILD)
 $(BUILD)/%.o: $(K)/%.s | $(BUILD)
 	$(AS) -o $@ $< $(AFLAGS)
 
-$(BUILD)/header.o: calypsi/header.s | $(BUILD)
+$(BUILD)/header.o: calypsi/header.s calypsi/traps.inc | $(BUILD)
 	$(AS) -o $@ $< $(AFLAGS)
 
 # The console fonts, baked at build time so con_init DMAs them from ROM
