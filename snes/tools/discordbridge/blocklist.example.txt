@@ -1,0 +1,4 @@
+# uma palavra ou frase por linha; sem diferenca de maiusculas; vale para texto e nome
+# copie para blocklist.txt
+palavrao1
+frase proibida
