@@ -10,7 +10,7 @@
               .section code, root
               .public check_iram, check_start, check_vc, check_signal, check_arith
               .public check_bwram, check_rom, check_cc, rom_mark
-              .extern ln_begin, ln_char, ln_str, ln_col, ln_hex2, ln_hex4, ln_hex6
+              .extern ln_begin, ln_char, ln_str, ln_col, ln_hex1, ln_hex2, ln_hex4, ln_hex6
               .extern ln_dec, ln_status, ln_end, ln_yn, udiv32, wait_vblank
               .extern wait_eq, wait_ne, sa1_cmd, dma_vram
               .extern sa1_reset, sa1_nmi, sa1_irq, s_irq_alt
@@ -437,10 +437,7 @@ sp_msg$:      lda     ##0x20
               jsr     ln_char
               pla
               and     ##0x0f
-              tax
-              lda     abs:hexdig1,x
-              and     ##0xff
-              jmp     ln_char
+              jmp     ln_hex1
 
 ;;; ================================================== 3. arithmetic unit
 ;;; The SA-1 runs arith_tbl (16-byte records, see tools/mkassets.py) and
@@ -1432,7 +1429,6 @@ rom_probes_sa1:
 win_blocks:   .byte   0, 1, 31
 win_bits:     .byte   1, 2, 4
 
-hexdig1:      .ascii  "0123456789ABCDEF"
 nm_iram:      .asciz  "iram"
 nm_iramwp:    .asciz  "iramwp"
 nm_start:     .asciz  "start"

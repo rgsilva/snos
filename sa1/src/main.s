@@ -159,7 +159,7 @@ vd_next$:     lda     ##1                     ; transcript only once
               stz     dp:V_PAGE
               rts
 
-;;; A (or any button but the D-pad) shows the next page.
+;;; A, B, X, Y, L or R shows the next page.
 page_loop:
               sep     #0x20
               lda     #0x01                   ; auto-joypad, still no NMI

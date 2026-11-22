@@ -311,7 +311,7 @@ rs_out$:      sep     #0x20
 fast_a:       jsr     bench_a
               rtl
 
-;;; "a:F     OK   3290     x1.3": bench_a on the S-CPU in FastROM. SNOS runs
+;;; "a:F     OK   3263     x1.2": bench_a on the S-CPU in FastROM. SNOS runs
 ;;; FastROM today; fullsnes doubts it is usable on an SA-1 cart.
 fast_line:
               sep     #0x20

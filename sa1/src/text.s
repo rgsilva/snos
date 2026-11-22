@@ -12,7 +12,7 @@ STATUS_COL    .equ    8
 VALUE_COL     .equ    13
 
               .section code, root
-              .public ln_begin, ln_char, ln_str, ln_col, ln_hex2, ln_hex4, ln_hex6
+              .public ln_begin, ln_char, ln_str, ln_col, ln_hex1, ln_hex2, ln_hex4, ln_hex6
               .public ln_dec, ln_ratio, ln_status, ln_end, ln_yn
               .public udiv32, wait_vblank, scr_flush, mb_init
               .public STATUS_OK, STATUS_FAIL, STATUS_INFO
@@ -85,10 +85,10 @@ ln_hex2:
               lsr     a
               lsr     a
               lsr     a
-              jsr     ln_nib
+              jsr     ln_hex1
               pla
               and     ##0x0f
-ln_nib:
+ln_hex1:                                      ; A = one nibble
               tax
               lda     abs:hexdig,x
               and     ##0xff
