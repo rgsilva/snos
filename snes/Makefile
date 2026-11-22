@@ -89,6 +89,8 @@ ROM_NAME := snos
 # builds into build-sa1/ (build-hw-sa1/ with LINK_HW=1) as snos-sa1.sfc: Mesen
 # names the battery save after the ROM file, so the SA-1 tests delete
 # snos-sa1.srm and never the stock image's snos.srm, nor the other way round.
+# SRAM_KB is the volume's size for the tests: 32 SRAM windows of 8 KB here.
+SRAM_KB := 256
 ifdef SA1
 CFLAGS += -DSA1=1
 AFLAGS += -DSA1=1
@@ -97,6 +99,7 @@ LINKER := calypsi/linker-sa1.scm
 HEADER := calypsi/header-sa1.s
 ROM_NAME := snos-sa1
 SFC_FLAGS := --sa1
+SRAM_KB := $(shell sed -n 's/^.define SA1_FS_KB \([0-9]*\)u.*/\1/p' $(K)/sram.h)
 SRM_NAME := $(notdir $(lastword $(MESEN_SRM)))
 ifeq ($(SRM_NAME),snos.srm)
 override MESEN_SRM := $(subst /snos.srm,/snos-sa1.srm,$(MESEN_SRM))
@@ -132,13 +135,15 @@ $(BUILD):
 #
 # test/hwport.lua judges the foreground poll's vblank margin against the gate
 # the ROM actually has, so link_serial.c's two last-moment lines are spliced
-# in too (@XFER_LAST@, @XFER_LAST_HDMA@).
+# in too (@XFER_LAST@, @XFER_LAST_HDMA@), and the volume's size in KB
+# (@SRAM_KB@), which differs on the SA-1 image.
 XFER_LAST := $(shell sed -n 's/^.define XFER_LAST \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
 XFER_LAST_HDMA := $(shell sed -n 's/^.define XFER_LAST_HDMA \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
 $(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua test/hwport.lua tools/mktest.py \
-                     $(K)/link_serial.c | $(BUILD)
+                     $(K)/link_serial.c $(K)/sram.h | $(BUILD)
 	python3 tools/mktest.py $< test/lib.lua $@.tmp
-	sed 's/@XFER_LAST@/$(XFER_LAST)/; s/@XFER_LAST_HDMA@/$(XFER_LAST_HDMA)/' $@.tmp > $@
+	sed 's/@XFER_LAST@/$(XFER_LAST)/; s/@XFER_LAST_HDMA@/$(XFER_LAST_HDMA)/; s/@SRAM_KB@/$(SRAM_KB)/g' \
+	  $@.tmp > $@
 	rm -f $@.tmp
 
 # Every object depends on every kernel header. Coarse, but the kernel is a

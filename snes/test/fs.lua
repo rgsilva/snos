@@ -4,6 +4,9 @@
 -- has to survive a reset, because that is the whole difference between the SRAM
 -- volume and a RAM disk, and it is what makes BASIC's SAVE worth anything.
 local L = dofile("test/lib.lua")
+-- The volume's size in KB, spliced in by the Makefile: 256 (SRAM), or the
+-- SA-1 image's filesystem share of BW-RAM.
+local SRAM_KB = tonumber("@SRAM_KB@")
 
 local frame = 0
 local step = 1
@@ -87,8 +90,8 @@ emu.addEventCallback(function()
   r.check(L.status() ~= L.STATUS_PANIC, "kernel panicked")
   r.check(reset_done, "test never reset the console")
 
-  r.check(text:find("SRAMKB 00000100", 1, true) ~= nil,
-          "cart SRAM is not 256 KB - the SRAMFS sizing assumption is wrong")
+  r.check(text:find(string.format("SRAMKB %08x", SRAM_KB), 1, true) ~= nil,
+          "cart SRAM is not " .. SRAM_KB .. " KB - the SRAMFS sizing assumption is wrong")
   r.check(text:find("README.TXT", 1, true) ~= nil, "ROMFS not mounted")
   r.check(text:find("rom", 1, true) ~= nil, "ROM files not flagged read-only")
   r.check(text:find("Performance does not matter", 1, true) ~= nil,

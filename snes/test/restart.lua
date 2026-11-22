@@ -3,6 +3,7 @@
 -- cannot prove that a second boot happened. No emu.reset() is used here.
 local L = dofile("test/lib.lua")
 local G = dofile("test/gwip.lua")
+local SRAM_KB = tonumber("@SRAM_KB@") -- spliced by the Makefile, as in fs.lua
 
 local r = L.new_report("restart")
 local frame, step, at = 0, 1, 240
@@ -69,7 +70,7 @@ emu.addEventCallback(function()
 
   if step == 1 then
     boot_text, boot_screen = L.ring_text(), L.screen_text_plain(8)
-    r.check(contains("v0.1") and contains("256K SRAM") and
+    r.check(contains("v0.1") and contains(SRAM_KB .. "K SRAM") and
             contains("type 'help' for commands"), "initial boot incomplete")
     gw = G.new{}
     gw:claim()
