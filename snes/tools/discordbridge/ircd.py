@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
+
+from core import MAX_IRC_LINE, Directory, irc_topic
 
 log = logging.getLogger("discordbridge")
 
@@ -13,10 +15,28 @@ PRINTABLE = re.compile(r"^[\x20-\x7e]*$")
 MAX_WIRE = 510
 RX_CAP = 4096
 CHAN_RE = re.compile(r"^[#&][\x21-\x2b\x2d-\x7e]{1,23}$")  # irc.c tab names: 24 chars
+LIST_TOPIC = 40
 
 
 def valid_channel(name: str) -> bool:
     return bool(CHAN_RE.match(name))
+
+
+def shown(s: str, n: int = 24) -> str:
+    return s[:n] if PRINTABLE.match(s) else "?"
+
+
+def split_names(head: str, names: list[str], limit: int = MAX_IRC_LINE) -> list[str]:
+    """353 lines: `head` plus as many names as fit under `limit` bytes; at least one per line."""
+    lines: list[str] = []
+    cur = ""
+    for n in names:
+        if cur and len(head) + len(cur) + 1 + len(n) >= limit:
+            lines.append(head + cur)
+            cur = ""
+        cur = f"{cur} {n}" if cur else n
+    lines.append(head + cur)
+    return lines
 
 
 class Conn:
@@ -25,31 +45,29 @@ class Conn:
         self.nick: Optional[str] = None
         self.user: Optional[str] = None
         self.registered = False
-        self.joined = False
+        self.joined: dict[int, str] = {}  # channel id -> the IRC name it was joined by
         self.closed = False
 
 
 class IrcServer:
     def __init__(
         self,
-        channel: str,
+        directory: Directory,
         *,
+        names: Callable[[int, str], list[str]] = lambda cid, nick: [nick],
+        count: Callable[[int], int] = lambda cid: 0,
         server_name: str = "discordbridge.local",
-        topic: str = "Discord bridge",
-        fake_nick: str = "discord",
-        on_message: Callable[[str, str, bool], None] = lambda nick, text, action: None,
+        on_message: Callable[[int, str, str, bool], None] = lambda cid, nick, text, action: None,
         on_nick: Callable[[str], None] = lambda nick: None,
-        on_ready: Callable[[bool, str], None] = lambda ready, nick: None,
+        on_joined: Callable[[frozenset[int], str], None] = lambda ids, nick: None,
         on_connection: Callable[[bool, str], None] = lambda up, addr: None,
         idle_ping: float = 90.0,
         idle_dead: float = 60.0,
     ):
-        self.channel = channel
+        self.directory, self.names, self.count = directory, names, count
         self.server_name = server_name
-        self.topic = topic
-        self.fake_nick = fake_nick
         self.on_message, self.on_nick = on_message, on_nick
-        self.on_ready, self.on_connection = on_ready, on_connection
+        self.on_joined, self.on_connection = on_joined, on_connection
         self.idle_ping, self.idle_dead = idle_ping, idle_dead
         self.conn: Optional[Conn] = None
         self._server: Optional[asyncio.Server] = None
@@ -93,13 +111,39 @@ class IrcServer:
     def _srv(self, c: Conn, code: str, rest: str) -> None:
         self._write(c, f":{self.server_name} {code} {c.nick or '*'} {rest}")
 
-    def send_chat(self, nick: str, line: str) -> bool:
-        """Write a ready-made line to the console if it is in the channel."""
+    def send_chat(self, channel_id: int, line: str) -> bool:
+        """Write a ready-made line to the console if it is in that channel."""
         c = self.conn
-        if not (c and self.ready):
+        if not (c and c.registered and channel_id in c.joined):
             return False
         self._write(c, line)
         return True
+
+    def held(self) -> dict[int, str]:
+        """Channel id -> IRC name, for the channels the console is in."""
+        return dict(self.conn.joined) if self.conn and not self.conn.closed else {}
+
+    def notice(self, text: str) -> None:
+        c = self.conn
+        if c and c.registered:
+            self._write(c, f":{self.server_name} NOTICE {c.nick} :{text[:300]}")
+
+    def kick(self, channel_id: int, reason: str) -> None:
+        """Take the console out of a channel that is gone."""
+        c = self.conn
+        if c and channel_id in c.joined:
+            name = c.joined.pop(channel_id)
+            self._write(c, f":{self.server_name} KICK {name} {c.nick} :{reason[:200]}")
+            self._joined_changed(c)
+
+    def push_names(self, channel_id: int) -> None:
+        """An unsolicited 353 ... 366 for a channel the console is in."""
+        c = self.conn
+        if c and channel_id in c.joined:
+            self._send_names(c, channel_id)
+
+    def _joined_changed(self, c: Conn) -> None:
+        self.on_joined(frozenset(c.joined), c.nick or "")
 
     def _drop(self, c: Conn, why: str) -> None:
         if c.closed:
@@ -112,7 +156,8 @@ class IrcServer:
             pass
         if self.conn is c:
             self.conn = None
-            self.on_ready(False, c.nick or "")
+            c.joined.clear()
+            self.on_joined(frozenset(), c.nick or "")
             self.on_connection(False, c.addr)
 
     # ------------------------------------------------------------------ read
@@ -205,7 +250,7 @@ class IrcServer:
         return out
 
     def _taken(self, nick: str) -> bool:
-        return nick.lower() == self.fake_nick.lower()
+        return nick.lower() == "discord"
 
     def _c_PASS(self, c: Conn, p: list[str]) -> None:
         pass
@@ -253,7 +298,11 @@ class IrcServer:
         c.registered = True
         self._srv(c, "001", f":Welcome to the Discord bridge, {c.nick}")
         self._srv(c, "375", f":- {self.server_name} -")
-        self._srv(c, "372", f":- bridging {self.channel} to Discord")
+        default = self.directory.default_name()
+        if default:
+            self._srv(c, "372", f":- Default channel: {default}")
+        self._srv(c, "372", ":- /raw LIST shows all the channels")
+        self._srv(c, "372", ":- /join #name enters one")
         self._srv(c, "376", ":End of MOTD command")
         self.on_nick(c.nick)
 
@@ -269,12 +318,19 @@ class IrcServer:
     def _c_QUIT(self, c: Conn, p: list[str]) -> None:
         self._drop(c, "Quit")
 
-    def _is_chan(self, name: str) -> bool:
-        return name.lower() == self.channel.lower()
+    def _chan(self, c: Conn, name: str) -> Optional[int]:
+        """The channel id for a name, or None after sending 403."""
+        cid = self.directory.id_of(name)
+        if cid is None:
+            self._srv(c, "403", f"{shown(name)} :No such channel")
+        return cid
 
-    def _names(self, c: Conn) -> None:
-        self._srv(c, "353", f"= {self.channel} :{c.nick} {self.fake_nick}")
-        self._srv(c, "366", f"{self.channel} :End of NAMES list")
+    def _send_names(self, c: Conn, cid: int) -> None:
+        chan = c.joined[cid]
+        head = f":{self.server_name} 353 {c.nick} = {chan} :"
+        for line in split_names(head, self.names(cid, c.nick or "")):
+            self._write(c, line)
+        self._srv(c, "366", f"{chan} :End of NAMES list")
 
     def _c_JOIN(self, c: Conn, p: list[str]) -> None:
         if not p:
@@ -283,54 +339,60 @@ class IrcServer:
         for name in p[0].split(","):
             if not name or name == "0":
                 continue
-            if not self._is_chan(name):
-                shown = name[:24] if PRINTABLE.match(name) else "?"
-                self._srv(c, "403", f"{shown} :No such channel")
+            cid = self._chan(c, name)
+            if cid is None or cid in c.joined:
                 continue
-            if c.joined:
-                continue
-            c.joined = True
-            self._write(c, f":{c.nick}!{c.user}@console JOIN {self.channel}")
-            if self.topic:
-                self._srv(c, "332", f"{self.channel} :{self.topic}")
-            self._names(c)
-            log.info("console %s (%s) joined %s", c.addr, c.nick, self.channel)
-            self.on_ready(True, c.nick or "")
+            chan = self.directory.name_of(cid) or name
+            c.joined[cid] = chan
+            self._write(c, f":{c.nick}!{c.user}@console JOIN {chan}")
+            self._srv(c, "332", f"{chan} :{irc_topic(self.directory.chans[cid])}")
+            self._send_names(c, cid)
+            log.info("console %s (%s) joined %s", c.addr, c.nick, chan)
+            self._joined_changed(c)
 
     def _c_PART(self, c: Conn, p: list[str]) -> None:
         if not p:
             self._srv(c, "461", "PART :Not enough parameters")
             return
         for name in p[0].split(","):
-            if not self._is_chan(name):
-                shown = name[:24] if PRINTABLE.match(name) else "?"
-                self._srv(c, "403", f"{shown} :No such channel")
-            elif not c.joined:
-                self._srv(c, "442", f"{self.channel} :You're not on that channel")
-            else:
-                c.joined = False
-                self._write(c, f":{c.nick}!{c.user}@console PART {self.channel}")
-                self.on_ready(False, c.nick or "")
+            cid = self._chan(c, name)
+            if cid is None:
+                continue
+            if cid not in c.joined:
+                self._srv(c, "442", f"{self.directory.name_of(cid)} :You're not on that channel")
+                continue
+            chan = c.joined.pop(cid)
+            self._write(c, f":{c.nick}!{c.user}@console PART {chan}")
+            self._joined_changed(c)
 
     def _c_NAMES(self, c: Conn, p: list[str]) -> None:
-        if c.joined and (not p or self._is_chan(p[0].split(",")[0])):
-            self._names(c)
+        cid = self.directory.id_of(p[0].split(",")[0]) if p else None
+        if cid is not None and cid in c.joined:
+            self._send_names(c, cid)
         else:
             self._srv(c, "366", "* :End of NAMES list")
 
     def _c_TOPIC(self, c: Conn, p: list[str]) -> None:
-        if not p or not self._is_chan(p[0]):
-            self._srv(c, "403", f"{(p[0][:24] if p and PRINTABLE.match(p[0]) else '?')} :No such channel")
+        cid = self._chan(c, p[0]) if p else None
+        if not p:
+            self._srv(c, "461", "TOPIC :Not enough parameters")
+        elif cid is None:
+            return
         elif len(p) > 1:
-            self._srv(c, "482", f"{self.channel} :You're not channel operator")
+            self._srv(c, "482", f"{self.directory.name_of(cid)} :You're not channel operator")
         else:
-            self._srv(c, "332", f"{self.channel} :{self.topic}")
+            self._srv(c, "332", f"{self.directory.name_of(cid)} :{irc_topic(self.directory.chans[cid])}")
 
     def _c_MODE(self, c: Conn, p: list[str]) -> None:
-        if len(p) == 1 and self._is_chan(p[0]):
-            self._srv(c, "324", f"{self.channel} +nt")
-        elif len(p) == 2 and self._is_chan(p[0]) and p[1] in ("b", "+b"):
-            self._srv(c, "368", f"{self.channel} :End of channel ban list")
+        if p and p[0][:1] in "#&":
+            cid = self._chan(c, p[0])
+            if cid is None:
+                return
+            name = self.directory.name_of(cid)
+            if len(p) == 1:
+                self._srv(c, "324", f"{name} +nt")
+            elif len(p) == 2 and p[1] in ("b", "+b"):
+                self._srv(c, "368", f"{name} :End of channel ban list")
         elif len(p) == 1 and c.nick and p[0].lower() == c.nick.lower():
             self._srv(c, "221", "+")
 
@@ -347,6 +409,15 @@ class IrcServer:
         self._srv(c, "303", ":")
 
     def _c_LIST(self, c: Conn, p: list[str]) -> None:
+        # irc.c prints only the text after the last ':' of a numeric, so the
+        # name and the count go in the text too; no 321 header (it would be noise).
+        only = {x.lower() for x in p[0].split(",")} if p and p[0] else None
+        for name, ch in self.directory.listing():
+            if only is not None and name.lower() not in only:
+                continue
+            n = self.count(ch.id)
+            topic = irc_topic(ch)[:LIST_TOPIC]
+            self._srv(c, "322", f"{name} {n} :{name} ({n}) {topic}")
         self._srv(c, "323", ":End of LIST")
 
     def _c_MOTD(self, c: Conn, p: list[str]) -> None:
@@ -366,11 +437,14 @@ class IrcServer:
             self._srv(c, "412", ":No text to send")
             return
         target, text = p[0], p[1]
-        if not self._is_chan(target):
+        if target[:1] not in ("#", "&"):
             self._write(c, f":{self.server_name} NOTICE {c.nick} :private messages are not bridged")
             return
-        if not c.joined:
-            self._srv(c, "404", f"{self.channel} :Cannot send to channel")
+        cid = self._chan(c, target)
+        if cid is None:
+            return
+        if cid not in c.joined:
+            self._srv(c, "404", f"{self.directory.name_of(cid)} :Cannot send to channel")
             return
         action = False
         if text.startswith("\x01"):
@@ -380,4 +454,4 @@ class IrcServer:
             else:
                 return  # other CTCP is not bridged
         if text:
-            self.on_message(c.nick or "", text, action)
+            self.on_message(cid, c.nick or "", text, action)

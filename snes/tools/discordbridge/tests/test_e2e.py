@@ -6,70 +6,12 @@ import re
 import tempfile
 import unittest
 
+from _console import Console
 from core import DiscordMsg
 from discordbridge import Bridge, Settings
+from fakeguild import FakeGuild
 
 CHAN = "#palestra"
-
-
-class Console:
-    """Scripted irc.c. Each helper names the lines of irc.c it mirrors."""
-
-    def __init__(self, port):
-        self.port = port
-        self.buf = b""
-
-    async def connect(self):
-        self.r, self.w = await asyncio.open_connection("127.0.0.1", self.port)
-        return self
-
-    def send(self, s):
-        self.w.write(s.encode("latin-1"))
-
-    async def register(self, nick="snes", order="nick-first", split=False):
-        # irc.c:1235-1236: sendv("NICK ", nick) then sendv("USER ", nick, " 0 * :SNOS IRC"),
-        # each through sendv() (irc.c:554-562) which appends "\r\n".
-        nick_l, user_l = f"NICK {nick}\r\n", f"USER {nick} 0 * :SNOS IRC\r\n"
-        data = (nick_l + user_l) if order == "nick-first" else (user_l + nick_l)
-        if split:
-            for i in range(0, len(data), 5):
-                self.send(data[i:i + 5])
-                await self.w.drain()
-                await asyncio.sleep(0.005)
-        else:
-            self.send(data)
-        lines = await self.until(lambda l: " 376 " in l)
-        assert " 001 " in lines[0], lines
-        return lines
-
-    async def join(self):
-        # irc.c:596, on 001: sendv("JOIN ", autojoin)
-        self.send(f"JOIN {CHAN}\r\n")
-        return await self.until(lambda l: " 366 " in l)
-
-    async def line(self, timeout=2.0):
-        while b"\n" not in self.buf:
-            d = await asyncio.wait_for(self.r.read(1024), timeout)
-            if not d:
-                raise EOFError
-            self.buf += d
-        raw, self.buf = self.buf.split(b"\n", 1)
-        assert raw.endswith(b"\r"), raw
-        raw = raw[:-1]
-        assert re.fullmatch(rb"[\x20-\x7e]*", raw), raw
-        assert len(raw) <= 510
-        return raw.decode("ascii")
-
-    async def until(self, pred, timeout=2.0):
-        seen = []
-        while True:
-            l = await self.line(timeout)
-            seen.append(l)
-            if pred(l):
-                return seen
-
-    async def close(self):
-        self.w.close()
 
 
 class E2E(unittest.IsolatedAsyncioTestCase):
@@ -78,13 +20,15 @@ class E2E(unittest.IsolatedAsyncioTestCase):
         self.mute = os.path.join(self.tmp.name, "MUTE")
         self.posts = []
 
-        async def post(t):
+        async def post(cid, t):
             self.posts.append(t)
 
         s = Settings(channel_id=7, irc_channel=CHAN, bind="127.0.0.1", port=0, interval=0.05,
                      mute_file=self.mute, blocklist=os.path.join(self.tmp.name, "none.txt"))
+        self.guild = FakeGuild()
         self.bridge = Bridge(s, post)
         self.port = await self.bridge.start()
+        self.bridge.sync(self.guild.snapshot())
         self.bridge.ircd.idle_ping, self.bridge.ircd.idle_dead = 30, 30
         self.consoles = []
 
@@ -106,8 +50,12 @@ class E2E(unittest.IsolatedAsyncioTestCase):
         await c.join()
         return c
 
-    def discord(self, text, name="ana", **kw):
-        self.bridge.on_discord_message(DiscordMsg(7, name, text, **kw))
+    def discord(self, text, name="ana", chan=7, **kw):
+        new = self.guild.member_id(name) is None
+        mid = self.guild.member_id(name, create=True)
+        if new:
+            self.bridge.sync(self.guild.snapshot())
+        self.bridge.on_discord_message(DiscordMsg(chan, name, text, author_id=mid, **kw))
 
     async def settle(self, t=0.15):
         await asyncio.sleep(t)
@@ -134,7 +82,7 @@ class E2E(unittest.IsolatedAsyncioTestCase):
         # irc.c:736-754 needs the echo with our own nick as prefix, then 353 (names_reply, :566) and 366
         self.assertEqual(lines[0], f":snes!snes@console JOIN {CHAN}")
         self.assertTrue(lines[1].startswith(":discordbridge.local 332 snes #palestra :"))
-        self.assertEqual(lines[2], ":discordbridge.local 353 snes = #palestra :snes discord")
+        self.assertEqual(lines[2], ":discordbridge.local 353 snes = #palestra :snes Ana Bruno Carla JoaoSilva")
         self.assertEqual(lines[3], ":discordbridge.local 366 snes #palestra :End of NAMES list")
 
     async def test_join_other_channel_refused(self):
@@ -286,7 +234,7 @@ class E2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(l[-1].endswith(":voltou"))
 
     async def test_discord_failure_does_not_block_irc(self):
-        async def boom(t):
+        async def boom(cid, t):
             raise RuntimeError("429")
         self.bridge.post = boom
         c = await self.joined()
@@ -319,6 +267,7 @@ class E2E(unittest.IsolatedAsyncioTestCase):
 
 class WireGuard(unittest.TestCase):
     def test_non_ascii_never_written(self):
+        from core import Directory
         from ircd import IrcServer
 
         class W:
@@ -329,7 +278,7 @@ class WireGuard(unittest.TestCase):
         from ircd import Conn
         w = W()
         c = Conn(None, w, "x")
-        IrcServer("#a")._write(c, "PRIVMSG #a :caf\u00e9 \x03")
+        IrcServer(Directory())._write(c, "PRIVMSG #a :caf\u00e9 \x03")
         self.assertEqual(w.out, b"PRIVMSG #a :caf? ?\r\n")
 
 

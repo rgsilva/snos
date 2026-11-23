@@ -81,16 +81,18 @@ class RelayTests(unittest.TestCase):
     def make(self, **kw):
         self.clock = Clock()
         self.muted = False
-        cfg = RelayConfig(channel_id=7, **kw)
+        cfg = RelayConfig(**kw)
         r = Relay(cfg, self.clock, muted=lambda: self.muted)
         r.console_ready = True
+        r.joined = {7}
         return r
 
     def test_drop_reasons(self):
         r = self.make()
         self.assertEqual(r.from_discord(msg(is_bot=True)), "bot")
         self.assertEqual(r.from_discord(msg(is_self=True)), "bot")
-        self.assertEqual(r.from_discord(msg(channel_id=8)), "other channel")
+        self.assertEqual(r.from_discord(msg(channel_id=8)), "not joined")
+        self.assertEqual(r.dropped["not joined"], 1)
         self.assertEqual(r.from_discord(msg("\U0001F600")), "empty")
         self.assertIsNone(r.from_discord(msg("\U0001F600", images=1)))
         r.console_ready = False
@@ -102,7 +104,7 @@ class RelayTests(unittest.TestCase):
         r.from_discord(msg("olha", images=1, files=1))
         r.from_discord(msg("", stickers=1))
         r.from_discord(msg("", embeds=1))
-        self.assertEqual([t for _, t in r.queue], ["olha [imagem] [anexo]", "[figurinha]", "[link]"])
+        self.assertEqual([q[1] for q in r.queue], ["olha [imagem] [anexo]", "[figurinha]", "[link]"])
 
     def test_role(self):
         r = self.make(allow_role=5)
@@ -125,7 +127,7 @@ class RelayTests(unittest.TestCase):
         r = self.make(queue_size=3)
         for i in range(5):
             r.from_discord(msg(f"m{i}"))
-        self.assertEqual([t for _, t in r.queue], ["m2", "m3", "m4"])
+        self.assertEqual([q[1] for q in r.queue], ["m2", "m3", "m4"])
 
     def test_interval(self):
         r = self.make(interval=1.5)
