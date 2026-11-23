@@ -588,3 +588,155 @@ to `main`'s, every app identical across all four images and to `main`'s.
   stop after orange. If it boots, FastROM was not the cause.
 - `snes/build-hw-sa1-beacon/snos-sa1-beacon.sfc`: the control, should
   reach the prompt.
+
+## The cable on the cart (2026-11-23)
+
+The SlowROM image boots on the owner's sd2snes (firmware 1.11.0b1) and
+shows `192K SRAM`, but the Pico on port 2 never gets a frame: its `stats`
+show one 16-clock burst a frame (the auto-joypad read), `frames=0`, no
+512-clock exchange and no 8-clock kick since power-on, and the console's
+`net status` says "no link". The stock `LINK_HW` image on the same cart,
+cable and Pico links at once. Under Mesen with the adapter model the SA-1
+image links too. So on the cart `link_serial_xfer` is never reached.
+
+### Every way the cable can stay silent
+
+At the idle prompt with the link down, two callers move the probe counter
+(`probe_wait`, one probe every 60 calls): the NMI (`net_service` →
+`net_up` → `link_serial_present`) whenever the console owes no rows, and
+the foreground every frame (`kbd_idle` → `ip_service` → `net_up`). Two
+calls a frame means the 60th always falls in the same context: on the
+plain SA-1 image under Mesen every probe is the foreground's, at line 3
+(of the next frame); on stock at 259; an odd number of skipped NMIs (a
+row printed, a key typed) moves them to the other context. A refused
+probe waits another 60 calls and lands on the same line: the trap is
+real and deterministic. What it needs is a gate reading inside 116-228.
+
+| condition | under Mesen, idle, link down | can the cart differ? |
+|---|---|---|
+| `net_ready` 0 | set by `shell_run` before the prompt | no: no timing or hardware in it |
+| `con_dirty_pending()` at every NMI | 10-12% of NMIs skip (boot text, the diagnostic's repaints) | only with the foreground blocked too, which still probes every second; text that paints says rows land |
+| the WRAM backend (magic at `$7EE000`) | zeroed at boot, nothing writes it | then `net status` says "link up, no answer", not "no link" |
+| the gate refuses the probe | NMI probe at line 238 (diagnostic image), foreground at line 3: 9 and 112 lines inside the allowed zones | only if the cart ran the NMI's C 10 lines *faster* than Mesen, or the foreground 110 lines slower, or `beam_line` lies |
+| `beam_line` wrong | V reads 225 at NMI entry, gate and vblank flag agree | `$2137` latches only with `$4201` bit 7 set: nothing in SNOS writes `$4201`, the sd2snes menu leaves `$FF` (`snes/main.a65` `snes_init`), pin 6 is not in the cable; neither FPGA core decodes `$2137`/`$213C`/`$213D` (`address.v`) |
+| `pad_latch` after the auto-read | entered at 225.44, read over at ~228.4: 3 lines to spare | needs the NMI 3 lines late; the idle loop masks NMI only right after the NMI (`pad_pressed`, `ip_service`). A scratch build delaying every NMI by 4 lines does not silence the link: the machine hangs (each burnt guard is 334 lines at SlowROM, 273 at FastROM, longer than a frame, and the nested NMIs cascade) |
+| the sd2snes in-game hook | not modelled | ~0.25 line before our NMI, no pad wait (below); a scratch build with that delay links normally |
+| the SA-1 core's S-CPU bus timing | not modelled | 1.11.0 lacks "fix: SA-1 bus sampling" (`bea50dd`, 2026-04-27, released in v1.11.1): "too late ROMSEL sampling leading to setup violations for SNES CPU reads". It is what killed FastROM; how much margin SlowROM has on that core is unknown |
+
+None survives the analysis as a cause on its own. The one hardware-only
+actor left is the SA-1 core of firmware 1.11.0 itself, and no Mesen
+setting models it. The diagnostic below tells the candidates apart on a
+photo.
+
+### The sd2snes in-game hook (v1.11.0 sources)
+
+- Off by default: `src/cfg.c` `enable_ingame_hook = 0`; `enable_ingame_buttons
+  = 1`, `enable_hook_holdoff = 1` (hooks wait 10 s after reset). Menu:
+  *In-game Settings* → "In-game hook", " In-game buttons", " Initial
+  holdoff" (`snes/const.a65`, `snes/menudata.a65`). `src/cheat.c`
+  programs the FPGA from them on every game start, SA-1 included.
+- When on, the FPGA watches for the CPU's four stack pushes followed by the
+  `$00:FFEA` fetch and answers `$2A10` (`cheat.v`, `cpu_push_cnt == 4`,
+  `nmi_match_bits`). `snes/nmihook.a65` there, from FPGA block RAM at
+  `$2A00-$2BFF` (6-cycle region): `php; rep; pha; lda $4218` (the last
+  frame's pad 1, no `$4212` wait), `sta $2BF0`, a branch the FPGA fills
+  in. With buttons on, auto-read on (the FPGA snoops `$4200` bit 0:
+  `main.v` `snes_ajr`, set by our `$81`) and no combination held, it goes
+  straight to `nmi_exit` (or the WRAM cheats first, if any): `rep; pla;
+  plp; sta $2BFD` (unmaps itself), `jmp ($FFEA)`. About 40 CPU cycles,
+  0.2-0.3 line. The manual pad read (latch on `$4016`, 16 reads of
+  `$4016`) runs only if the FPGA saw auto-read off.
+- SA-1 core against base core: the same hook code; the SA-1 core's
+  `cheat.v` lacks the save-state and USB-exe branches and the IRQ hook.
+- Where the beam is (Mesen, SA-1 / stock): C entry 225.28 / 225.28,
+  `pad_latch` 225.44-228.95 / 225.42-228.79. The hook moves both entries
+  ~0.25 line later; the auto-read starts at 225.1-225.3 and ends ~228.4,
+  so `pad_latch` still finds it running, at either speed. It cannot burn.
+
+One more difference the cores have, harmless to the link: "Auto region
+patch" (`CFG_R213F_OVERRIDE`, on by default) on the SA-1 core keeps its
+`$213F` state in a 2-bit register against 4-bit one-hot states
+(`verilog/sd2snes_sa1/main.v`, `r213f_state`), so after the first read
+every `$213F` read is driven by the FPGA with a constant (`$45` on NTSC)
+over STAT78. SNOS reads `$213F` only to reset the counter read toggle,
+which the PPU still does.
+
+### The link diagnostic
+
+    make SA1=1 LINK_HW=1 LINKDIAG=1   # build-hw-sa1-linkdiag/snos-sa1-linkdiag.sfc
+    make LINK_HW=1 LINKDIAG=1         # build-hw-linkdiag/snos-linkdiag.sfc (stock)
+
+Boot it and wait; nothing to type. Nine rows from screen row 13 repaint
+about once a second (only the cells that changed), counters since power-on:
+
+    LINKDIAG sa1 slowrom  t 28        t: seconds shown
+    nmi 1680 net 1503 skip 177        NMIs; ran net_service; skipped, rows owed
+    be - rdy1 up0 pw7 clk 51          backend -/W/S; net_ready; up; probe_wait; exchanges clocked
+    prb n2 f49 ref 0 @0f              probes from the NMI / foreground; refused; last refused line+context
+    gate n238-238 f3-10 bl0           lines read at the gate, NMI / foreground; latch vs vblank-flag mismatches
+    in v225-225 h184-198 s81 fE3      NMI entry: V, H (dots), $4212, STAT78 after the latch
+    pad229-229 g12-13 n6-122 b0       V after pad_latch; its guard; NMI length in lines; guards burnt
+    ok 0 bad 0 rx 0                   replies that checksummed; net bad sums; frames received
+    hdr 00 00 00 00 00 00             last good reply: seq ack flags sum, first record bytes
+
+`kernel/linkdiag.c`; the NMI only stores (the entry sample, before
+`pad_latch`, is `kernel/ldentry.s`), the foreground formats. Cost under
+Mesen on the SA-1 image: `pad_latch` starts 0.6 line later (0.5 on
+stock), the gate 0.9 later, and the NMI ends 5.9 lines later with the
+link down, 10.3 with an exchange. Its repaints dirty rows, so they move
+the probe parity: the diagnostic image may link where the plain one does
+not, and that is itself an answer. Every other image is byte-identical
+with and without the change.
+
+`make LINK_HW=1 LINKDIAG=1 test-linkdiag` (also `SA1=1`, `LDIAG="adapter=false"`)
+prints the panel under Mesen. After 30 s:
+
+| | SA-1, adapter | SA-1, none | stock, adapter | stock, none |
+|---|---|---|---|---|
+| nmi / net / skip | 1680 / 1483 / 198 | 1680 / 1503 / 177 | 1680 / 1504 / 177 | 1680 / 1529 / 151 |
+| be, up, clk | S, 1, 1455 | -, 0, 51 | S, 1, 1480 | -, 0, 51 |
+| prb n / f, ref | 0 / 2, 0 | 2 / 49, 0 | 0 / 2, 0 | 49 / 2, 0 |
+| gate n / f, bl | 0-254 / 3-10, 0 | 238 / 3-10, 0 | 1-254 / 3-255, 0 | 236 / 3-255, 0 |
+| in v, h, s | 225, 184-197, 81 | 225, 184-198, 81 | 225, 172-185, 81 | 225, 172-184, 81 |
+| pad, g, n, b | 229, 12-13, 6-172, 0 | 229, 12-13, 6-122, 0 | 228-229, 15-17, 6-147, 0 | 228-229, 15-17, 6-104, 0 |
+| ok / bad / rx | 1454 / 0 / 1453 | 0 / 0 / 0 | 1479 / 0 / 1478 | 0 / 0 / 0 |
+
+How to read a photo against those:
+
+- `in v` not 225, or `bl` above 0: the beam latch lies on the cart.
+- `ref` above 0: the gate refused probes, at the line after `@`, in the
+  NMI (`n`) or the foreground (`f`); `gate` shows where they read.
+- `net` near 0 with `skip` near `nmi`: the console owes rows at every NMI.
+- `prb` both 0 while `net` grows: the probe never comes due.
+- `clk` growing while the Pico shows `frames=0`: the clocks start and do
+  not reach the Pico.
+- `g` up to 2000 or more, `b` above 0: `pad_latch` burnt its guard (a
+  late NMI). `n` far above the reference: a long NMI.
+- `h` some 60-110 dots above the reference: the in-game hook is running.
+- `f45` (constant) on the SA-1 image against a changing byte on stock: the
+  SA-1 core's region patch (harmless, above).
+- `be W`: the mailbox backend; `rdy0`: the network never initialised.
+
+### For the cart
+
+Photograph the panel of `snos-sa1-linkdiag.sfc` after about 30 seconds,
+with the Pico's `stats` line at the same moment; then the same for
+`snos-linkdiag.sfc`. The difference between the two photos is the answer.
+Delete any `*-linkdiag.srm` first.
+
+Without a new ROM, on the plain `snos-sa1.sfc`, watching `frames=` in the
+Pico's `stats` (rising ~60 a second and `kbd=` draining means linked):
+
+1. *In-game Settings* → "In-game hook" Off (if it was on). Links: the hook
+   was it, against the analysis above.
+2. *In-game Settings* → "Auto region patch" Off. Links: the FPGA's drive
+   on `$213F` matters after all.
+3. *In-game Settings* → "Reset patch for clock phase" Off, and
+   "1CHIP transient fixes" Off. Links: one of the reset-loop or `$2100`
+   patches.
+4. Firmware v1.11.1 or later (the SA-1 bus-sampling fix and the SA-1
+   speed fix). Links: the 1.11.0 SA-1 core's S-CPU timing; then
+   `snos-sa1-beacon-fastrom.sfc` is worth one more try.
+
+Still `frames=0` and `clocks=16` after all four: only the diagnostic's
+photo can say more.
