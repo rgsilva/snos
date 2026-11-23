@@ -151,7 +151,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel test-sa1 clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel test-sa1 test-beacon clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -388,6 +388,9 @@ test: test-host test-boot test-input test-history test-shell test-shadow test-ap
 ifdef SA1
 test: test-sa1
 endif
+ifdef BEACON
+test: test-beacon
+endif
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -572,6 +575,18 @@ test-sa1: $(ROM) $(BUILD)/test/sa1.lua $(BUILD)/test/sa1persist.lua
 	rm -f "$(MESEN_SRM)"
 	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/sa1.lua
 	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/sa1persist.lua
+
+# The beacon image's checkpoints in order, read off its CGRAM writes, then
+# the shell prompt. `make SA1=1 BEACON=1 test-beacon`, with or without
+# LINK_HW=1 and BEACON_SAFE=1. beacon_far's address comes from the map.
+test-beacon: $(ROM) $(BUILD)/test/beacon.lua
+	$(call check_env)
+	@test -n "$(BEACON)" || { echo "test-beacon needs SA1=1 BEACON=1"; exit 1; }
+	far=$$(sed -n 's/^ *beacon_far = \([0-9a-f]*\)$$/\1/p' $(BUILD)/snos.map) && \
+	  test -n "$$far" && \
+	sed "s/@BEACON_FAR@/0x$$far/; s/@BEACON_SAFE@/$(if $(BEACON_SAFE),true,false)/" \
+	  $(BUILD)/test/beacon.lua > $(BUILD)/test/beacon-run.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/beacon-run.lua
 
 test-irc: $(ROM) $(BUILD)/test/irc.lua
 	$(call check_env)
