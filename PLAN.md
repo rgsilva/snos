@@ -421,7 +421,7 @@ existing kill switch or keyboard break before the shell accepts `restart`.
 file persistence, job removal and a fresh TCP session.
 
 **4. Text mode — the 64-column font is hard to read on a CRT. ✅ (the
-mechanism; irc and edit still run at 64)** Add a `mode`
+mechanism; edit still runs at 64)** Add a `mode`
 command and make the DEFAULT bigger. Mode 5's 64×28 is the hardware ceiling,
 not a requirement; a 32-column mode at double width (or Mode 1 with 8×8 tiles
 at 32×28) is legible across a room, which is what a talk needs. The console
@@ -439,7 +439,7 @@ switches at runtime; a width change clears the screen. The hardware ROM boots
 At 32 a vblank moves 8 rows instead of 4 (measured). The keyboard panel has
 a 32-column layout with the controller hints in its frame; `help`, `mem`,
 `apps`, `net status` and the boot lines fit 31 columns. App header flag bit 0
-(`APP_MODE_irc`/`APP_MODE_edit := 64`) makes the kernel switch to 64 while
+(`APP_MODE_edit := 64`; irc had it until its own 32-column layout) makes the kernel switch to 64 while
 such an app holds the screen — launched, or brought back by `fg` — and
 restore the shell's mode however it ends; background launches are allowed,
 since a background job has no screen until `fg`. Fixed on the way: an app
@@ -453,8 +453,9 @@ so each row landed in active display and was retried forever. The panel's
 dirty mask now counts for `con_dirty_pending`, bounded at six rows; `make
 LINK_HW=1 test-hwpanel` opens and moves the keyboard during a speedtest.
 
-Left: native 32-column layouts for `irc` and `edit` (both re-read
-`SYS_SCREEN` already, but lay out for 64), and the CRT's verdict on
+`irc` has its own 32-column layout (user strip, wrapped rows; `test-irc32`).
+Left: a native 32-column layout for `edit` (it re-reads
+`SYS_SCREEN` already, but lays out for 64), and the CRT's verdict on
 legibility, the colours, and whether rows 0 and 27 survive overscan.
 
 **5. `net speedtest` — measure the link, both ways, then both at once. ✅**
