@@ -61,18 +61,24 @@ class DiscordSide:
             return None  # not cached right now; keep what the bridge has
         complete = self.members_ok and guild.chunked
         chans = []
+        blocked: dict[int, str] = {}  # why a channel that exists cannot be bridged
+        other = guild.get_channel(self.s.channel_id) if self.s.channel_id else None
+        if other is not None and other not in guild.text_channels:
+            blocked[other.id] = "type"  # voice, forum, category
         for ch in guild.text_channels:  # not voice, forum, category or threads
             if ch.is_news():
+                blocked[ch.id] = "type"
                 continue
             if self.s.allow_channels and ch.id not in self.s.allow_channels:
                 continue
             p = ch.permissions_for(guild.me)
             if not (p.view_channel and p.send_messages):
+                blocked[ch.id] = "send" if p.view_channel else "view"
                 continue
             viewers = frozenset(m.id for m in ch.members if not m.bot) if complete else frozenset()
             chans.append(ChannelInfo(ch.id, ch.name, ch.topic or "", viewers))
         members = {m.id: m.display_name for m in guild.members if not m.bot} if complete else {}
-        return Snapshot(chans, members, complete)
+        return Snapshot(chans, members, complete, blocked)
 
     def _touch(self, guild: Optional[discord.Guild]) -> None:
         """Something that can change the channels or the names happened; snapshot soon."""
@@ -102,10 +108,15 @@ class DiscordSide:
     # ---- events
     async def on_ready(self) -> None:
         ch = self.client.get_channel(self.s.channel_id)
-        if ch is None:
-            log.warning("Discord ready, but channel %s is not visible to the bot", self.s.channel_id)
+        if ch is not None:
+            guild = ch.guild
+        elif len(self.client.guilds) == 1:  # a channel hidden from the bot is not sent at all
+            guild = self.client.guilds[0]
+        else:
+            log.warning("Discord ready, but channel %s is not visible to the bot and the bot is in %d servers; "
+                        "the bot needs View Channel, Send Messages and Read Message History on it",
+                        self.s.channel_id, len(self.client.guilds))
             return
-        guild = ch.guild
         self.guild_id = guild.id
         if self.members_ok and not guild.chunked:
             try:

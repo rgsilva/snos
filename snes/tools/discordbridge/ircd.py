@@ -301,6 +301,8 @@ class IrcServer:
         default = self.directory.default_name()
         if default:
             self._srv(c, "372", f":- Default channel: {default}")
+        else:
+            self._srv(c, "372", ":- No default channel (the bot cannot use it)")
         self._srv(c, "372", ":- /raw LIST shows all the channels")
         self._srv(c, "372", ":- /join #name enters one")
         self._srv(c, "376", ":End of MOTD command")

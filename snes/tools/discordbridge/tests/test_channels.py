@@ -1,6 +1,7 @@
 """Many channels and the names list, end to end on localhost with the fake guild."""
 import _setup  # noqa
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -208,6 +209,65 @@ class Channels(Base):
             await c.close()
         finally:
             await b.stop()
+
+
+class DefaultChannel(Base):
+    def lines(self, cm):
+        return [r.getMessage() for r in cm.records]
+
+    async def test_hidden_at_start_then_visible(self):
+        s = Settings(channel_id=7, irc_channel="#palestra", bind="127.0.0.1", port=0,
+                     blocklist=os.path.join(self.tmp.name, "none.txt"))
+        b = Bridge(s, lambda *a: None)
+        port = await b.start()
+        try:
+            self.guild.command("/lock palestra")
+            with self.assertLogs("discordbridge", "WARNING") as cm:
+                b.sync(self.guild.snapshot())
+            self.assertEqual(len(cm.records), 1)
+            line = cm.records[0].getMessage()
+            self.assertIn("default channel 7 cannot be bridged: the bot cannot view it", line)
+            self.assertIn("View Channel, Send Messages and Read Message History", line)
+            self.assertIn("add the bot or its role", line)
+            c = await Console(port).connect()
+            motd = [l for l in await c.register() if " 372 " in l]
+            self.assertFalse(any("Default channel" in l for l in motd))
+            self.assertTrue(any("No default channel" in l for l in motd))
+            for l in motd:
+                self.assertLessEqual(len(l.split(" :", 1)[1]), 60)
+            await c.close()
+            with self.assertLogs("discordbridge", "INFO") as cm:  # nothing new: no repeat
+                logging.getLogger("discordbridge").info("marker")
+                self.guild.command("/newchan extra")
+                b.sync(self.guild.snapshot())
+                b.sync(self.guild.snapshot())
+            self.assertEqual([r for r in self.lines(cm) if "default channel" in r], [])
+            self.guild.command("/unlock palestra")
+            with self.assertLogs("discordbridge", "INFO") as cm:
+                b.sync(self.guild.snapshot())
+                b.sync(self.guild.snapshot())
+            self.assertEqual([r for r in self.lines(cm) if "default channel" in r],
+                             ["default channel 7 is available again"])
+        finally:
+            await b.stop()
+
+    async def test_states_and_no_repeat(self):
+        for cmd, why in (("/lock palestra", "cannot view it"), ("/lock palestra send", "can view it but cannot send"),
+                         ("/delchan palestra", "does not exist")):
+            kept = self.guild.channels.get(7)
+            with self.assertLogs("discordbridge", "WARNING") as cm:
+                self.guild.command(cmd)
+                self.bridge.sync(self.guild.snapshot())
+                self.bridge.sync(self.guild.snapshot())
+            hit = [r for r in self.lines(cm) if "default channel" in r]
+            self.assertEqual(len(hit), 1, hit)
+            self.assertIn(why, hit[0])
+            self.guild.locked.clear()
+            self.guild.channels[7] = kept
+            with self.assertLogs("discordbridge", "INFO") as cm:
+                self.bridge.sync(self.guild.snapshot())
+            self.assertEqual([r for r in self.lines(cm) if "default channel" in r],
+                             ["default channel 7 is available again"])
 
 
 class Allow(Base):

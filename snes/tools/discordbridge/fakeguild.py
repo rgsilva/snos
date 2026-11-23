@@ -25,6 +25,7 @@ dry-run: type 'name: text' or '#channel name: text' to play a Discord message
   /rename OLD > NEW a person changes display name
   /newchan NAME [| topic]   /delchan NAME   /renchan OLD > NEW
   /hide NAME #chan  /show NAME #chan   take a person out of / put a person back in a channel
+  /lock NAME [send]  /unlock NAME   the bot cannot view (or only cannot send to) a channel
   /nomembers  /members   simulate the Server Members Intent missing / granted
   /help"""
 
@@ -35,6 +36,7 @@ class FakeGuild:
         self.members: dict[int, str] = {}
         self.only: dict[int, set[int]] = {}  # member -> the channels it can see; absent: all
         self.complete = True
+        self.locked: dict[int, str] = {}  # channel -> view | send: the bot cannot use it
         self.default_id = 0
         for raw in text.splitlines():
             line = raw.strip()
@@ -59,9 +61,12 @@ class FakeGuild:
     def snapshot(self) -> Snapshot:
         chans = []
         for cid, (name, topic) in sorted(self.channels.items()):
+            if cid in self.locked:
+                continue
             see = frozenset(m for m in self.members if m not in self.only or cid in self.only[m])
             chans.append(ChannelInfo(cid, name, topic, see if self.complete else frozenset()))
-        return Snapshot(chans, dict(self.members) if self.complete else {}, self.complete)
+        return Snapshot(chans, dict(self.members) if self.complete else {}, self.complete,
+                        dict(self.locked))
 
     def channel_id(self, ref: str) -> int | None:
         ref = ref.strip().lstrip("#").lower()
@@ -140,6 +145,19 @@ class FakeGuild:
                 return "usage: /hide NAME #channel"
             seen = self.only.setdefault(mid, set(self.channels))
             (seen.discard if cmd == "/hide" else seen.add)(cid)
+        elif cmd == "/lock" and arg:
+            name, _, how = arg.rpartition(" ")
+            if how not in ("send", "view"):
+                name, how = arg, "view"
+            cid = self.channel_id(name)
+            if cid is None:
+                return f"no channel {name}"
+            self.locked[cid] = how
+        elif cmd == "/unlock" and arg:
+            cid = self.channel_id(arg)
+            if cid is None:
+                return f"no channel {arg}"
+            self.locked.pop(cid, None)
         elif cmd in ("/nomembers", "/members"):
             self.complete = cmd == "/members"
         else:

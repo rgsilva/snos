@@ -128,11 +128,13 @@ ate dar `/part`. Depois do `/part`, vale o nome novo.
 depois os outros em ordem alfabetica. So entram pessoas, nao bots.
 Cada pessoa tem sempre o mesmo nick, e e o mesmo nick que aparece nas mensagens dela.
 Se duas pessoas ficarem com o mesmo nick, a segunda ganha um numero (`ana`, `ana2`).
-O servidor manda uma lista nova sozinho quando alguem entra ou sai do servidor, muda de nome,
+O servidor manda uma lista completa nova sozinho quando alguem entra ou sai do servidor, muda de nome,
 ganha ou perde acesso ao canal ou fala pela primeira vez. No maximo uma por canal a cada 3 s.
 Se mudou so a ordem, no maximo uma por minuto.
-Isso nao imprime linhas de entrada e saida no console. O cliente escreve so `* N users here`.
-Hoje o cliente soma a lista nova a antiga em vez de trocar; isso e um defeito do cliente.
+Toda lista (a do `/join`, a do `/names` e a enviada sozinha) e um bloco de linhas 353 que termina em 366.
+O cliente troca a lista de nomes do canal por essa; nao soma. Ele escreve `* N users here` so no primeiro 366
+de cada canal, entao uma lista enviada sozinha nao imprime nada no console. Entradas e saidas
+de pessoas tambem nao viram linhas.
 
 ## 4. Ensaio sem console
 
@@ -234,6 +236,8 @@ Se o IP do notebook mudou, use o novo.
 | `Discord ready: server ...` | bot conectado e viu o servidor |
 | `bridged channels: #a=nome, ...` | quais canais IRC existem e de qual canal do Discord vem cada um |
 | `Server Members Intent is off: ...` | falta ligar o intent no portal; a lista de nomes so tem quem falou |
+| `default channel N cannot be bridged: ...` | o canal de `CHANNEL_ID` existe mas o bot nao serve: nao ve (`cannot view it`), ve mas nao envia (`can view it but cannot send to it`), nao e canal de texto, ou nao existe. O bot precisa de View Channel, Send Messages e Read Message History nele; em canal privado, adicione o bot ou o cargo dele ao canal. O boas-vindas do IRC diz `No default channel`. Sai uma vez por mudanca |
+| `default channel N is available again` | o canal padrao voltou a funcionar |
 | `IRC server listening on ...` | servidor IRC no ar |
 | `console ... connected` / `disconnected` | console entrou / saiu (com o endereco) |
 | `console ... joined #canal` | console esta no canal; agora as mensagens desse canal passam |

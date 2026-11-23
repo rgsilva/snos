@@ -175,6 +175,7 @@ class Snapshot:
     channels: list[ChannelInfo] = field(default_factory=list)
     members: dict[int, str] = field(default_factory=dict)  # humans: id -> display name
     complete: bool = True  # False: the member list is not available
+    blocked: dict[int, str] = field(default_factory=dict)  # existing but not bridgeable: id -> view | send | type
 
 
 def irc_topic(ch: ChannelInfo) -> str:

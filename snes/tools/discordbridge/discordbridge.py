@@ -103,6 +103,14 @@ def settings_from_env(env: dict[str, str], dry_run: bool = False) -> Settings:
     return s
 
 
+DEFAULT_WHY = {
+    "view": "the bot cannot view it",
+    "send": "the bot can view it but cannot send to it",
+    "type": "it is not a text channel",
+    "missing": "it does not exist in this server, or the bot cannot see it",
+}
+
+
 class Bridge:
     """Wires a Discord side (anything with async post(channel_id, text)) to the core and the IRC server."""
 
@@ -129,6 +137,7 @@ class Bridge:
         self._tasks: list[asyncio.Task] = []
         self._names_dirty = False
         self._mapping: list[tuple[str, str]] = []
+        self._default_why: Optional[str] = None  # None: not checked yet; "": usable
         self.port = 0
 
     # ---- names
@@ -194,7 +203,24 @@ class Bridge:
         if mapping != self._mapping:
             self._mapping = mapping
             log.info("bridged channels: %s", ", ".join(f"{n}={d}" for n, d in mapping) or "(none)")
+        self._check_default(snap)
         self._names_dirty = True
+
+    def _check_default(self, snap: Snapshot) -> None:
+        """One log line when the default channel becomes unusable, one when it comes back."""
+        cid = self.s.channel_id
+        if cid is None or (self.s.allow_channels and cid not in self.s.allow_channels):
+            return
+        why = "" if any(c.id == cid for c in snap.channels) else DEFAULT_WHY[snap.blocked.get(cid, "missing")]
+        if why == self._default_why:
+            return
+        first, self._default_why = self._default_why is None, why
+        if why:
+            log.warning("default channel %s cannot be bridged: %s. The bot needs View Channel, Send Messages "
+                        "and Read Message History on it; for a private channel, add the bot or its role to the channel",
+                        cid, why)
+        elif not first:
+            log.info("default channel %s is available again", cid)
 
     def on_discord_message(self, m: DiscordMsg) -> None:
         if m.author_id and not (m.is_bot or m.is_self) and m.channel_id in self.directory.chans:
