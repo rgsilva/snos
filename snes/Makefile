@@ -55,14 +55,14 @@ ifdef LINK_HW
 CFLAGS += -DLINK_HW=1
 BUILD := build-hw
 endif
-# The console's power-on text mode; `mode` changes it at runtime. 64-column
-# Mode 5 is too fine for composite video into a CRT -- its one-dot gaps smear
-# shut -- so the hardware ROM boots 32 columns in white. The emulator ROM keeps
-# 64 in green, which every screen-reading test was written against; preview
-# the other with `make CON_COLS=32 CON_COLOUR=white`. Colours: white green
-# mint amber (kernel/console.h).
+# The console's power-on text mode; `mode` changes it at runtime. The hardware
+# ROM boots 64 columns in white; `mode 32` is the one for composite video,
+# where Mode 5's one-dot gaps smear shut. The emulator ROM keeps 64 in green,
+# which every screen-reading test was written against; preview the other
+# width with `make CON_COLS=32 CON_COLOUR=white`. Colours: white green mint
+# amber (kernel/console.h).
 ifdef LINK_HW
-CON_COLS ?= 32
+CON_COLS ?= 64
 CON_COLOUR ?= white
 endif
 CON_COLS ?= 64
@@ -91,7 +91,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-bgflush test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-irc32 test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -216,18 +216,17 @@ APP_ABI_vnc    := 7
 # mask) is what makes polling it every frame affordable.
 APP_ABI_telnetd := 11
 # `irc` needs the ABI-7 stream calls: it opens a plain TCP connection and both
-# talks and listens on it. Nothing it does needs ABI 8.
-APP_ABI_irc    := 7
+# talks and listens on it. ABI 13 is SYS_PAD_PHYS, for L on the controller.
+APP_ABI_irc    := 13
 APP_ABI_mc     := 12
 APP_ABI_speedtest := 12
 # Apps whose screens are laid out for 64 columns. The flag goes in the app
 # header, and the kernel switches the console to 64 while one holds the
 # screen -- launched from the shell, or brought back with `fg` -- and puts the
-# shell's mode back when it exits or is killed. Native 32-column layouts for
-# these two are future work (PLAN.md, M7 follow-ups item 4). vnc and view need
+# shell's mode back when it exits or is killed. A native 32-column layout for
+# edit is future work (PLAN.md, M7 follow-ups item 4); irc has one. vnc and view need
 # nothing here: they take the whole PPU, and giving it back rebuilds the
 # console in whatever mode it was.
-APP_MODE_irc   := 64
 APP_MODE_edit  := 64
 
 # Arena slots (M10 step 4): measured need, declared placement, build-time
@@ -310,7 +309,7 @@ $(BUILD)/apps/mc/mc.raw: $(BUILD)/mcdata.h
 $(BUILD)/snos.sfc: $(BUILD)/snos.raw $(APP_RAWS) $(BUILD)/romfs.bin $(BUILD)/mcdata.bin tools/raw2sfc.py
 	python3 tools/raw2sfc.py $< $@ $(APP_BLOBS) --at $(ROMFS_AT) $(BUILD)/romfs.bin --at $(MCDATA_AT) $(BUILD)/mcdata.bin
 
-test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-mc test-kbd test-keys test-wire test-speedtest test-mode
+test: test-host test-boot test-input test-history test-shell test-shadow test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-bgflush test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-irc32 test-mc test-kbd test-keys test-wire test-speedtest test-mode
 
 # Host-side, no Mesen: the gateway's file-relay discipline driven by a
 # scripted peer doing what netbridge.lua does to the files. First because it
@@ -413,6 +412,12 @@ test-bgbare: $(BUILD)/snos.sfc $(BUILD)/test/bgbare.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/bgbare.lua
 
+# A background launch flushes the screen first, so its first datagram is not
+# held for the argv wait.
+test-bgflush: $(BUILD)/snos.sfc $(BUILD)/test/bgflush.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/bgflush.lua
+
 # A Lua ircd on the far side of the emulated link, speaking the real protocol.
 # In the suite rather than beside it, unlike test-vnc: this moves a few hundred
 # bytes, not a 48 KB framebuffer.
@@ -488,6 +493,10 @@ test-hwpanel: $(BUILD)/snos.sfc $(BUILD)/test/hwpanel.lua
 test-irc: $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
 	$(call check_env)
 	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/irc.lua
+
+test-irc32: $(BUILD)/snos.sfc $(BUILD)/test/irc32.lua
+	$(call check_env)
+	sh tools/runtest.sh "$(MESEN)" $(BUILD)/snos.sfc $(BUILD)/test/irc32.lua
 
 test-history: $(BUILD)/snos.sfc $(BUILD)/test/history.lua
 	$(call check_env)

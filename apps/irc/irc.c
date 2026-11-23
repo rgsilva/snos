@@ -35,6 +35,27 @@
  * panel would have to be repainted on every single message, because every
  * message moves every row.
  *
+ * ------------------------------------------------------------ 32 columns
+ *
+ * The layout follows the width the console has when irc starts (SYS_SCREEN),
+ * and the kernel no longer switches modes for it. At 64 columns nothing above
+ * changes. At 32:
+ *
+ *     row 0        tab bar, scrolled so the active tab is always in view
+ *     rows 1..s    user strip: the channel's nicks, at most two rows
+ *     rows s+1..   message pane
+ *     row h-1      input line
+ *
+ * The strip is there instead of a side panel: it has no rows in the status
+ * window or a private-message window, one row when the nicks fit on one, and
+ * two otherwise, the second ending in "(+N)" for the N nicks that did not fit.
+ * ^U, or L on the controller, opens the full list over the pane. Messages wrap
+ * at 32 with a one-space indent on the continuation rows.
+ *
+ * The backlog stores WRAPPED rows, at the width in force when they arrived, in
+ * the same ring as at 64 columns: no extra RAM, and scrolling is the same code.
+ * The price is that the ring holds half as many messages at 32.
+ *
  * ----------------------------------------------------------------- protocol
  *
  * Deliberately NOT sent: `CAP LS`. Undernet and DALnet answer 421 (unknown
@@ -57,6 +78,8 @@
 
 #define LINE_W 64            /* the console is 64 columns; that is the ceiling */
 #define MAXTABS 8
+#define STRIP_MAX 2          /* user strip rows at 32 columns */
+#define MORE_W 6             /* " (+NN)", the strip's overflow marker */
 /* Scrollback per tab. 64 and not 40, measured against ergo: its stock MOTD is
  * 2.5 KB of ASCII art and colour charts, which wraps to about fifty lines at 64
  * columns — so at 40 the welcome numeric had already scrolled away by the time
@@ -144,6 +167,14 @@ static uint8_t cur;
 
 static char users[MAXTABS][USERS_MAX][USER_LEN + 1];
 static uint8_t nusers[MAXTABS];
+/* NAMES replies are authoritative: the first 353 after a 366 starts the list
+ * afresh. NF_SHOWN is set once the user count has been announced; later 366s
+ * (a /names, a bridge refreshing the list) repaint silently. */
+#define NF_FRESH 1
+#define NF_SHOWN 2
+static uint8_t nflag[MAXTABS];
+static char strip[STRIP_MAX][LINE_W + 1];
+static uint16_t pad_prev;
 
 static uint16_t ch;
 static uint16_t txmax;
@@ -257,6 +288,7 @@ static int tab_get(const char *name) {
   lhead[i] = 0;
   tact[i] = 0;
   nusers[i] = 0;
+  nflag[i] = NF_FRESH;
   bar_dirty = 1;
   return i;
 }
@@ -271,6 +303,7 @@ static void tab_close(int t) {
     lhead[i] = lhead[i + 1];
     tact[i] = tact[i + 1];
     nusers[i] = nusers[i + 1];
+    nflag[i] = nflag[i + 1];
     for (j = 0; j < USERS_MAX; j++) scpy(users[i][j], users[i + 1][j], USER_LEN + 1);
   }
   ntabs--;
@@ -289,6 +322,16 @@ static void tab_close(int t) {
 
 /* ------------------------------------------------------------- user lists */
 
+static int narrow(void) { return cols < LINE_W; }
+
+/* The strip is part of the pane, so a change to the visible channel's nicks
+ * repaints the pane. At 64 columns there is no strip and nothing to do. */
+static void strip_touch(int t) {
+  if (!narrow() || t != (int)cur) return;
+  if (!pane_dirty) pane_since = sys_frames();
+  pane_dirty = 1;
+}
+
 static void user_add(int t, const char *n) {
   int i;
   if (t < 0 || t >= (int)ntabs || n[0] == 0) return;
@@ -297,6 +340,7 @@ static void user_add(int t, const char *n) {
   if (nusers[t] >= USERS_MAX) return;
   scpy(users[t][nusers[t]], n, USER_LEN + 1);
   nusers[t]++;
+  strip_touch(t);
 }
 
 static void user_del(int t, const char *n) {
@@ -307,6 +351,7 @@ static void user_del(int t, const char *n) {
       for (j = i; j + 1 < (int)nusers[t]; j++)
         scpy(users[t][j], users[t][j + 1], USER_LEN + 1);
       nusers[t]--;
+      strip_touch(t);
       return;
     }
   }
@@ -321,7 +366,10 @@ static void user_rename(const char *from, const char *to) {
   int t, i;
   for (t = 0; t < (int)ntabs; t++)
     for (i = 0; i < (int)nusers[t]; i++)
-      if (ieq(users[t][i], from)) scpy(users[t][i], to, USER_LEN + 1);
+      if (ieq(users[t][i], from)) {
+        scpy(users[t][i], to, USER_LEN + 1);
+        strip_touch(t);
+      }
 }
 
 /* ------------------------------------------------------------ line buffer */
@@ -346,28 +394,35 @@ static void push_raw(int t, const char *s) {
   }
 }
 
-/* Word-wrap at 64 columns. A hard break mid-word is legible; a hard break every
- * time is not, so a space in the second half of the row is preferred. */
+/* Word-wrap at the console's width. At 64 columns a hard break mid-word is
+ * legible and a hard break every time is not, so a space in the second half of
+ * the row is preferred. At 32 any space will do, rows after the first start with
+ * a one-space indent so they read as belonging to the message above, and only a
+ * word longer than a row is split. */
 static void emit(int t, const char *s) {
-  uint16_t n = slen(s), start = 0;
+  uint16_t n = slen(s), start = 0, lead = 0;
+  uint16_t ind = narrow() ? 1u : 0u, minbr = narrow() ? 0u : LINE_W / 2;
   if (n == 0) {
     push_raw(t, "");
     return;
   }
   while (start < n) {
+    uint16_t avail = (uint16_t)(cols - lead);
     uint16_t left = (uint16_t)(n - start), take, i, br = 0;
-    if (left <= LINE_W) {
+    if (left <= avail) {
       take = left;
     } else {
-      for (i = 0; i <= LINE_W; i++)
+      for (i = 0; i <= avail; i++)
         if (s[start + i] == ' ') br = i;
-      take = (br > LINE_W / 2) ? br : LINE_W;
+      take = (br > minbr) ? br : avail;
     }
-    for (i = 0; i < take; i++) wrapbuf[i] = s[start + i];
-    wrapbuf[take] = 0;
+    for (i = 0; i < lead; i++) wrapbuf[i] = ' ';
+    for (i = 0; i < take; i++) wrapbuf[lead + i] = s[start + i];
+    wrapbuf[lead + take] = 0;
     push_raw(t, wrapbuf);
     start = (uint16_t)(start + take);
     while (start < n && s[start] == ' ') start++;
+    lead = ind;
   }
 }
 
@@ -387,29 +442,100 @@ static void emitv(int t, const char *a, const char *b, const char *c,
 
 static void pad_row(char *b) {
   uint16_t i = slen(b);
-  while (i < LINE_W) b[i++] = ' ';
-  b[LINE_W] = 0;
+  if (i > cols) i = cols;
+  while (i < cols) b[i++] = ' ';
+  b[cols] = 0;
 }
+
+static void utoa(char *d, uint16_t v) {
+  char t[6];
+  uint16_t i = 0, j = 0;
+  if (v == 0) t[i++] = '0';
+  while (v && i < 6) {
+    t[i++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  while (i) d[j++] = t[--i];
+  d[j] = 0;
+}
+
+/* Nicks from index `i`, separated by spaces, into `out` while they fit in
+ * `limit` columns. Returns the index of the first nick left over. */
+static int strip_fill(int i, uint16_t limit, char *out) {
+  int n = (int)nusers[cur];
+  uint16_t p = 0;
+  while (i < n) {
+    uint16_t len = slen(users[cur][i]), k;
+    if (p) {
+      if (p + 1 + len > limit) break;
+      out[p++] = ' ';
+    } else if (len > limit) {
+      len = limit;
+    }
+    for (k = 0; k < len; k++) out[p++] = users[cur][i][k];
+    i++;
+  }
+  out[p] = 0;
+  return i;
+}
+
+/* The user strip at 32 columns: how many rows it takes (0 to STRIP_MAX), with
+ * the text in strip[]. Only a channel has one. When two rows cannot hold every
+ * nick the second gives up room for " (+N)", N being how many are not shown. */
+static uint16_t strip_build(void) {
+  int n = (int)nusers[cur], i, j;
+  if (!narrow() || cur == 0 || n == 0) return 0;
+  if (tabname[cur][0] != '#' && tabname[cur][0] != '&') return 0;
+  i = strip_fill(0, cols, strip[0]);
+  if (i >= n) return 1;
+  j = strip_fill(i, cols, strip[1]);
+  if (j >= n) return 2;
+  j = strip_fill(i, (uint16_t)(cols - MORE_W), strip[1]);
+  scat(strip[1], " (+", LINE_W + 1);
+  utoa(wrapbuf, (uint16_t)(n - j));
+  scat(strip[1], wrapbuf, LINE_W + 1);
+  scat(strip[1], ")", LINE_W + 1);
+  return 2;
+}
+
+/* Message rows in the pane: everything between the bar, the strip and the
+ * input line. */
+static int pane_h(void) { return (int)rows - 2 - (int)strip_build(); }
 
 static void paint_bar(void) {
   /* The right-hand end says who you are, or that you are not anybody yet. That
    * is the one piece of state nothing else on screen can tell you — a 433 that
    * renamed you happens between other traffic and is easy to miss. */
   /* Being scrolled back displaces the nick rather than sitting beside it: it is
-   * a mode, and a mode you cannot see is one you get stuck in. */
-  const char *right = scroll ? "^ scrollback"
+   * a mode, and a mode you cannot see is one you get stuck in. At 32 columns
+   * the field is cut to ten so the tabs keep the rest. */
+  const char *right = scroll ? (narrow() ? "^ back" : "^ scrollback")
                             : (registered ? nick
                                           : (disconnected ? "offline" : "..."));
   uint16_t rl = slen(right);
-  uint16_t at = (uint16_t)(LINE_W - rl);
-  uint16_t limit = (at > 1u) ? (uint16_t)(at - 1u) : 0u; /* keep one blank */
-  uint16_t p = 0, k;
-  int i;
+  uint16_t at, limit, p = 0, k;
+  int i, first = 0;
+
+  if (narrow() && rl > 10) rl = 10;
+  at = (uint16_t)(cols - rl);
+  limit = (at > 1u) ? (uint16_t)(at - 1u) : 0u; /* keep one blank */
+
+  /* At 32 columns the tabs may not all fit: drop the leading ones until the
+   * active tab is on screen. */
+  if (narrow()) {
+    for (; first < (int)cur; first++) {
+      uint16_t w = 0;
+      for (i = first; i <= (int)cur; i++)
+        w = (uint16_t)(w + (i > first) + 1 + slen(tabname[i]) +
+                       (tact[i] && i != (int)cur));
+      if (w <= limit) break;
+    }
+  }
 
   /* Solid inverse video with the ACTIVE tab punched out of it in normal video.
    * Mode 5 spends both BG layers on text columns, so inverse glyphs are the
    * only highlight the hardware has to offer. */
-  for (i = 0; i < (int)ntabs && p < limit; i++) {
+  for (i = first; i < (int)ntabs && p < limit; i++) {
     uint8_t inv = (i == (int)cur) ? 0x00 : 0x80;
     const char *nm = tabname[i];
     if (p && p < limit) pbuf[p++] = (char)(' ' | 0x80);
@@ -417,15 +543,16 @@ static void paint_bar(void) {
     for (k = 0; nm[k] && p < limit; k++) pbuf[p++] = (char)((uint8_t)nm[k] | inv);
     if (tact[i] && i != (int)cur && p < limit) pbuf[p++] = (char)('*' | 0x80);
   }
-  while (p < LINE_W) pbuf[p++] = (char)(' ' | 0x80);
+  while (p < cols) pbuf[p++] = (char)(' ' | 0x80);
   for (k = 0; k < rl; k++) pbuf[at + k] = (char)((uint8_t)right[k] | 0x80);
-  pbuf[LINE_W] = 0;
+  pbuf[cols] = 0;
   sys_puts_at(0, 0, pbuf);
   bar_dirty = 0;
 }
 
 static void paint_pane_rows(void) {
-  int ph = (int)rows - 2;
+  int sn = (int)strip_build();
+  int ph = (int)rows - 2 - sn;
   int n = (int)lcount[cur];
   int back = (int)scroll, max = n - ph, first, r;
   /* Clamped here rather than at the key, because the limit moves: lines arrive,
@@ -435,6 +562,11 @@ static void paint_pane_rows(void) {
   scroll = (uint16_t)back;
   first = n - ph - back;
   if (first < 0) first = 0;
+  for (r = 0; r < sn; r++) {
+    scpy(pbuf, strip[r], LINE_W + 1);
+    pad_row(pbuf);
+    sys_puts_at(r + 1, 0, pbuf);
+  }
   for (r = 0; r < ph; r++) {
     int idx = first + r;
     if (idx < n) {
@@ -444,7 +576,7 @@ static void paint_pane_rows(void) {
       pbuf[0] = 0;
     }
     pad_row(pbuf);
-    sys_puts_at(r + 1, 0, pbuf);
+    sys_puts_at(sn + r + 1, 0, pbuf);
   }
 }
 
@@ -453,7 +585,8 @@ static void paint_overlay_tabs(void) {
   for (r = 0; r < ph; r++) {
     pbuf[0] = 0;
     if (r == 0) {
-      scpy(pbuf, " windows - digit or up/down, enter picks, esc closes",
+      scpy(pbuf, narrow() ? " windows - digit/enter, esc"
+                          : " windows - digit or up/down, enter picks, esc closes",
            LINE_W + 1);
     } else if (r - 1 < (int)ntabs) {
       int i = r - 1;
@@ -461,14 +594,15 @@ static void paint_overlay_tabs(void) {
       uint8_t inv = (i == (int)ovsel) ? 0x80 : 0x00;
       const char *nm = tabname[i];
       uint16_t k;
+      uint16_t room = (uint16_t)(narrow() && tact[i] ? cols - 8 : cols - 1);
       pbuf[p++] = ' ';
       pbuf[p++] = (char)(('1' + i) | inv);
       pbuf[p++] = (char)(' ' | inv);
-      for (k = 0; nm[k] && p + 1 < LINE_W; k++)
-        pbuf[p++] = (char)((uint8_t)nm[k] | inv);
+      /* The "(new)" mark is worth more than the tail of a long name. */
+      for (k = 0; nm[k] && p < room; k++) pbuf[p++] = (char)((uint8_t)nm[k] | inv);
       if (tact[i]) {
-        const char *s = "   (new)";
-        for (k = 0; s[k] && p + 1 < LINE_W; k++) pbuf[p++] = s[k];
+        const char *s = narrow() ? " (new)" : "   (new)";
+        for (k = 0; s[k] && p + 1 < cols; k++) pbuf[p++] = s[k];
       }
       pbuf[p] = 0;
     }
@@ -477,18 +611,27 @@ static void paint_overlay_tabs(void) {
   }
 }
 
+/* Names across: three to a row at 64 columns, one at 32. */
+static int users_perrow(void) { return narrow() ? 1 : 3; }
+
 static void paint_overlay_users(void) {
   int ph = (int)rows - 2, r;
   int n = (int)nusers[cur];
-  int perrow = 3;
+  int perrow = users_perrow();
   for (r = 0; r < ph; r++) {
     pbuf[0] = 0;
     if (r == 0) {
       msg[0] = 0;
-      scat(msg, " users in ", sizeof msg);
-      scat(msg, tabname[cur], sizeof msg);
-      scat(msg, " - esc or ^U closes", sizeof msg);
-      scpy(pbuf, msg, LINE_W + 1);
+      if (narrow()) {
+        scat(msg, " users ", sizeof msg);
+        scat(msg, tabname[cur], sizeof msg);
+        scat(msg, " - esc closes", sizeof msg);
+      } else {
+        scat(msg, " users in ", sizeof msg);
+        scat(msg, tabname[cur], sizeof msg);
+        scat(msg, " - esc or ^U closes", sizeof msg);
+      }
+      scpy(pbuf, msg, cols + 1);
     } else {
       int base = (int)ovtop + (r - 1) * perrow, k;
       uint16_t p = 0;
@@ -497,8 +640,8 @@ static void paint_overlay_users(void) {
         uint16_t j;
         uint16_t col = (uint16_t)(1 + k * 21);
         if (idx >= n) break;
-        while (p < col && p + 1 < LINE_W) pbuf[p++] = ' ';
-        for (j = 0; users[cur][idx][j] && p + 1 < LINE_W; j++)
+        while (p < col && p + 1 < cols) pbuf[p++] = ' ';
+        for (j = 0; users[cur][idx][j] && p + 1 < cols; j++)
           pbuf[p++] = users[cur][idx][j];
       }
       pbuf[p] = 0;
@@ -517,14 +660,14 @@ static void paint_pane(void) {
 }
 
 static void paint_input(void) {
-  uint16_t avail = LINE_W - 3, start = 0, p = 0, i;
+  uint16_t avail = (uint16_t)(cols - 3), start = 0, p = 0, i;
   if (inn > avail) start = (uint16_t)(inn - avail);
   pbuf[p++] = '>';
   pbuf[p++] = ' ';
-  for (i = start; i < inn && p + 1 < LINE_W; i++) pbuf[p++] = input[i];
-  if (p < LINE_W) pbuf[p++] = (char)(' ' | 0x80); /* the caret */
-  while (p < LINE_W) pbuf[p++] = ' ';
-  pbuf[LINE_W] = 0;
+  for (i = start; i < inn && p + 1 < cols; i++) pbuf[p++] = input[i];
+  if (p < cols) pbuf[p++] = (char)(' ' | 0x80); /* the caret */
+  while (p < cols) pbuf[p++] = ' ';
+  pbuf[cols] = 0;
   sys_puts_at((int)rows - 1, 0, pbuf);
   input_dirty = 0;
 }
@@ -573,6 +716,10 @@ static void names_reply(char *rest) {
   int t = tab_find(chan);
   if (t < 0) return;
   if (*names == ':') names++;
+  if (nflag[t] & NF_FRESH) {
+    nusers[t] = 0;
+    nflag[t] = (uint8_t)(nflag[t] & ~NF_FRESH);
+  }
   while (*names) {
     char *n = skipsp(names);
     char *next;
@@ -604,7 +751,7 @@ static void handle_numeric(uint16_t num, char *rest) {
       nick_tries++;
       nick[l] = '_';
       nick[l + 1] = 0;
-      emitv(0, "* nick in use, trying ", nick, 0, 0);
+      emitv(0, narrow() ? "* nick in use: " : "* nick in use, trying ", nick, 0, 0);
       bar_dirty = 1;
       sendv("NICK ", nick, 0, 0);
     } else {
@@ -622,21 +769,17 @@ static void handle_numeric(uint16_t num, char *rest) {
     word(chan);
     t = tab_find(chan);
     if (t >= 0) {
-      char n[8];
-      uint16_t v = nusers[t], i = 0, j;
-      if (v == 0) {
-        n[i++] = '0';
-      } else {
-        char d[6];
-        j = 0;
-        while (v && j < 6) {
-          d[j++] = (char)('0' + (v % 10u));
-          v /= 10u;
-        }
-        while (j) n[i++] = d[--j];
+      /* End of a list: the next 353 replaces it. Only the first is announced;
+       * a refresh just repaints the strip. */
+      nflag[t] = (uint8_t)(nflag[t] | NF_FRESH);
+      strip_touch(t);
+      if (!(nflag[t] & NF_SHOWN)) {
+        char n[8];
+        nflag[t] = (uint8_t)(nflag[t] | NF_SHOWN);
+        utoa(n, nusers[t]);
+        if (narrow()) emitv(t, "* ", n, " users (^U/L lists them)", 0);
+        else emitv(t, "* ", n, " users here (^U lists them)", 0);
       }
-      n[i] = 0;
-      emitv(t, "* ", n, " users here (^U lists them)", 0);
     }
     return;
   }
@@ -744,7 +887,7 @@ static void handle_line(char *s) {
       scroll = 0;
       bar_dirty = 1;
       pane_force = 1;
-      emitv(t, "* now talking in ", chan, 0, 0);
+      emitv(t, narrow() ? "* joined " : "* now talking in ", chan, 0, 0);
     } else {
       int t = tab_find(chan);
       if (t < 0) t = 0;
@@ -874,7 +1017,8 @@ static void do_quit(const char *reason) {
 
 static void say_to_current(const char *text) {
   if (cur == 0) {
-    emit(0, "* no channel here - /join #something first");
+    emit(0, narrow() ? "* no channel - /join #chan"
+                     : "* no channel here - /join #something first");
     return;
   }
   sendv("PRIVMSG ", tabname[cur], " :", text);
@@ -961,6 +1105,15 @@ static void do_command(char *line) {
     return;
   }
   if (ieq(cmd, "help")) {
+    if (narrow()) {
+      emit((int)cur, "/join #c  /part  /msg nick text");
+      emit((int)cur, "/nick n  /names  /close  /quit");
+      emit((int)cur, "/raw LINE  /quit [reason]");
+      emit((int)cur, "^N ^P switch  TAB windows");
+      emit((int)cur, "^U or pad L users  ^Q quit");
+      emit((int)cur, "up/down PgUp/PgDn scroll back");
+      return;
+    }
     emit((int)cur, "/join #c  /part  /msg nick text  /nick n  /names");
     emit((int)cur, "/close  /raw LINE  /quit [reason]");
     emit((int)cur, "^N ^P switch  TAB windows  ^U users  ^Q quit");
@@ -974,7 +1127,7 @@ static void do_command(char *line) {
  * screen leaves no overlap to read across, so PageUp and PageDown move a
  * screen less one line. */
 static void pane_scroll(int dir, int page) {
-  int ph = (int)rows - 2;
+  int ph = pane_h();
   int n = (int)lcount[cur];
   int max = n - ph;
   int back = (int)scroll + dir * (page ? ph - 1 : ph / 2);
@@ -1000,7 +1153,8 @@ static void switch_tab(int d) {
 }
 
 static void overlay_key(uint16_t k) {
-  if (k == KEY_ESC || k == KEY_TABS || k == KEY_USERS) {
+  if (k == KEY_ESC || k == KEY_TABS || k == KEY_USERS ||
+      (k == '\b' && overlay == OV_USERS)) {
     overlay = OV_NONE;
     pane_force = 1;
     return;
@@ -1036,16 +1190,22 @@ static void overlay_key(uint16_t k) {
     }
     return;
   }
-  /* OV_USERS: a long list scrolls three across per row. */
-  if (k == SNOS_KEY_DOWN) {
-    if ((uint16_t)ovtop + 3u < (uint16_t)nusers[cur]) ovtop = (uint8_t)(ovtop + 3);
-    pane_force = 1;
-    return;
-  }
-  if (k == SNOS_KEY_UP) {
-    ovtop = (uint8_t)(ovtop >= 3 ? ovtop - 3 : 0);
-    pane_force = 1;
-    return;
+  /* OV_USERS: a long list scrolls a row of names (three at 64, one at 32) at
+   * a time, or a page. */
+  {
+    int per = users_perrow(), pg = ((int)rows - 3) * per;
+    if (k == SNOS_KEY_DOWN || k == SNOS_KEY_PAGEDOWN) {
+      int step = (k == SNOS_KEY_DOWN) ? per : pg;
+      if ((int)ovtop + step < (int)nusers[cur]) ovtop = (uint8_t)(ovtop + step);
+      pane_force = 1;
+      return;
+    }
+    if (k == SNOS_KEY_UP || k == SNOS_KEY_PAGEUP) {
+      int step = (k == SNOS_KEY_UP) ? per : pg;
+      ovtop = (uint8_t)((int)ovtop >= step ? (int)ovtop - step : 0);
+      pane_force = 1;
+      return;
+    }
   }
 }
 
@@ -1120,6 +1280,8 @@ static void read_screen(void) {
   uint16_t sc = sys_screen();
   uint8_t r = (uint8_t)(sc >> 8), c = (uint8_t)(sc & 0xFFu);
   if (r < 5) r = 5;
+  if (c > LINE_W) c = LINE_W;
+  if (c < 20) c = 20;
   if (r != rows || c != cols) {
     rows = r;
     cols = c;
@@ -1166,6 +1328,13 @@ int main(void) {
   word(chanarg);
 
   if (*hostarg == 0) {
+    read_screen();
+    if (narrow()) {
+      sys_puts("usage: irc HOST[:PORT]\n");
+      sys_puts("           [NICK] [#CHAN]\n");
+      sys_puts("port 6667, nick snes\n");
+      return 1;
+    }
     sys_puts("usage: irc HOST[:PORT] [NICK] [#CHANNEL]\n");
     sys_puts("       port defaults to 6667, nick to 'snes'\n");
     return 1;
@@ -1190,7 +1359,8 @@ int main(void) {
   read_screen();
   sys_cls();
   tab_get("*");
-  emitv(0, "* SNOS irc - connecting to ", hostport, " as ", nick);
+  if (narrow()) emitv(0, "* connecting to ", hostport, 0, 0);
+  else emitv(0, "* SNOS irc - connecting to ", hostport, " as ", nick);
   emit(0, "* /help lists the commands");
   paint_bar();
   paint_pane();
@@ -1209,7 +1379,7 @@ int main(void) {
     break;
   case SL_OPEN_TIMEOUT:
     sys_cls();
-    sys_puts("timeout connecting to ");
+    sys_puts(narrow() ? "timeout: " : "timeout connecting to ");
     sys_puts(hostport);
     sys_putc('\n');
     return 1;
@@ -1219,7 +1389,7 @@ int main(void) {
     return 1;
   default:
     sys_cls();
-    sys_puts("could not connect to ");
+    sys_puts(narrow() ? "unreachable: " : "could not connect to ");
     sys_puts(hostport);
     sys_putc('\n');
     return 1;
@@ -1229,6 +1399,7 @@ int main(void) {
    * which is what "everything I wrote has drained" is measured against on the
    * way out. */
   txmax = sys_net_wspace(ch);
+  pad_prev = sys_pad_phys();
 
   /* Register. No CAP negotiation on purpose — see the header comment. */
   emit(0, "* connected, registering");
@@ -1254,6 +1425,14 @@ int main(void) {
       ping_sent = 0;
     }
 
+    /* L on the controller is ^U. Edges of the controller alone: SYS_PAD would
+     * also report the adapter's keyboard, where Q is L. */
+    {
+      uint16_t now = sys_pad_phys();
+      uint16_t e = (uint16_t)(now & ~pad_prev);
+      pad_prev = now;
+      if (e & PAD_L) on_key(KEY_USERS);
+    }
     while ((k = sys_pollkey()) != SYS_ERR) {
       on_key(k);
       if (quitting) break;
@@ -1322,7 +1501,7 @@ int main(void) {
   }
   sys_net_close(ch);
   sys_cls();
-  sys_puts("irc: disconnected from ");
+  sys_puts(narrow() ? "irc: left " : "irc: disconnected from ");
   sys_puts(hostport);
   sys_putc('\n');
   return 0;

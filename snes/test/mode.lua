@@ -284,9 +284,10 @@ emu.addEventCallback(function()
 
   -- 64-column apps
   r.check(text:find("edit  bank $00CB  64 cols\n", 1, true) ~= nil and
-          text:find("irc  bank $00D3  64 cols\n", 1, true) ~= nil and
+          text:find("irc  bank $00D3\n", 1, true) ~= nil and
+          text:find("irc  bank $00D3  64 cols", 1, true) == nil and
           text:find("hello  bank $00C8\n", 1, true) ~= nil,
-          "`apps` does not mark exactly the 64-column apps")
+          "`apps` does not mark edit, and only edit, as a 64-column app")
   r.check(obs.in_edit and obs.in_edit.cols == 64, "edit did not get 64 columns")
   r.check(text:find("[64 columns while it runs]", 1, true) ~= nil, "no notice of the switch")
   r.check(obs.after_edit and obs.after_edit.cols == 32, "edit's exit did not restore 32")

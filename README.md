@@ -77,19 +77,19 @@ see [the measurement and protocol notes](docs/net-speedtest.md).
 
 ## The screen
 
-Two text modes, both 28 rows. The hardware ROM (`make LINK_HW=1`) boots **32
-columns in white**: Mode 0, 8 px glyphs at normal resolution, which survive
-composite video into a CRT. The emulator ROM keeps the **64-column** Mode 5
-hires console in green, which is what every screen-reading test was written
-against; `make CON_COLS=32 CON_COLOUR=white` builds it with the hardware's
-default instead.
+Two text modes, both 28 rows: **64 columns** in Mode 5 hires, and **32
+columns** in Mode 0, 8 px glyphs at normal resolution, which survive composite
+video. The hardware ROM (`make LINK_HW=1`) boots 64 columns in white; `mode
+32` switches, and `make LINK_HW=1 CON_COLS=32` builds one that boots at 32.
+The emulator ROM boots 64 columns in green, which is what every
+screen-reading test was written against.
 
 `mode` says which one is up (`32x28 white`). `mode 32` and `mode 64` change
 the width, which clears the screen; `mode white`, `green`, `mint` or `amber`
 change the colour and leave the text alone; both can go in one command.
-`irc` and `edit` are laid out for 64 columns, so the kernel gives them 64
-while they hold the screen and puts the shell's mode back when they exit or
-are killed ([docs/console-notes.md](docs/console-notes.md)).
+`edit` is laid out for 64 columns, so the kernel gives it 64
+while it holds the screen and puts the shell's mode back when it exits or
+is killed ([docs/console-notes.md](docs/console-notes.md)).
 
 ## Typing into it
 
