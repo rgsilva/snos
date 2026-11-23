@@ -388,8 +388,16 @@ static int fg_poll_room(void) {
  * full frame away. Only the closing window [POLL_LAST+1, 226] is refused,
  * and the spin just re-asks a few lines later. The 9-bit V counter's high
  * bit is deliberately ignored: lines 256..261 alias to 0..5, which the
- * early zone allows — correctly, they are deep in the post-NMI region. */
+ * early zone allows — correctly, they are deep in the post-NMI region.
+ *
+ * Measured on 2026-11-23, every NMI mask over a line in `make test-net` and
+ * test-speedtest: the longest poll is 82.0 lines on the stock image, so 134
+ * unmasks by line 217; 94.8 at SlowROM (the SA-1 image), so 122 does. */
+#ifdef SLOWROM
+#define POLL_LAST 122u
+#else
 #define POLL_LAST 134u
+#endif
 uint8_t beam_line(void) {
   uint8_t v;
   (void)R8(0x213F); /* reset the OPVCT read toggle to the low half */
