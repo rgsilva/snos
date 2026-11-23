@@ -55,14 +55,14 @@ ifdef LINK_HW
 CFLAGS += -DLINK_HW=1
 BUILD := build-hw
 endif
-# The console's power-on text mode; `mode` changes it at runtime. 64-column
-# Mode 5 is too fine for composite video into a CRT -- its one-dot gaps smear
-# shut -- so the hardware ROM boots 32 columns in white. The emulator ROM keeps
-# 64 in green, which every screen-reading test was written against; preview
-# the other with `make CON_COLS=32 CON_COLOUR=white`. Colours: white green
-# mint amber (kernel/console.h).
+# The console's power-on text mode; `mode` changes it at runtime. The hardware
+# ROM boots 64 columns in white; `mode 32` is the one for composite video,
+# where Mode 5's one-dot gaps smear shut. The emulator ROM keeps 64 in green,
+# which every screen-reading test was written against; preview the other
+# width with `make CON_COLS=32 CON_COLOUR=white`. Colours: white green mint
+# amber (kernel/console.h).
 ifdef LINK_HW
-CON_COLS ?= 32
+CON_COLS ?= 64
 CON_COLOUR ?= white
 endif
 CON_COLS ?= 64

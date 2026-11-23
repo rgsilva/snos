@@ -65,7 +65,8 @@ of where lines broke, so scrollback cannot be re-wrapped honestly. Apps
 flagged `APP_MODE_<name> := 64` in `snes/Makefile` (edit; irc lays itself out for
 either width) get 64
 columns while they hold the screen and give the shell its mode back when they
-exit, are killed, or leave `fg`. The hardware ROM boots 32 columns in white;
+exit, are killed, or leave `fg`. The hardware ROM boots 64 columns in white
+(32 until 2026-11-23; `make LINK_HW=1 CON_COLS=32` still builds that);
 the emulator ROM keeps 64 green for the tests (`make CON_COLS=32
 CON_COLOUR=white` previews). The mode is published at `$7EFDF0` for the
 harness, which decodes one layer or two to match.
