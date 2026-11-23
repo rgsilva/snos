@@ -75,9 +75,9 @@ __low_level_init:
               plp
               rtl
 
-;;; hw_init calls this after the FastROM switch: 4096 passes of a loop that
-;;; also reads ROM, at $C0:FFE0 (linker-sa1-beacon.scm, made by the Makefile),
-;;; a bank away from main; then rtl.
+;;; hw_init calls this where MEMSEL is set (only by BEACON_FASTROM): 4096
+;;; passes of a loop that also reads ROM, at $C0:FFE0 (linker-sa1-beacon.scm,
+;;; made by the Makefile), a bank away from main; then rtl.
               .section beaconfar, text
               .public beacon_far
 beacon_far:

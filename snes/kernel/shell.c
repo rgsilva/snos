@@ -187,7 +187,9 @@ static void cmd_restart(void) {
 static void cmd_ver(void) {
   kcon_puts("SNOS " SNOS_VERSION_STR ", kernel ABI ");
   kcon_putu(SNOS_ABI_VERSION);
-#ifdef SA1
+#if defined(SA1) && defined(SLOWROM) && !defined(BEACON_FASTROM)
+  kcon_puts("\n65816 native, SA-1 cart slowrom, SA-1 in reset\n");
+#elif defined(SA1)
   kcon_puts("\n65816 native, SA-1 cart fastrom, SA-1 in reset\n");
 #else
   kcon_puts("\n65816 native, HiROM fastrom, no SA-1\n");

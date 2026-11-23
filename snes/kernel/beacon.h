@@ -13,9 +13,9 @@
 #define BEACON_GREEN 0x03E0   /* 2 __low_level_init: first code from $C0+ */
 #define BEACON_BLUE 0x7C00    /* 3 main() */
 #define BEACON_YELLOW 0x03FF  /* 4 CCNT, SIE, SIC written */
-#define BEACON_MAGENTA 0x7C1F /* 5 CXB-FXB written (skipped by BEACON_SAFE) */
-#define BEACON_CYAN 0x7FE0    /* 6 SBWE, SIWP, I-RAM test */
-#define BEACON_WHITE 0x7FFF   /* 7 FastROM on, a far call returned */
+#define BEACON_MAGENTA 0x7C1F /* 5 SBWE, SIWP written */
+#define BEACON_CYAN 0x7FE0    /* 6 the I-RAM test */
+#define BEACON_WHITE 0x7FFF   /* 7 a far call returned (BEACON_FASTROM: FastROM on) */
 #define BEACON_ORANGE 0x019F  /* 8 mb_init, stack_paint */
 
 #ifndef BEACON_HOLD

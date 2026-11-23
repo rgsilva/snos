@@ -6,7 +6,7 @@
 ;; $8000), so `code` and everything COP, BRK, NMI and reset reach is stored
 ;; at $C0:0000, the header at $C0:7FB0, the vectors at $C0:7FE0, and far code
 ;; and constants start at $C0:8000. Banks $C0-$FF are linear ROM, as on
-;; HiROM, with the Super MMC at its reset values (main.c writes them anyway).
+;; HiROM, with the Super MMC at its reset values, which nothing writes.
 ;;
 ;; BW-RAM ($40:0000-$43:FFFF) is not described here: the kernel reaches it
 ;; through far pointers only (kernel/sram.c).

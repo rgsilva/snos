@@ -100,6 +100,9 @@ HEADER := calypsi/header-sa1.s
 ROM_NAME := snos-sa1
 SFC_FLAGS := --sa1
 SRAM_KB := $(shell sed -n 's/^.define SA1_FS_KB \([0-9]*\)u.*/\1/p' $(K)/sram.h)
+# SlowROM: the kernel never sets MEMSEL here (kernel/main.c), and SLOWROM
+# picks the timing constants measured at that speed.
+SLOWROM := 1
 SRM_NAME := $(notdir $(lastword $(MESEN_SRM)))
 ifeq ($(SRM_NAME),snos.srm)
 override MESEN_SRM := $(subst /snos.srm,/snos-sa1.srm,$(MESEN_SRM))
@@ -108,9 +111,10 @@ $(error SA1=1 needs MESEN_SRM to name snos.srm or snos-sa1.srm, not '$(SRM_NAME)
 endif
 endif
 # The boot beacon (docs/sa1-notes.md, kernel/beacon.h), SA-1 only: a colour
-# per boot checkpoint, for a cart with no debugger. BEACON_SAFE=1 adds the
-# conservative choices: no CXB-FXB writes, MEMSEL left at SlowROM. Each has
-# its own build directory and ROM name, so its save is its own too.
+# per boot checkpoint, for a cart with no debugger. BEACON_FASTROM=1 sets
+# MEMSEL as the SA-1 image did before 2026-11-23, the hardware confirmation
+# that FastROM is what kills it; its constants stay SlowROM's. Each has its
+# own build directory and ROM name, so its save is its own too.
 ifdef BEACON
 ifndef SA1
 $(error BEACON=1 needs SA1=1)
@@ -129,15 +133,19 @@ CFLAGS += -DBEACON_HOLD=$(BEACON_HOLD)
 AFLAGS += -DBEACON_HOLD=$(BEACON_HOLD)
 BUILD := $(BUILD)-hold$(BEACON_HOLD)
 endif
-ifdef BEACON_SAFE
-CFLAGS += -DBEACON_SAFE=1
-AFLAGS += -DBEACON_SAFE=1
-BUILD := $(BUILD)-safe
-ROM_NAME := $(ROM_NAME)-safe
+ifdef BEACON_FASTROM
+CFLAGS += -DBEACON_FASTROM=1
+AFLAGS += -DBEACON_FASTROM=1
+BUILD := $(BUILD)-fastrom
+ROM_NAME := $(ROM_NAME)-fastrom
 endif
 override MESEN_SRM := $(subst /snos-sa1.srm,/$(ROM_NAME).srm,$(MESEN_SRM))
-else ifdef BEACON_SAFE
-$(error BEACON_SAFE=1 needs SA1=1 BEACON=1)
+else ifdef BEACON_FASTROM
+$(error BEACON_FASTROM=1 needs SA1=1 BEACON=1)
+endif
+ifdef SLOWROM
+CFLAGS += -DSLOWROM=1
+AFLAGS += -DSLOWROM=1
 endif
 ROM := $(BUILD)/$(ROM_NAME).sfc
 
@@ -578,13 +586,13 @@ test-sa1: $(ROM) $(BUILD)/test/sa1.lua $(BUILD)/test/sa1persist.lua
 
 # The beacon image's checkpoints in order, read off its CGRAM writes, then
 # the shell prompt. `make SA1=1 BEACON=1 test-beacon`, with or without
-# LINK_HW=1 and BEACON_SAFE=1. beacon_far's address comes from the map.
+# LINK_HW=1 and BEACON_FASTROM=1. beacon_far's address comes from the map.
 test-beacon: $(ROM) $(BUILD)/test/beacon.lua
 	$(call check_env)
 	@test -n "$(BEACON)" || { echo "test-beacon needs SA1=1 BEACON=1"; exit 1; }
 	far=$$(sed -n 's/^ *beacon_far = \([0-9a-f]*\)$$/\1/p' $(BUILD)/snos.map) && \
 	  test -n "$$far" && \
-	sed "s/@BEACON_FAR@/0x$$far/; s/@BEACON_SAFE@/$(if $(BEACON_SAFE),true,false)/" \
+	sed "s/@BEACON_FAR@/0x$$far/; s/@BEACON_FASTROM@/$(if $(BEACON_FASTROM),true,false)/" \
 	  $(BUILD)/test/beacon.lua > $(BUILD)/test/beacon-run.lua
 	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/beacon-run.lua
 

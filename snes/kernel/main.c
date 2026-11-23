@@ -23,8 +23,14 @@ static void hw_init(void) {
   /* FastROM. Reset always begins slow with PB=$00 (the $00:8000 mirror), so
    * this is the first thing worth doing — the linker puts our code in $C0+,
    * which is exactly the window MEMSEL accelerates. Measured ~14% in snesmac
-   * (docs/PERF.md item C). */
-#ifndef BEACON_SAFE
+   * (docs/PERF.md item C).
+   *
+   * Not on the SA-1 image (SLOWROM): on the owner's sd2snes, 2026-11-23, it
+   * went black within kcon_init, the first long run of code after this
+   * write, and booted to the prompt with the write left out. Every retail
+   * SA-1 game is SlowROM. BEACON_FASTROM keeps the write, to confirm that on
+   * hardware (docs/sa1-notes.md). */
+#if !defined(SLOWROM) || defined(BEACON_FASTROM)
   R8(0x420D) = 0x01;
 #endif
 #ifdef BEACON

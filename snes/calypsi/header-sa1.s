@@ -23,7 +23,7 @@
 ;;; Header $7FC0-$7FDF
               .section snesheader, root
               .ascii  "SNOS                 "   ; 21-byte title
-              .byte   0x23           ; map mode: SA-1 (FastROM is set by MEMSEL)
+              .byte   0x23           ; map mode: SA-1, SlowROM (kernel/main.c)
               .byte   0x35           ; cartridge type: SA-1+ROM+RAM+battery
               .byte   0x0c           ; ROM size (patched by raw2sfc.py)
               .byte   0x08           ; RAM size: 256 KB BW-RAM

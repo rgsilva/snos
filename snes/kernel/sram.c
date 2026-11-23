@@ -8,10 +8,11 @@ static uint8_t sa1_found;
 
 /* Runs before NMI is enabled and before the first BW-RAM access, on every
  * boot and on `restart`. CCNT bit 5 holds the SA-1 in reset; SIE = 0 means it
- * can never raise an IRQ on this CPU, which has no handler for one. The Super
- * MMC values are its reset values: ROM megabytes 0-3 linear at $C0-$FF, ROM 0
- * at $00:8000. SBWE and SIWP open BW-RAM and I-RAM to this CPU: the sd2snes
- * and Mesen do not enforce them, the real chip does.
+ * can never raise an IRQ on this CPU, which has no handler for one. CXB-FXB
+ * are left at their reset values, ROM megabytes 0-3 linear at $C0-$FF and
+ * ROM 0 at $00:8000, which is the map the kernel is linked for. SBWE and SIWP
+ * open BW-RAM and I-RAM to this CPU: the sd2snes and Mesen do not enforce
+ * them, the real chip does.
  *
  * Presence: I-RAM at $3000 keeps what is written there; without the chip
  * that address is open bus. The byte is put back. */
@@ -21,15 +22,9 @@ void sa1_hold(void) {
   R8(0x2201) = 0x00; /* SIE: no IRQ from it */
   R8(0x2202) = 0xA0; /* SIC: clear its IRQ and character-conversion flags */
   BEACON_AT(BEACON_YELLOW);
-#ifndef BEACON_SAFE
-  R8(0x2220) = 0x00; /* CXB-FXB */
-  R8(0x2221) = 0x01;
-  R8(0x2222) = 0x02;
-  R8(0x2223) = 0x03;
-#endif
-  BEACON_AT(BEACON_MAGENTA);
   R8(0x2226) = 0x80; /* SBWE */
   R8(0x2229) = 0xFF; /* SIWP: all eight 256-byte pages */
+  BEACON_AT(BEACON_MAGENTA);
   keep = R8(0x3000);
   R8(0x3000) = 0x5A;
   ok = (uint8_t)(R8(0x3000) == 0x5A);
