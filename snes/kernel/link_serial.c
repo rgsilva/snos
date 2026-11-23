@@ -26,6 +26,7 @@
 #include "net.h"
 #include "snos.h"  /* snos_frames: which exchanges share a video frame */
 #include "input.h" /* beam_line */
+#include "linkdiag.h"
 
 volatile uint8_t link_serial_hdma; /* link.h; written by console.c */
 
@@ -96,7 +97,11 @@ static uint8_t xfer_count;
 #endif
 static int xfer(const uint8_t *tx) {
   uint8_t line = beam_line();
-  if (line > (link_serial_hdma ? XFER_LAST_HDMA : XFER_LAST) && line < 229u) return 0;
+  LD_GATE(line);
+  if (line > (link_serial_hdma ? XFER_LAST_HDMA : XFER_LAST) && line < 229u) {
+    LD_REFUSED(line);
+    return 0;
+  }
   if (xfer_frame != snos_frames) {
     xfer_frame = snos_frames;
     xfer_count = 0;
@@ -104,6 +109,7 @@ static int xfer(const uint8_t *tx) {
     link_serial_kick();
   }
   if (xfer_count < 255u) xfer_count++;
+  LD_CLOCKED();
   link_serial_xfer(tx, last_rx, LINK_FRAME);
   return 1;
 }
@@ -150,7 +156,13 @@ int link_serial_exch(int value) {
  * -O0, inside the NMI, on every exchange (docs/link-throughput.md). */
 static int frame_ok(const uint8_t *f) {
   if (f[LINK_SUM] != net_checksum(f, LINK_FRAME)) return 0;
+#ifdef LINKDIAG
+  if ((f[LINK_HDR] | f[LINK_HDR + 1]) == 0) return 0;
+  LD_RX_OK(f);
+  return 1;
+#else
   return (f[LINK_HDR] | f[LINK_HDR + 1]) != 0;
+#endif
 }
 
 void link_serial_init(void) {
@@ -174,6 +186,7 @@ int link_serial_present(void) {
   if (up) return 1;
   if (++probe_wait < PROBE_EVERY) return 0;
   probe_wait = 0;
+  LD_PROBE();
   if (!xfer(probe)) return 0;
   if (!frame_ok(last_rx)) return 0;
   up = 1;
@@ -190,6 +203,13 @@ int link_serial_recv(uint8_t *rx) {
   link_mb_move(rx, last_rx, LINK_FRAME);
   return 1;
 }
+
+#ifdef LINKDIAG
+int link_serial_diag(uint16_t *wait) {
+  *wait = probe_wait;
+  return up;
+}
+#endif
 
 void link_serial_send(const uint8_t *tx) {
   if (!xfer(tx)) {

@@ -8,6 +8,7 @@
  * "works in the emulator" build to keep honest.
  */
 #include "link.h"
+#include "linkdiag.h"
 
 static uint8_t backend; /* 0 = none decided yet, 1 = wram, 2 = serial */
 
@@ -41,6 +42,10 @@ int link_present(void) {
 }
 
 int link_is_serial(void) { return backend == 2; }
+
+#ifdef LINKDIAG
+int link_backend(void) { return backend; }
+#endif
 
 int link_recv(uint8_t *rx) {
   if (backend == 0 && !link_present()) return 0;

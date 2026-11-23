@@ -147,19 +147,39 @@ ifdef SLOWROM
 CFLAGS += -DSLOWROM=1
 AFLAGS += -DSLOWROM=1
 endif
+# The link diagnostic (kernel/linkdiag.c, docs/sa1-notes.md): the cable's
+# counters on screen, for a cart nobody can type on. Hardware images only,
+# stock or SA-1; its own directory, ROM name and save.
+ifdef LINKDIAG
+ifndef LINK_HW
+$(error LINKDIAG=1 needs LINK_HW=1)
+endif
+ifdef BEACON
+$(error LINKDIAG=1 and BEACON=1 do not combine)
+endif
+CFLAGS += -DLINKDIAG=1
+BUILD := $(BUILD)-linkdiag
+ROM_NAME := $(ROM_NAME)-linkdiag
+override MESEN_SRM := $(patsubst %/snos.srm,%/$(ROM_NAME).srm,$(patsubst \
+  %/snos-sa1.srm,%/$(ROM_NAME).srm,$(MESEN_SRM)))
+endif
 ROM := $(BUILD)/$(ROM_NAME).sfc
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
             $(K)/input.c $(K)/shell.c $(K)/app.c $(K)/sram.c $(K)/fs.c $(K)/net.c \
             $(K)/link.c $(K)/link_wram.c $(K)/link_serial.c $(K)/proc.c $(K)/ip.c \
             $(K)/uip/uip.c
+ifdef LINKDIAG
+KERNEL_C += $(K)/linkdiag.c
+KERNEL_S_DIAG := $(K)/ldentry.s
+endif
 KERNEL_S := calypsi/header.s $(K)/stack.s $(K)/syscall.s $(K)/exec.s \
-            $(K)/netasm.s $(K)/linkxfer.s
+            $(K)/netasm.s $(K)/linkxfer.s $(KERNEL_S_DIAG)
 KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel test-sa1 test-beacon test-pace clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel test-sa1 test-beacon test-pace test-linkdiag clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -593,6 +613,18 @@ test-pace: $(ROM) $(BUILD)/test/pace.lua
 	sed "s|^-- @CONFIG@.*|CONFIG = {$(PACE)}; CONFIG.linkhw = $(if $(LINK_HW),true,false); CONFIG.addr = $$addr|" \
 	  $(BUILD)/test/pace.lua > $(BUILD)/test/pace-run.lua
 	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/pace-run.lua
+
+# The link diagnostic's panel against the adapter model (test/linkdiag.lua),
+# the reference for a photo of the cart. `make LINK_HW=1 LINKDIAG=1
+# test-linkdiag`, also with SA1=1; LDIAG="adapter=false" leaves port 2 empty,
+# LDIAG="seconds=30" waits longer. Not in `test`.
+test-linkdiag: $(ROM) $(BUILD)/test/linkdiag.lua
+	$(call check_env)
+	@test -n "$(LINKDIAG)" || { echo "test-linkdiag needs LINKDIAG=1"; exit 1; }
+	rm -f "$(MESEN_SRM)"
+	sed 's|^-- @CONFIG@.*|CONFIG = {$(LDIAG)}|' $(BUILD)/test/linkdiag.lua \
+	  > $(BUILD)/test/linkdiag-run.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/linkdiag-run.lua
 
 # The SA-1 image's own checks (docs/sa1-notes.md): the 192 KB volume, the
 # SA-1's 64 KB left alone, the chip held in reset, and a file across an

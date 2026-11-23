@@ -21,6 +21,7 @@
 #include "proc.h"
 #include "ip.h"
 #include "net.h"
+#include "linkdiag.h"
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -44,6 +45,7 @@ void pad_latch(void) {
   }
   while ((R8(0x4212) & 0x01) && ++guard < 4000u) {
   }
+  LD_GUARD(guard);
   v = (uint16_t)(R8(0x4218) | (R8(0x4219) << 8));
   MB_FLIPS = v; /* debug: raw pad word, so the harness can see the wire */
   prev = pad_cur;
@@ -463,6 +465,7 @@ void kbd_idle(void) {
    * the shell's own printing — two writers in the console's row buffers and
    * DMA channels, which corrupted the display state within a frame of the
    * first background spawn. */
+  LD_SHOW();
   if (proc_current() == proc_fg()) {
     osk_redraw();
     con_flush();

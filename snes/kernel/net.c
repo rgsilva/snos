@@ -53,6 +53,7 @@
 #include "snos.h" /* snos_frames, for the foreground-poll hot window */
 #include "input.h"   /* kbd_push: LINK_CH_KBD lands in the input ring */
 #include "mailbox.h" /* MB_IN_*: the ring frame_fits reserves against */
+#include "linkdiag.h"
 /* proc_lock (M10 review): the txq record appends and channel scan-and-claim
  * below are run BOTH by the shell directly and by background syscalls. A
  * context switch mid-record interleaves two control records and desyncs the
@@ -469,6 +470,10 @@ int net_reset(void) {
 }
 
 int net_up(void) { return net_ready && link_present(); }
+
+#ifdef LINKDIAG
+int net_is_ready(void) { return net_ready; }
+#endif
 
 /* ------------------------------------------------------------- ring I/O */
 

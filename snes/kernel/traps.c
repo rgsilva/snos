@@ -29,6 +29,7 @@
 #include "fs.h"
 #include "net.h"
 #include "proc.h"
+#include "linkdiag.h"
 
 #define BANK0M 0x7E0000ul
 
@@ -62,6 +63,7 @@ static uint16_t frm16(uint16_t sp, uint16_t off) {
 static uint16_t kill_held;
 
 void snos_nmi_c(void) {
+  LD_NMI_ENTRY();
   snos_frames++;
   /* BEFORE net_service, and load-bearing: pad_latch's first spin waits for
    * the auto-joypad read to START (~H32.5 of the first vblank line). Enter it
@@ -71,6 +73,7 @@ void snos_nmi_c(void) {
    * other order on 2026-07-31 to save the ~700-cycle wait; the input suite
    * caught it within minutes. The wait is the cheap case. */
   pad_latch();
+  LD_NMI_PAD();
 
   /* Move one network frame. This is the reason the kernel owns NMI outright:
    * the link keeps running while an application has the machine, so a program
@@ -89,7 +92,10 @@ void snos_nmi_c(void) {
    * alternate. The keyboard panel counts as the console here, and is bounded
    * without that argument: six rows, owed only once it opens or a button
    * moves it. */
-  if (!con_dirty_pending()) net_service();
+  if (!con_dirty_pending()) {
+    LD_NET_RAN();
+    net_service();
+  }
 
   /* The kill switch. It lives here, in the interrupt the kernel owns
    * unconditionally, precisely so an application cannot defeat it: a wedged
@@ -131,6 +137,7 @@ void snos_nmi_c(void) {
    * the only context the shims allow to take the unwind. The shim performs
    * the actual swap on its way out (header.s). */
   proc_tick();
+  LD_NMI_EXIT();
 }
 
 /* ----------------------------------------------------------- COP dispatch */
