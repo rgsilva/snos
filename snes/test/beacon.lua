@@ -2,14 +2,14 @@
 --
 -- Every write to CGRAM entry 0 is logged, with the bank it was written from,
 -- alongside the boot steps each checkpoint stands after: the SA-1 control
--- and Super MMC writes, SBWE and SIWP, MEMSEL, the far call. The eight
+-- writes, SBWE and SIWP, the I-RAM test, MEMSEL, the far call. The eight
 -- colours must come in the order of kernel/beacon.h, each after its step and
 -- before the next, then con_init's black backdrop; then the console line of
--- word checkpoints and the shell prompt. BEACON_SAFE: no CXB-FXB write and no
--- MEMSEL write at all.
+-- word checkpoints and the shell prompt. No image writes CXB-FXB; only
+-- BEACON_FASTROM writes MEMSEL, once, = 1.
 local L = dofile("test/lib.lua")
 
-local SAFE = @BEACON_SAFE@
+local FASTROM = @BEACON_FASTROM@
 local BEACON_FAR = @BEACON_FAR@
 
 local RED, GREEN, BLUE, YELLOW = 0x001F, 0x03E0, 0x7C00, 0x03FF
@@ -53,6 +53,8 @@ for _, a in ipairs({ 0x2200, 0x2201, 0x2202, 0x2220, 0x2221, 0x2222, 0x2223,
   emu.addMemoryCallback(function(addr, value) event(string.format("%04X", a), value) end,
                         emu.callbackType.write, a, a)
 end
+emu.addMemoryCallback(function(addr, value) event("iram", value) end,
+                      emu.callbackType.write, 0x3000, 0x3000)
 emu.addMemoryCallback(function() event("far", 0) end,
                       emu.callbackType.exec, BEACON_FAR, BEACON_FAR)
 
@@ -110,28 +112,26 @@ local function judge()
   -- 3 blue: main, nothing of sa1_hold yet; its bank is main's.
   local main_pb = log[c[3]].pb
   r.check((first("2200") or 0) > c[3], "CCNT not written, or written before main's blue")
-  -- 4 yellow after CCNT, SIE, SIC; 5 magenta after CXB-FXB.
+  -- 4 yellow after CCNT, SIE, SIC; no Super MMC write, ever.
   for _, k in ipairs({ "2200", "2201", "2202" }) do
     r.check(between(k, c[3], c[4]), k .. " not written between blue and yellow")
   end
   for _, k in ipairs({ "2220", "2221", "2222", "2223" }) do
-    if SAFE then
-      r.check(count(k) == 0, k .. " written by the safe image")
-    else
-      r.check(between(k, c[4], c[5]), k .. " not written between yellow and magenta")
-    end
+    r.check(count(k) == 0, k .. " written")
   end
-  -- 6 cyan after SBWE and SIWP.
+  -- 5 magenta after SBWE and SIWP; 6 cyan after the I-RAM test.
   for _, k in ipairs({ "2226", "2229" }) do
-    r.check(between(k, c[5], c[6]), k .. " not written between magenta and cyan")
+    r.check(between(k, c[4], c[5]), k .. " not written between yellow and magenta")
   end
+  r.check(between("iram", c[5], c[6]), "the I-RAM test did not run between magenta and cyan")
   -- 7 white after MEMSEL = 1 (or none) and the far call, from another bank.
-  if SAFE then
-    r.check(count("420D") == 0, "the safe image wrote MEMSEL")
-  else
+  if FASTROM then
     local m = first("420D", c[6])
+    r.check(count("420D") == 1, count("420D") .. " MEMSEL writes, not 1")
     r.check(m ~= nil and m < c[7] and log[m].value == 1, "MEMSEL = 1 not between cyan and white")
     r.check(m ~= nil and (first("far", c[6]) or 0) > m, "the far call came before MEMSEL")
+  else
+    r.check(count("420D") == 0, "the SlowROM image wrote MEMSEL")
   end
   local f = first("far", c[6])
   r.check(f ~= nil and f < c[7], "beacon_far did not run between cyan and white")
