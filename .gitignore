@@ -8,3 +8,7 @@ build/
 .DS_Store
 __pycache__/
 snes/build-hw/
+
+# local only: secrets and the session handover
+.env
+HANDOVER.md
