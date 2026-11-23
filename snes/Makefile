@@ -107,6 +107,38 @@ else ifneq ($(SRM_NAME),snos-sa1.srm)
 $(error SA1=1 needs MESEN_SRM to name snos.srm or snos-sa1.srm, not '$(SRM_NAME)')
 endif
 endif
+# The boot beacon (docs/sa1-notes.md, kernel/beacon.h), SA-1 only: a colour
+# per boot checkpoint, for a cart with no debugger. BEACON_SAFE=1 adds the
+# conservative choices: no CXB-FXB writes, MEMSEL left at SlowROM. Each has
+# its own build directory and ROM name, so its save is its own too.
+ifdef BEACON
+ifndef SA1
+$(error BEACON=1 needs SA1=1)
+endif
+CFLAGS += -DBEACON=1
+AFLAGS += -DBEACON=1
+BUILD := $(BUILD)-beacon
+ROM_NAME := $(ROM_NAME)-beacon
+BEACON_LINKER_SRC := $(LINKER)
+LINKER = $(BUILD)/linker-sa1-beacon.scm
+# Frames each colour stays up. test-boot times its settling window from
+# power-on, which 30 frames x 8 overrun: run it with BEACON_HOLD=1, built
+# into a directory of its own.
+ifdef BEACON_HOLD
+CFLAGS += -DBEACON_HOLD=$(BEACON_HOLD)
+AFLAGS += -DBEACON_HOLD=$(BEACON_HOLD)
+BUILD := $(BUILD)-hold$(BEACON_HOLD)
+endif
+ifdef BEACON_SAFE
+CFLAGS += -DBEACON_SAFE=1
+AFLAGS += -DBEACON_SAFE=1
+BUILD := $(BUILD)-safe
+ROM_NAME := $(ROM_NAME)-safe
+endif
+override MESEN_SRM := $(subst /snos-sa1.srm,/$(ROM_NAME).srm,$(MESEN_SRM))
+else ifdef BEACON_SAFE
+$(error BEACON_SAFE=1 needs SA1=1 BEACON=1)
+endif
 ROM := $(BUILD)/$(ROM_NAME).sfc
 
 KERNEL_C := $(K)/main.c $(K)/traps.c $(K)/kcon.c $(K)/console.c $(K)/mailbox.c \
@@ -176,7 +208,7 @@ $(BUILD)/%.o: $(K)/uip/%.c $(KERNEL_H) $(wildcard $(K)/uip/*.h) | $(BUILD)
 $(BUILD)/%.o: $(K)/%.s | $(BUILD)
 	$(AS) -o $@ $< $(AFLAGS)
 
-$(BUILD)/header.o: $(HEADER) calypsi/traps.inc | $(BUILD)
+$(BUILD)/header.o: $(HEADER) calypsi/traps.inc calypsi/beacon.inc $(K)/beacon.h | $(BUILD)
 	$(AS) -o $@ $< $(AFLAGS)
 
 # The console fonts, baked at build time so con_init DMAs them from ROM
@@ -191,6 +223,18 @@ $(BUILD)/fontvram.o: $(BUILD)/fontvram.c
 # shipped a stale ROM silently -- the same bug class KERNEL_H exists to stop.
 $(BUILD)/snos.raw: $(KERNEL_O) $(LINKER)
 	$(LN) -o $@ $(LNFLAGS) --list-file=$(BUILD)/snos.map $(KERNEL_O)
+
+# The beacon's map is linker-sa1.scm with the last 32 bytes of bank $C0 cut
+# off for beaconfar (calypsi/beacon.inc): a fixed far bank that main is not
+# in, without touching the file the other images link with.
+ifdef BEACON
+$(LINKER): $(BEACON_LINKER_SRC) | $(BUILD)
+	sed -e 's/(#xc08000 \. #xc0ffff)/(#xc08000 . #xc0ffdf)/' \
+	    -e '/^    (memory HiROM-c0$$/i\    (memory BeaconFar (address (#xc0ffe0 . #xc0ffff)) (type ROM)\n            (qualifier far) (section beaconfar))\n' \
+	    $< > $@.tmp
+	grep -q '#xc0ffdf' $@.tmp && grep -q 'memory BeaconFar' $@.tmp
+	mv $@.tmp $@
+endif
 
 # ---------------------------------------------------------------- applications
 # Each app is a separate link into its own ROM bank, then dropped into the

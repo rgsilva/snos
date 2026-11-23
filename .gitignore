@@ -10,3 +10,5 @@ __pycache__/
 snes/build-hw/
 snes/build-sa1/
 snes/build-hw-sa1/
+snes/build-hw-sa1-beacon*/
+snes/build-sa1-beacon*/

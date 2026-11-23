@@ -12,6 +12,7 @@
 #include "proc.h"
 #include "sram.h"
 #include "fs.h"
+#include "beacon.h"
 
 #define R8(a) (*(volatile uint8_t *)(a))
 
@@ -23,7 +24,13 @@ static void hw_init(void) {
    * this is the first thing worth doing — the linker puts our code in $C0+,
    * which is exactly the window MEMSEL accelerates. Measured ~14% in snesmac
    * (docs/PERF.md item C). */
+#ifndef BEACON_SAFE
   R8(0x420D) = 0x01;
+#endif
+#ifdef BEACON
+  beacon_far();
+  BEACON_AT(BEACON_WHITE);
+#endif
 
   /* NMI is enabled by kbd_init() once the handler has something to do. The
    * kernel owns it unconditionally from here on (PLAN.md §5). */
@@ -49,6 +56,28 @@ static void hw_init(void) {
   SNOS_ARGS.p3 = 0;
 }
 
+#ifdef BEACON
+/* After kcon_init the checkpoints are words on one console line, each
+ * flushed as it is printed: kcon_putc alone leaves a line unpainted until a
+ * batch of them, or the shell, flushes. */
+static void beacon_text(const char *s) {
+  kcon_puts(s);
+  kcon_sync();
+}
+
+/* NMI has been on for BEACON_HOLD frames; did the handler run? */
+static void beacon_nmi(void) {
+  uint16_t f = snos_frames;
+  BEACON_WAIT(BEACON_HOLD);
+  beacon_text(snos_frames != f ? " nmi" : " NONMI");
+}
+#define BEACON_TEXT(s) beacon_text(s)
+#define BEACON_NMI() beacon_nmi()
+#else
+#define BEACON_TEXT(s)
+#define BEACON_NMI()
+#endif
+
 static void banner(void) { kcon_puts("v" SNOS_VERSION_STR "\n"); }
 
 /* The bank-$00 budget is the design's tightest constraint (PLAN.md §2), so the
@@ -62,15 +91,20 @@ static void report_stack(void) {
 }
 
 int main(void) {
+  BEACON_AT(BEACON_BLUE);
   hw_init();
   mb_init();
   stack_paint();
+  BEACON_AT(BEACON_ORANGE);
 
   kcon_init();
   banner();
+  BEACON_TEXT("beacon: con");
   report_stack();
   kbd_init();
+  BEACON_NMI();
   app_scan(); /* walk the ROM banks looking for application headers */
+  BEACON_TEXT(" scan");
 
   {
     uint32_t n = sram_probe();
@@ -78,7 +112,9 @@ int main(void) {
     mb_puthex32(n >> 10);
     mb_putc('\n');
   }
+  BEACON_TEXT(" sram");
   fs_init();
+  BEACON_TEXT(" fs\n");
 
   /* One line of genuinely useful state: how much storage there is, and what is
    * on it. The SRAM figure is measured at this boot, not compiled in. */

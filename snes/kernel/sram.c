@@ -1,4 +1,5 @@
 #include "sram.h"
+#include "beacon.h"
 
 #ifdef SA1
 #define R8(a) (*(volatile uint8_t *)(a))
@@ -19,10 +20,14 @@ void sa1_hold(void) {
   R8(0x2200) = 0x20; /* CCNT: SA-1 in reset, no IRQ or NMI to it */
   R8(0x2201) = 0x00; /* SIE: no IRQ from it */
   R8(0x2202) = 0xA0; /* SIC: clear its IRQ and character-conversion flags */
+  BEACON_AT(BEACON_YELLOW);
+#ifndef BEACON_SAFE
   R8(0x2220) = 0x00; /* CXB-FXB */
   R8(0x2221) = 0x01;
   R8(0x2222) = 0x02;
   R8(0x2223) = 0x03;
+#endif
+  BEACON_AT(BEACON_MAGENTA);
   R8(0x2226) = 0x80; /* SBWE */
   R8(0x2229) = 0xFF; /* SIWP: all eight 256-byte pages */
   keep = R8(0x3000);
@@ -32,6 +37,7 @@ void sa1_hold(void) {
   if (R8(0x3000) != 0xA5) ok = 0;
   R8(0x3000) = keep;
   sa1_found = ok;
+  BEACON_AT(BEACON_CYAN);
 }
 
 uint8_t sa1_present(void) { return sa1_found; }

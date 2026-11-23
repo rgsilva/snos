@@ -34,3 +34,7 @@
               .word   0x5555         ; checksum (patched)
 
 #include "traps.inc"
+
+#ifdef BEACON
+#include "beacon.inc"
+#endif
