@@ -44,9 +44,23 @@ void con_puts(const char *s);
  * or 9 before vblank ended. The same probe at 64 columns landed 4 or 5 rows
  * (8-10 transfers), which is the figure above reproduced, so 8 here sits
  * exactly where 4 sits there. con_flush_rows() is whichever applies to the
- * live mode, and it is what kcon.c batches by. */
+ * live mode, and it is what kcon.c batches by.
+ *
+ * SlowROM (the SA-1 image) runs the flush's -O0 C a quarter slower, and the
+ * DMA setup is most of a row's cost. Measured on 2026-11-23 with the same
+ * probe (`make test-pace`, budget raised to 16; a full flush is one that
+ * still owed rows when vblank ended): `help` and `cat NET.TXT` at 64 columns
+ * landed 7 or 8 transfers a full flush where the stock image lands 8 to 10,
+ * and at 32 columns 6 or 7 rows where it lands 8 or 9. So 3 and 6. Tried
+ * 4: `cat` 3% sooner, with three rows showing only their even columns for a
+ * frame; 7: no faster. */
+#ifdef SLOWROM
+#define CON_FLUSH_ROWS 3
+#define CON_FLUSH_ROWS_NARROW 6
+#else
 #define CON_FLUSH_ROWS 4
 #define CON_FLUSH_ROWS_NARROW 8
+#endif
 int con_flush_rows(void);
 void con_flush(void); /* copy up to con_flush_rows() dirty rows during vblank */
 
