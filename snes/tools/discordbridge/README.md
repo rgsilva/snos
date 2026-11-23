@@ -270,7 +270,7 @@ Bots e canais onde o console nao entrou nao entram no log (use `-v` para ver).
 
 - Passam: canais de texto onde o bot ve e escreve.
 - Nao passam: canais de voz, palco, categorias, foruns, threads (topicos) e canais de anuncio.
-  Mensagens de thread chegam, mas nao tem canal IRC; elas nao aparecem.
+  Mensagens dentro de threads nao passam.
 - Canais criados, renomeados ou apagados, e mudancas de permissao, entram sozinhos (em cerca de 1 s).
 
 **O resto.**
