@@ -51,6 +51,17 @@ for i = 2, #A.pad_latch do
   end, emu.callbackType.exec, A.pad_latch[i])
 end
 
+-- con_init: forced blank, the fonts, four tilemaps cleared. At boot, and
+-- whenever an app gives the PPU back or the width changes.
+local coninit = { t = nil, last = nil }
+emu.addMemoryCallback(function() coninit.t = clock() end, emu.callbackType.exec,
+                      A.con_init[1])
+for i = 2, #A.con_init do
+  emu.addMemoryCallback(function()
+    if coninit.t then coninit.last = (clock() - coninit.t) / LINE; coninit.t = nil end
+  end, emu.callbackType.exec, A.con_init[i])
+end
+
 -- From the NMI event to snos_nmi_c's rtl: the handler's length.
 local function owes_vram()
   for i = 0, 31 do
@@ -166,6 +177,7 @@ emu.addEventCallback(function()
       print(string.format("pace: boot: mailbox up at frame %d, first text on screen %d, prompt"
         .. " in the mailbox %d, prompt on screen %d", result.mailbox, result.text or -1,
         result.prompt_mb or -1, result.prompt))
+      print(string.format("pace: boot: con_init took %.1f lines", coninit.last or -1))
       dma_line("boot")
       step, at = "settle", frame + (adapter and 240 or 60)
     end

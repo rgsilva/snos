@@ -580,7 +580,8 @@ test-hwpanel: $(ROM) $(BUILD)/test/hwpanel.lua
 test-pace: $(ROM) $(BUILD)/test/pace.lua
 	$(call check_env)
 	rm -f "$(MESEN_SRM)"
-	addr=$$(python3 tools/hwprof.py $(BUILD) snos_nmi_c pad_latch dirty con_panel_dirty) && \
+	addr=$$(python3 tools/hwprof.py $(BUILD) snos_nmi_c pad_latch con_init dirty \
+	  con_panel_dirty) && \
 	sed "s|^-- @CONFIG@.*|CONFIG = {$(PACE)}; CONFIG.linkhw = $(if $(LINK_HW),true,false); CONFIG.addr = $$addr|" \
 	  $(BUILD)/test/pace.lua > $(BUILD)/test/pace-run.lua
 	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/pace-run.lua
