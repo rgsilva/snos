@@ -62,7 +62,8 @@ ABI bump, because `SYS_SCREEN` already reported the live width.
 `mode` in the shell switches width (`32`/`64`) and colour (`white`, `green`,
 `mint`, `amber`). A width change clears the screen: the ring holds no record
 of where lines broke, so scrollback cannot be re-wrapped honestly. Apps
-flagged `APP_MODE_<name> := 64` in `snes/Makefile` (irc and edit) get 64
+flagged `APP_MODE_<name> := 64` in `snes/Makefile` (edit; irc lays itself out for
+either width) get 64
 columns while they hold the screen and give the shell its mode back when they
 exit, are killed, or leave `fg`. The hardware ROM boots 32 columns in white;
 the emulator ROM keeps 64 green for the tests (`make CON_COLS=32

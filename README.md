@@ -87,9 +87,9 @@ default instead.
 `mode` says which one is up (`32x28 white`). `mode 32` and `mode 64` change
 the width, which clears the screen; `mode white`, `green`, `mint` or `amber`
 change the colour and leave the text alone; both can go in one command.
-`irc` and `edit` are laid out for 64 columns, so the kernel gives them 64
-while they hold the screen and puts the shell's mode back when they exit or
-are killed ([docs/console-notes.md](docs/console-notes.md)).
+`edit` is laid out for 64 columns, so the kernel gives it 64
+while it holds the screen and puts the shell's mode back when it exits or
+is killed ([docs/console-notes.md](docs/console-notes.md)).
 
 ## Typing into it
 
