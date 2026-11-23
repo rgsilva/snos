@@ -431,7 +431,17 @@ static void run_app_bg(const app_entry_t *a, const char *args) {
   }
   /* argv lives in ONE shared block and the new process reads it after its
    * crt0 zeroes the arena. Waiting out that window here is what keeps a
-   * fast next command from overwriting the arguments mid-handoff. */
+   * fast next command from overwriting the arguments mid-handoff.
+   *
+   * The wait never flushes, and the NMI leaves the link alone while a row is
+   * owed (traps.c), so a row still dirty here holds the new job's first
+   * datagram for the whole second. At SlowROM one was (test-netreset: DNS
+   * 70 frames after `run get ... &`, 11 on stock, which had flushed). The
+   * race is the stock image's too; the flush is under SLOWROM only to keep
+   * that image byte-identical. */
+#ifdef SLOWROM
+  kcon_sync();
+#endif
   {
     uint16_t until = (uint16_t)(snos_frames + 60u);
     while ((int16_t)(snos_frames - until) < 0) {
