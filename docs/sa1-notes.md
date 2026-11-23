@@ -306,3 +306,98 @@ differences are where the frames fall in a run, not timing.
    `restart` and `cat KEEP.TXT` once more.
 8. With the adapter up, `get URL DEST` of a small file and `cat DEST`: the
    network path writing BW-RAM.
+
+## The boot beacon (2026-11-23)
+
+On the sd2snes (firmware 1.11.0b1) `snos-sa1.sfc` gives a black screen and
+nothing else, while the probe and the stock image work. There is no
+debugger on the console, so `BEACON=1` makes the boot report where it got
+to: before the console exists, each checkpoint paints the whole screen one
+colour and holds it for half a second (`BEACON_HOLD`, 30 frames); after
+`kcon_init` the checkpoints are words on one console line. The last colour
+on the TV, or the last word, names the last checkpoint reached; the step
+after it is the suspect.
+
+    make SA1=1 LINK_HW=1 BEACON=1                # build-hw-sa1-beacon/snos-sa1-beacon.sfc
+    make SA1=1 LINK_HW=1 BEACON=1 BEACON_SAFE=1  # build-hw-sa1-beacon-safe/snos-sa1-beacon-safe.sfc
+
+Without `BEACON` all four images (stock, `LINK_HW`, `SA1`, `SA1 LINK_HW`)
+are byte-identical to before. `BEACON` without `SA1` is refused.
+
+### The checkpoints
+
+| Screen | Reached | Next step: the suspect if the screen stays here |
+|---|---|---|
+| black from the start, no colour at all | nothing | the reset vector, the header, the cart not starting |
+| red | reset stub (bank `$00`, emulation mode, PPU set up) | C startup: first `jsl` into bank `$C1`/`$C2` at SlowROM |
+| green | `__low_level_init`, the first code from `$C0`+ | 43 KB RAM clear and data copy (about 1 s), then `main` |
+| blue | `main` | CCNT, SIE, SIC writes |
+| yellow | CCNT `$20`, SIE `0`, SIC `$A0` | CXB-FXB writes (skipped in beacon-safe) |
+| magenta | CXB-FXB (in beacon-safe: the place where they were) | SBWE, SIWP, the I-RAM test at `$3000` |
+| cyan | SBWE, SIWP, I-RAM test | FastROM on (not in beacon-safe), a far call to `$C0:FFE0` |
+| white | FastROM, the far call returned | rest of `hw_init`, `mb_init`, `stack_paint` |
+| orange | `mb_init`, `stack_paint` | `kcon_init`: forced blank, fonts by DMA from ROM, display on |
+| colours, then black, no text | (orange was last) | `kcon_init` or its first flush |
+| `v0.1` and `beacon: con` | the console | `kbd_init`: NMI on, then 30 frames waited |
+| `... con nmi` | NMI handler ran (` NONMI`: NMI on but it never ran) | `app_scan` |
+| `... nmi scan` | `app_scan` | `sram_probe`: BW-RAM `$40:0000-$42:FFFF` |
+| `... scan sram` | `sram_probe` | `fs_init` |
+| `... sram fs`, then the prompt | the shell | |
+
+The full sequence takes about five seconds: red, green, then a second of
+green while the RAM is cleared, blue, yellow, magenta, cyan, white, orange,
+then text. Filming it with a phone is the easiest record.
+
+Why the words matter: without the beacon, `con_init` turns the display on
+with a black backdrop and an empty tilemap, and `kcon_putc` flushes rows
+in batches, so nothing is painted until the shell first waits for a key.
+A black screen on the plain image therefore covers everything from reset
+to the prompt, NMI, `app_scan`, `sram_probe` and `fs_init` included, not
+only the steps before the console.
+
+### What each image changes
+
+- The reset vector points at `beacon_reset` (`calypsi/beacon.inc`) instead
+  of `__program_start`. It touches no RAM and no stack: forced blank, NMI,
+  IRQ, auto-joypad and HDMA off, mode 0, no mosaic, windows, window masks,
+  colour math or interlace, nothing on main or sub screen, fixed colour
+  black, CGRAM 0 red, display on at full brightness, then the C startup.
+- `__low_level_init` (empty in the library) paints green.
+- `beacon_far` sits at `$C0:FFE0`, a bank away from `main` (`$C1`): the
+  Makefile links the beacon with `linker-sa1-beacon.scm`, made from
+  `linker-sa1.scm` by cutting 32 bytes off bank `$C0`. It loops 4096
+  times, reading ROM, and returns.
+- The C checkpoints (`kernel/beacon.h`) are five register writes and a
+  `$4212` poll: no NMI, no library code, the same at either ROM speed.
+- The colour checkpoints set PPU state the plain image never sets (mosaic,
+  windows, window masks, fixed colour): `con_init` leaves those as power-on
+  or the sd2snes menu left them. If the beacon image reaches the prompt
+  and the plain one does not, that is the next lead.
+- **beacon-safe** also writes no CXB-FXB and never sets MEMSEL, so all of
+  the kernel runs at SlowROM. The cable's bit loop (`linkxfer.s`) is
+  cycle-counted for FastROM, so in this image the Pico link will not work;
+  it only has to show whether the kernel boots to a prompt.
+
+### Under Mesen
+
+`make SA1=1 BEACON=1 test-beacon` (also with `LINK_HW=1` and
+`BEACON_SAFE=1`) watches CGRAM entry 0 and the boot's register writes: the
+eight colours in order, each after its step and before the next, red from
+bank `$00` before anything else, green from `$C0`+, `beacon_far` entered
+from another bank after MEMSEL = 1, the mailbox up by orange, `con_init`'s
+black after orange, then the word line on screen and the shell prompt. The
+safe variant also asserts that CXB-FXB and MEMSEL are never written. All
+four PASS (2026-11-23); `test-shell` passes on both beacon images.
+`test-boot` times its settling window from power-on, which the holds
+overrun, so it runs on `BEACON_HOLD=1` builds (their own directories):
+PASS on both, as do `test-beacon` and `test-shell` there.
+
+### On the real cart
+
+1. Copy `snos-sa1-beacon.sfc` to the SD card. Boot it and note, or film,
+   the colours and the final screen. Then the same with
+   `snos-sa1-beacon-safe.sfc`.
+2. If either stops at `beacon: con` with no `nmi`, or at the colours, try
+   once more with the sd2snes in-game hooks off: the FPGA hooks the NMI
+   vector of every game (`cheat.v`, vector `$2A10`), the SA-1 core
+   included, and the probe never enabled NMI.
