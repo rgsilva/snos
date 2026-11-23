@@ -146,11 +146,11 @@ class E2E(unittest.IsolatedAsyncioTestCase):
         c.send("PRIVMSG #palestra :@everyone oi <@123>\r\n")
         c.send("PRIVMSG #palestra :\x01ACTION acena\x01\r\n")  # /raw; irc.c has no /me
         await self.settle()
-        self.assertEqual(self.posts[0], "**[SNES]** ola palco")
+        self.assertEqual(self.posts[0], "ola palco")
         self.assertNotIn("@everyone", self.posts[1])
         self.assertNotIn("<@", self.posts[1])
-        self.assertTrue(self.posts[1].startswith("**[SNES]** ric: "))
-        self.assertEqual(self.posts[2], "**[SNES]** ric: *acena*")
+        self.assertTrue(self.posts[1].startswith("ric: "))
+        self.assertEqual(self.posts[2], "ric: *acena*")
 
     async def test_private_message_not_bridged(self):
         c = await self.joined()

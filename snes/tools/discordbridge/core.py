@@ -119,7 +119,8 @@ def to_discord(prefix: str, text: str, console_nick: str, action: bool,
     if action:
         text = "*" + text + "*"
     who = "" if console_nick.lower() == default_nick.lower() else console_nick + ": "
-    return neutralize_mentions(f"{prefix} {who}{text}")[:1900]
+    out = " ".join(p for p in (prefix.strip(), who + text) if p)
+    return neutralize_mentions(out.strip())[:1900].strip()
 
 
 # ------------------------------------------------------------- moderation
@@ -356,7 +357,7 @@ class RelayConfig:
     queue_size: int = 20
     mute_file: str = "MUTE"
     allow_role: int | None = None
-    prefix: str = "**[SNES]**"
+    prefix: str = ""
 
 
 @dataclass

@@ -69,7 +69,7 @@ Configuracao por variaveis de ambiente, ou um arquivo `discordbridge.env`
 | `MUTE_FILE` | `MUTE` | se o arquivo existe, nada passa |
 | `BLOCKLIST` | `blocklist.txt` | lista de palavras (opcional) |
 | `ALLOW_ROLE` | (vazio) | id de cargo; so quem tem passa |
-| `PREFIX` | `**[SNES]**` | prefixo no Discord |
+| `PREFIX` | (vazio) | prefixo opcional nas mensagens do console no Discord, por exemplo `**[SNES]**` |
 
 Exemplo de `discordbridge.env`:
 
@@ -257,7 +257,7 @@ Bots e canais onde o console nao entrou nao entram no log (use `-v` para ver).
 - [ ] `discordbridge.py` rodando; log mostra `Discord ready` e `bridged channels` com so os canais certos.
 - [ ] `/raw LIST` no console mostra so esses canais.
 - [ ] Mande uma mensagem pelo celular: ela chega no console.
-- [ ] Digite no console: aparece no Discord com `[SNES]`.
+- [ ] Digite no console: aparece no Discord (com o prefixo, se `PREFIX` estiver definido).
 - [ ] Modo lento e AutoMod ligados.
 - [ ] `blocklist.txt` revisada.
 - [ ] `touch MUTE` e `rm MUTE` testados.

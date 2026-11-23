@@ -37,7 +37,7 @@ class Settings:
     mute_file: str = "MUTE"
     blocklist: str = "blocklist.txt"
     allow_role: Optional[int] = None
-    prefix: str = "**[SNES]**"
+    prefix: str = ""
     names_max: int = 48
     names_interval: float = 3.0
     names_order_interval: float = 60.0
@@ -73,7 +73,7 @@ def settings_from_env(env: dict[str, str], dry_run: bool = False) -> Settings:
         queue_size=int(g("QUEUE", "20")),
         mute_file=g("MUTE_FILE", "MUTE"),
         blocklist=g("BLOCKLIST", "blocklist.txt"),
-        prefix=g("PREFIX", "**[SNES]**"),
+        prefix=g("PREFIX"),
         names_max=int(g("NAMES_MAX", "48")),
         names_interval=float(g("NAMES_INTERVAL", "3")),
         names_order_interval=float(g("NAMES_ORDER_INTERVAL", "60")),

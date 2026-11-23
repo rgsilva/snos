@@ -141,7 +141,7 @@ class Channels(Base):
         self.assertIsNone(await self.quiet(c, 0.2))
         c.send("PRIVMSG #geral :ola geral\r\nPRIVMSG #palestra :ola palestra\r\n")
         await asyncio.sleep(0.1)
-        self.assertEqual(self.posts, [(8, "**[SNES]** ola geral"), (7, "**[SNES]** ola palestra")])
+        self.assertEqual(self.posts, [(8, "ola geral"), (7, "ola palestra")])
 
     async def test_not_joined_is_dropped_silently_and_counted(self):
         c = await self.console("#palestra")
@@ -245,7 +245,7 @@ class Changes(Base):
         self.assertIn("PRIVMSG #geral :", l[-1])
         c.send("PRIVMSG #geral :ainda sai\r\n")
         await asyncio.sleep(0.1)
-        self.assertEqual(self.posts, [(8, "**[SNES]** ainda sai")])
+        self.assertEqual(self.posts, [(8, "ainda sai")])
         c.send("JOIN #bate-papo\r\nPING :z\r\n")
         l = await c.until(lambda l: " PONG " in l)
         self.assertIn(" 403 ", l[0])  # one name per channel for this console
@@ -483,7 +483,7 @@ class DryRun(unittest.IsolatedAsyncioTestCase):
             l = await c.until(lambda l: "PRIVMSG" in l)
             self.assertEqual(l[-1], ":Ana!d@discord PRIVMSG #geral :oi do palco")
             c.send("PRIVMSG #geral :de volta\r\n")
-            self.assertIn("would post to Discord #geral: **[SNES]** de volta", await out("would post"))
+            self.assertIn("would post to Discord #geral: de volta", await out("would post"))
             await c.close()
         finally:
             p.kill()

@@ -65,6 +65,15 @@ class ToDiscord(unittest.TestCase):
         self.assertEqual(to_discord("**[SNES]**", "oi", "snes", False), "**[SNES]** oi")
         self.assertEqual(to_discord("**[SNES]**", "waves", "snes", True), "**[SNES]** *waves*")
         self.assertEqual(to_discord("**[SNES]**", "oi", "ric", False), "**[SNES]** ric: oi")
+        self.assertEqual(to_discord("", "oi", "snes", False), "oi")
+        self.assertEqual(to_discord("", "oi", "ric", False), "ric: oi")
+        self.assertEqual(to_discord("", "waves", "snes", True), "*waves*")
+        self.assertEqual(to_discord("", "waves", "ric", True), "ric: *waves*")
+        self.assertEqual(to_discord(" [S] ", "oi", "snes", False), "[S] oi")
+        for p in ("", "[S]", "  "):
+            for n in ("snes", "ric"):
+                out = to_discord(p, " oi ", n, False)
+                self.assertEqual(out, out.strip())
         self.assertLessEqual(len(to_discord("p", "x" * 5000, "snes", False)), 2000)
 
 
@@ -157,7 +166,7 @@ class RelayTests(unittest.TestCase):
         self.muted = False
         self.assertIsNone(r.from_discord(msg("d")))
         self.assertEqual(r.pop_due()[1], "d")
-        self.assertEqual(r.from_console("hi"), "**[SNES]** hi")
+        self.assertEqual(r.from_console("hi"), "hi")
 
     def test_mute_file(self):
         with tempfile.TemporaryDirectory() as d:
