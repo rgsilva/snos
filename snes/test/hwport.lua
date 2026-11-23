@@ -215,8 +215,9 @@ function P.new(gw, opt)
     end
   end, emu.eventType.endFrame)
   -- `need` says the run must have had foreground exchanges at all, so that
-  -- a pass is not vacuous.
-  function pico.mask_report(r, label, need)
+  -- a pass is not vacuous; `fg_min`, if given, is how many (0: none needed,
+  -- the gates are still judged on any there were).
+  function pico.mask_report(r, label, need, fg_min)
     print(string.format("%s: %d foreground masks held an exchange; NMI unmasked at least"
       .. " %.1f lines before vblank, at most %.1f lines after the last clock", label,
       pico.fg_masks, pico.margin_min or -1, pico.tail_max))
@@ -245,7 +246,9 @@ function P.new(gw, opt)
     end
     r.check(pico.masked_vblanks == 0, pico.masked_vblanks ..
       " vblanks began with NMI masked by a foreground poll")
-    if need then r.check(pico.fg_masks > 0, "no foreground exchange to check") end
+    if need and pico.fg_masks < (fg_min or 1) then
+      r.check(false, "no foreground exchange to check")
+    end
   end
 
   emu.addMemoryCallback(function(addr, value)

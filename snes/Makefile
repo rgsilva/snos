@@ -177,12 +177,20 @@ $(BUILD):
 # the ROM actually has, so link_serial.c's two last-moment lines are spliced
 # in too (@XFER_LAST@, @XFER_LAST_HDMA@), and the volume's size in KB
 # (@SRAM_KB@), which differs on the SA-1 image.
-XFER_LAST := $(shell sed -n 's/^.define XFER_LAST \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
-XFER_LAST_HDMA := $(shell sed -n 's/^.define XFER_LAST_HDMA \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
+# Each is defined twice in link_serial.c, SlowROM's between `#ifdef SLOWROM`
+# and `#else`, stock's between that `#else` and `#endif`; the sed range picks
+# the build's. SPEED_FG_MIN is how many foreground exchanges test-hwspeed
+# must see: none at SlowROM, where a second one no longer fits a speedtest
+# frame (link_serial.c, FG_LAST).
+SPEED_FG_MIN := $(if $(SLOWROM),0,1)
+comma := ,
+XFER_RANGE := $(if $(SLOWROM),/^.ifdef SLOWROM/$(comma)/^.else/,/^.else/$(comma)/^.endif/)
+XFER_LAST = $(shell sed -n '$(XFER_RANGE)s/^.define XFER_LAST \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
+XFER_LAST_HDMA = $(shell sed -n '$(XFER_RANGE)s/^.define XFER_LAST_HDMA \([0-9]*\)u.*/\1/p' $(K)/link_serial.c)
 $(BUILD)/test/%.lua: test/%.lua test/lib.lua test/gwip.lua test/hwport.lua tools/mktest.py \
                      $(K)/link_serial.c $(K)/sram.h | $(BUILD)
 	python3 tools/mktest.py $< test/lib.lua $@.tmp
-	sed 's/@XFER_LAST@/$(XFER_LAST)/; s/@XFER_LAST_HDMA@/$(XFER_LAST_HDMA)/; s/@SRAM_KB@/$(SRAM_KB)/g' \
+	sed 's/@XFER_LAST@/$(XFER_LAST)/; s/@XFER_LAST_HDMA@/$(XFER_LAST_HDMA)/; s/@SRAM_KB@/$(SRAM_KB)/g; s/@SPEED_FG_MIN@/$(SPEED_FG_MIN)/' \
 	  $@.tmp > $@
 	rm -f $@.tmp
 

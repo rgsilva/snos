@@ -265,7 +265,9 @@ emu.addEventCallback(function()
   print(string.format("hwspeed: %d exchanges in %d frames, %d kicks, first-to-last clock %.0f mc",
     port.exchanges, frame, port.kicks, (port.span_sum or 0) / math.max(port.exchanges, 1)))
   r.check(port.collisions == 0, port.collisions .. " exchanges were still running at vblank")
-  port.mask_report(r, "hwspeed", true)
+  -- The SlowROM image fits no second exchange in a speedtest frame
+  -- (link_serial.c, FG_LAST): the Makefile says how many to expect.
+  port.mask_report(r, "hwspeed", true, tonumber("@SPEED_FG_MIN@"))
   prof_report()
   r.finish()
 end, emu.eventType.endFrame)

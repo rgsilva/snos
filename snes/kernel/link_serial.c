@@ -81,9 +81,19 @@ static uint8_t xfer_count;
  * restart and stage the answer it computed to the last exchange
  * (pico/port.c); without it the answer waits for the exchange after. So such
  * an exchange is kicked first: a short burst of our own (linkxfer.s), which
- * the adapter takes exactly as it takes the auto-read. */
+ * the adapter takes exactly as it takes the auto-read.
+ *
+ * SlowROM (the SA-1 image, 2026-11-23): the clocks take 90.6 lines from
+ * first to last, and check to unmask is 104.1 lines, 107.5 under HDMA (the
+ * gates raised to collect them, test-hwspeed/-hwpanel). 115 and 112 leave
+ * 4.9 and 4.5. */
+#ifdef SLOWROM
+#define XFER_LAST 115u
+#define XFER_LAST_HDMA 112u
+#else
 #define XFER_LAST 131u
 #define XFER_LAST_HDMA 128u
+#endif
 static int xfer(const uint8_t *tx) {
   uint8_t line = beam_line();
   if (line > (link_serial_hdma ? XFER_LAST_HDMA : XFER_LAST) && line < 229u) return 0;
@@ -106,8 +116,18 @@ static int xfer(const uint8_t *tx) {
  * frame's NMI and auto-joypad read are both done (229 on; 256-261 read as
  * 0-5, inside the early zone and just as safe). xfer() makes the final call;
  * this one only keeps it from having to refuse often, because a refused
- * exchange costs a resend. */
+ * exchange costs a resend.
+ *
+ * SlowROM: the C before the clocks is 35.6 lines on average, so 79. The
+ * NMI there, with its exchange, ends near line 104 and by 152 at worst,
+ * so in practice the second exchange fits only in a frame whose
+ * NMI left the link to the console (traps.c): the speedtest runs at one a
+ * frame, exch 1 or 2 alike (docs/sa1-notes.md). */
+#ifdef SLOWROM
+#define FG_LAST 79u
+#else
 #define FG_LAST 100u
+#endif
 int link_serial_fg_fits(uint16_t line) {
   if (!up || exch_max < 2u) return 0;
   if (xfer_frame == snos_frames && xfer_count >= exch_max) return 0;

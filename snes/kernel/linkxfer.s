@@ -28,6 +28,12 @@
 
               .extern _Dp
 
+#ifdef SLOWROM
+QUIET         .equ    183
+#else
+QUIET         .equ    220
+#endif
+
               .section farcode, root
               .public link_serial_xfer, link_serial_kick
 
@@ -66,9 +72,10 @@ xs_idle:
               ;; LATCH low, then silence: 220 x 5 cycles at 6 master cycles
               ;; is ~6600 master cycles, ~307 us, past the adapter's gap
               ;; timeout with margin. It restarts at bit 0 in that time.
+              ;; SlowROM fetches at 8: 36 master cycles a turn, so 183.
               lda     #0
               sta     abs:0x4016
-              lda     #220
+              lda     #QUIET
 xs_quiet:     dec     a
               bne     xs_quiet
 xs_byte:
