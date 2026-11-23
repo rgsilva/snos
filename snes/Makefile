@@ -543,7 +543,7 @@ test-wire: $(ROM) $(BUILD)/test/wire.lua
 #   HWSPEED="seconds=5, tune={[[net tune window 1]]}"
 # HWPROF=1 also times the kernel functions in HWPROF_FUNCS (tools/hwprof.py).
 HWPROF_FUNCS ?= snos_nmi_c net_service ip_service snos_cop_c kbd_idle uip_process \
-                net_read net_write link_serial_recv link_serial_send build_frame \
+                net_read net_write link_serial_recv link_serial_send \
                 net_service_fg pad_latch proc_tick uip_len
 test-hwspeed: $(ROM) $(BUILD)/test/hwspeed.lua
 	$(call check_env)
