@@ -1401,6 +1401,12 @@ and its decisions are [docs/sa1-port-plan.md](docs/sa1-port-plan.md); what
 moved where, and the checklist for the cart, [docs/sa1-notes.md](docs/sa1-notes.md).
 Phase 2, an app that starts a routine on the SA-1, waits for that run.
 
+*2026-11-23:* on the cart the image went black once FastROM was on and
+booted without it, so the SA-1 image is SlowROM, its timing constants
+measured again behind `SLOWROM`: text ~20% slower than stock, the cable a
+third slower for want of a second exchange a frame (docs/sa1-notes.md,
+"SlowROM").
+
 ---
 
 ## 5. Why kernel-owned NMI is the load-bearing decision

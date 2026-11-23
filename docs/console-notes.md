@@ -69,6 +69,15 @@ the emulator ROM keeps 64 green for the tests (`make CON_COLS=32
 CON_COLOUR=white` previews). The mode is published at `$7EFDF0` for the
 harness, which decodes one layer or two to match.
 
+## SlowROM (2026-11-23)
+
+The SA-1 image runs SlowROM, and the flush's -O0 setup with it: a full
+flush lands 7 or 8 transfers at 64 columns and 6 or 7 rows at 32, so
+`SLOWROM` builds move 3 and 6 rows a flush (`CON_FLUSH_ROWS`,
+`CON_FLUSH_ROWS_NARROW`; docs/sa1-notes.md has the numbers). `make
+test-pace` is the instrument: row DMAs per vblank, lost ones, and frames
+for `help` to paint.
+
 ## Layout recap
 
 32x32 tilemap per layer used as a 28-row visible ring; scroll bumps BG1/BG2

@@ -544,6 +544,18 @@ have the mirror half.
   peer adds WiFi and lwIP to every round trip, which these numbers do not
   include.
 
+## SlowROM, the SA-1 image (2026-11-23)
+
+The SA-1 image runs the S-CPU at SlowROM (docs/sa1-notes.md, "SlowROM"),
+and everything above was measured at FastROM. There a bit takes ~242
+master cycles, a frame's clocks 90.6 lines, check to unmask 104.1 lines
+(107.5 under HDMA), so `SLOWROM` builds gate at 115 and 112, start
+foreground polls by line 79, and wait 183 quiet turns instead of 220. The
+NMI with its exchange is 141 lines and a foreground poll 128, more than a
+frame together: a speedtest gets one exchange a frame whatever `net tune
+exch` says, 2482 / 2250 / 2336 + 1636 B/s against 3650 / 3375 / 2971 +
+2148 on the stock image the same day. The Pico is unchanged.
+
 ## Not sure about
 
 - The host bench overestimates how often the foreground is free when the NMI

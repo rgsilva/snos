@@ -20,7 +20,7 @@ The SA-1 cannot see WRAM, the PPU, DMA or the controller ports.
 |---|---|---|
 | Build | `make SA1=1` builds into `build-sa1/`; with `LINK_HW=1` into `build-hw-sa1/` | Same pattern as `LINK_HW`. One header cannot serve both cartridges. |
 | Kernel code | Same sources. Differences behind `#ifdef SA1` in `sram.c`, `main.c`, and in the linker file and header | The suite must pass on both images. |
-| ROM speed | FastROM stays on (`$420D`) | Measured on the cartridge: it works with the SA-1 (`a:F` 1.2x). |
+| ROM speed | ~~FastROM stays on (`$420D`)~~ **SlowROM: the SA-1 image never sets MEMSEL** (corrected 2026-11-23) | ~~Measured on the cartridge: it works with the SA-1 (`a:F` 1.2x).~~ The probe's `a:F` was one short loop from bank `$80`. The kernel with MEMSEL set went black in `kcon_init` on the owner's sd2snes, and booted with it off (the beacon, docs/sa1-notes.md). Every retail SA-1 game is SlowROM. Timing constants have SlowROM values behind `SLOWROM`. |
 | Storage | BW-RAM, linear at `$40:0000-$43:FFFF` | One far pointer, no 8 KB windows. DMA from it to VRAM works on the cartridge. |
 | BW-RAM split | Filesystem: first 192 KB. SA-1 work area: last 64 KB (`$43:0000-$43:FFFF`) | The SA-1 has no other large RAM. One constant; change it if DOOM needs more. |
 | SA-1 units not used | Division, cumulative sum, type 1 character conversion, write protection | Wrong or absent on the cartridge. Multiply is correct. |

@@ -216,7 +216,8 @@ byte-identical to `main`'s.
   instruction).
 - `tools/raw2sfc.py --sa1`: size byte and checksum at `$7FD7`/`$7FDC`.
 - `kernel/sram.c`: `sa1_hold()`, first in `hw_init`: CCNT `$20`, SIE 0, SIC
-  `$A0`, CXB-FXB 0-3, SBWE `$80`, SIWP `$FF`, and a write/read of I-RAM
+  `$A0`, CXB-FXB 0-3 (dropped 2026-11-23: their reset values), SBWE `$80`,
+  SIWP `$FF`, and a write/read of I-RAM
   `$3000` (put back) as the presence test. `sram_ptr()` is `$40:0000 + off`;
   `sram_probe()` steps 8 KB through the first 192 KB only (`SA1_FS_KB` in
   `sram.h`, the one constant). `fs.c` clips its BW-RAM DMA at the bank end.
@@ -265,7 +266,9 @@ The LINK_HW tests were measured on the stock map; run on both images
 
 The kernel code is the same and the ROM speed the same (FastROM, the trap
 shims in slow bank `$00` on both), so the gates hold unchanged; the small
-differences are where the frames fall in a run, not timing.
+differences are where the frames fall in a run, not timing. *(2026-11-23:
+the SA-1 image is SlowROM now and these figures are superseded; see
+"SlowROM" below.)*
 
 ### What surprised
 
@@ -297,7 +300,7 @@ differences are where the frames fall in a run, not timing.
    `cart SRAM 192 KB, free 190 KB, ...` (wrapped at 32 columns),
    `SA-1 yes, held in reset`, `BW-RAM files 192K at $400000`,
    `BW-RAM SA-1   64K at $430000`.
-4. `debug ver`: `65816 native, SA-1 cart fastrom, SA-1 in reset`.
+4. `debug ver`: `65816 native, SA-1 cart slowrom, SA-1 in reset`.
 5. `ls`, `cat MOTD.TXT`, `run hello` (`[hello exited 42]`): ROMFS at `$CF`
    and an app at `$C8`.
 6. `write KEEP.TXT survived a power cycle`, then `cat KEEP.TXT`. Wait ten
@@ -318,11 +321,36 @@ colour and holds it for half a second (`BEACON_HOLD`, 30 frames); after
 on the TV, or the last word, names the last checkpoint reached; the step
 after it is the suspect.
 
-    make SA1=1 LINK_HW=1 BEACON=1                # build-hw-sa1-beacon/snos-sa1-beacon.sfc
-    make SA1=1 LINK_HW=1 BEACON=1 BEACON_SAFE=1  # build-hw-sa1-beacon-safe/snos-sa1-beacon-safe.sfc
+    make SA1=1 LINK_HW=1 BEACON=1                   # build-hw-sa1-beacon/snos-sa1-beacon.sfc
+    make SA1=1 LINK_HW=1 BEACON=1 BEACON_FASTROM=1  # build-hw-sa1-beacon-fastrom/snos-sa1-beacon-fastrom.sfc
 
-Without `BEACON` all four images (stock, `LINK_HW`, `SA1`, `SA1 LINK_HW`)
-are byte-identical to before. `BEACON` without `SA1` is refused.
+The plain beacon is the SA-1 image as it now ships, SlowROM, with the
+colours. `BEACON_FASTROM` sets MEMSEL where the image used to, between cyan
+and white, and is otherwise the same image, SlowROM constants included. Until
+2026-11-23 there were two others: the plain beacon wrote CXB-FXB and set
+MEMSEL, and `BEACON_SAFE` did neither; the next section says what the cart
+made of them. `BEACON` without `SA1` is refused.
+
+### What the cart said (2026-11-23)
+
+The owner's sd2snes, firmware 1.11.0b1, with the Pico on port 2:
+
+- The beacon of the time (CXB-FXB written, FastROM on): the colours ran
+  through orange, then the screen went black and stayed so, no
+  `beacon: con`. So reset, far code, all of `sa1_hold`, MEMSEL, a far call
+  and `mb_init`/`stack_paint` ran, and it died in or just after
+  `kcon_init`, the first long stretch of code with FastROM on.
+- beacon-safe (neither): to the prompt, `beacon: con nmi scan sram fs`,
+  `192K SRAM`, the caret. "Super slow, but it loaded"; what was slow was
+  the text appearing ("SlowROM" below).
+
+The working conclusion: on this cart the S-CPU cannot run from ROM at
+FastROM speed while the cart is an SA-1, as no retail SA-1 game does; the
+probe's one short FastROM loop from bank `$80` proved less than it was
+taken to. CXB-FXB looked innocent (four checkpoints after them) but were
+redundant, so they went too. `snos-sa1-beacon-fastrom.sfc` is the
+confirmation: it should die after orange again. If it boots, FastROM was
+not the cause.
 
 ### The checkpoints
 
@@ -332,10 +360,10 @@ are byte-identical to before. `BEACON` without `SA1` is refused.
 | red | reset stub (bank `$00`, emulation mode, PPU set up) | C startup: first `jsl` into bank `$C1`/`$C2` at SlowROM |
 | green | `__low_level_init`, the first code from `$C0`+ | 43 KB RAM clear and data copy (about 1 s), then `main` |
 | blue | `main` | CCNT, SIE, SIC writes |
-| yellow | CCNT `$20`, SIE `0`, SIC `$A0` | CXB-FXB writes (skipped in beacon-safe) |
-| magenta | CXB-FXB (in beacon-safe: the place where they were) | SBWE, SIWP, the I-RAM test at `$3000` |
-| cyan | SBWE, SIWP, I-RAM test | FastROM on (not in beacon-safe), a far call to `$C0:FFE0` |
-| white | FastROM, the far call returned | rest of `hw_init`, `mb_init`, `stack_paint` |
+| yellow | CCNT `$20`, SIE `0`, SIC `$A0` | SBWE, SIWP writes |
+| magenta | SBWE, SIWP | the I-RAM test at `$3000` |
+| cyan | the I-RAM test | `BEACON_FASTROM`: FastROM on; then a far call to `$C0:FFE0` |
+| white | (FastROM on,) the far call returned | rest of `hw_init`, `mb_init`, `stack_paint` |
 | orange | `mb_init`, `stack_paint` | `kcon_init`: forced blank, fonts by DMA from ROM, display on |
 | colours, then black, no text | (orange was last) | `kcon_init` or its first flush |
 | `v0.1` and `beacon: con` | the console | `kbd_init`: NMI on, then 30 frames waited |
@@ -373,31 +401,190 @@ only the steps before the console.
   windows, window masks, fixed colour): `con_init` leaves those as power-on
   or the sd2snes menu left them. If the beacon image reaches the prompt
   and the plain one does not, that is the next lead.
-- **beacon-safe** also writes no CXB-FXB and never sets MEMSEL, so all of
-  the kernel runs at SlowROM. The cable's bit loop (`linkxfer.s`) is
-  cycle-counted for FastROM, so in this image the Pico link will not work;
-  it only has to show whether the kernel boots to a prompt.
+- **`BEACON_FASTROM`** sets MEMSEL and so runs everything after cyan at
+  FastROM with constants measured at SlowROM: safe for the cable (its
+  gates only get more room) but not representative of anything else.
 
 ### Under Mesen
 
 `make SA1=1 BEACON=1 test-beacon` (also with `LINK_HW=1` and
-`BEACON_SAFE=1`) watches CGRAM entry 0 and the boot's register writes: the
-eight colours in order, each after its step and before the next, red from
-bank `$00` before anything else, green from `$C0`+, `beacon_far` entered
-from another bank after MEMSEL = 1, the mailbox up by orange, `con_init`'s
-black after orange, then the word line on screen and the shell prompt. The
-safe variant also asserts that CXB-FXB and MEMSEL are never written. All
-four PASS (2026-11-23); `test-shell` passes on both beacon images.
+`BEACON_FASTROM=1`) watches CGRAM entry 0 and the boot's register writes:
+the eight colours in order, each after its step and before the next, red
+from bank `$00` before anything else, green from `$C0`+, SBWE and SIWP
+before magenta, the I-RAM test's write to `$3000` before cyan,
+`beacon_far` entered from another bank, the mailbox up by orange,
+`con_init`'s black after orange, then the word line on screen and the
+shell prompt. No image may write CXB-FXB; the plain beacon may not write
+MEMSEL, `BEACON_FASTROM` must write it once, = 1, before the far call.
 `test-boot` times its settling window from power-on, which the holds
-overrun, so it runs on `BEACON_HOLD=1` builds (their own directories):
-PASS on both, as do `test-beacon` and `test-shell` there.
+overrun, so it runs on `BEACON_HOLD=1` builds (their own directories).
+Results for the current variants are under "SlowROM" below.
 
 ### On the real cart
 
-1. Copy `snos-sa1-beacon.sfc` to the SD card. Boot it and note, or film,
-   the colours and the final screen. Then the same with
-   `snos-sa1-beacon-safe.sfc`.
+1. Copy `snos-sa1-beacon-fastrom.sfc` to the SD card. Boot it and note,
+   or film, the colours and the final screen. Expected: through orange,
+   then black, as on 2026-11-23. `snos-sa1-beacon.sfc` is the control: it
+   should reach the prompt, as beacon-safe did.
 2. If either stops at `beacon: con` with no `nmi`, or at the colours, try
    once more with the sd2snes in-game hooks off: the FPGA hooks the NMI
    vector of every game (`cheat.v`, vector `$2A10`), the SA-1 core
    included, and the probe never enabled NMI.
+
+## SlowROM (2026-11-23)
+
+After the cart run above, the SA-1 image is SlowROM: with `SA1=1` the
+Makefile defines `SLOWROM`, `main.c` never sets MEMSEL (only
+`BEACON_FASTROM` does), and `sa1_hold` no longer writes CXB-FXB. Every
+constant that was measured or tuned at FastROM was measured again on the
+SlowROM image under Mesen, which charges the S-CPU 8 master cycles for a
+ROM fetch here, and given a SlowROM value behind `SLOWROM`. The stock
+images (`make`, `make LINK_HW=1`) are byte-identical to `main`'s; every app
+`.raw` is byte-identical between the images, and to `main`'s.
+
+### The instrument
+
+`make test-pace` (any image; `PACE="adapter=false"` leaves port 2 empty):
+frames from power-on to the prompt on screen, `help` and `cat NET.TXT`
+painted, ten keys typed to echoed; behind them the NMI's length, how many
+NMIs ran a cable exchange while the console owed VRAM, the row DMAs per
+vblank (landed, started in active display and lost, and in vblanks that
+ended with rows still owed), `pad_latch`'s entry and length, and
+`con_init`'s length. On `LINK_HW` the adapter model of `test/hwport.lua`
+answers on port 2 from power-on, as the owner's Pico did.
+
+### Stock FastROM against SA-1 SlowROM
+
+`LINK_HW` images, 32 columns, adapter answering, unless stated. Cable
+figures from `test-hwspeed` with `HWPROF=1`, `test-hwresponse`,
+`test-hwpanel`.
+
+| | stock FastROM | SA-1 SlowROM |
+|---|---|---|
+| speedtest down / up / both (defaults) | 3650 / 3375 / 2971 + 2148 B/s | 2482 / 2250 / 2336 + 1636 B/s |
+| exchanges per frame in the speedtest | 1.24 | 0.93 |
+| NMI, idle prompt (one exchange) | 117.1 lines | 136.7 lines |
+| NMI in the speedtest, mean / worst | 120.9 / 162.0 lines | 141.5 / 183.8 lines |
+| a frame's clocks, first to last | 76.9 lines (205 mc a bit) | 90.6 lines (242 mc a bit) |
+| check to unmask, HDMA off / on | 89.0 / 92.0 lines | 104.1 / 107.5 lines |
+| gates, and worst-case unmask before vblank | 131 / 128: 4.0 / 4.1 lines | 115 / 112: 4.9 / 4.5 lines |
+| rows per full flush, 32 columns | 8 or 9 (budget 8) | 6 or 7 (budget 6) |
+| transfers per full flush, 64 columns | 8 to 10 (budget 4 rows) | 7 or 8 (budget 3 rows) |
+| `con_init` (forced blank) | 2979 lines, 11.4 frames | 3497 lines, 13.3 frames |
+| power-on to prompt on screen | 93 frames | 94 frames |
+| `help` painted, adapter attached | 21 frames | 25 frames |
+| `cat NET.TXT` painted (3 pages), adapter attached | 148 frames | 180 frames |
+| the same with no adapter | 129 frames | 152 frames |
+| `help` / `cat` painted, emulator ROM, 64 columns | 26 / 128 frames | 32 / 155 frames |
+| key to echo: mailbox / adapter keyboard | 3 / 6.9 frames | 3 / 5.0 frames |
+| hwresponse key / START+SELECT stop | 21 / 47 frames | 15 / 46 frames |
+| hwpanel SELECT to panel / RIGHT to highlight | 18 / 4 frames | 16-17 / 4-6 frames |
+
+Text is 19-23% slower, `con_init` 17%: the honest cost of SlowROM for
+-O0 code. Boot to prompt does not move, because the C startup's 43 KB RAM
+clear (69 of the 93 frames) runs before MEMSEL is set on either image.
+The cable loses a third, and that is not the per-exchange cost: at one
+exchange a frame stock does 2628 / 2352 / 2482 + 1739
+(docs/link-throughput.md), 6% above SlowROM. It is the second exchange,
+which no longer fits: the NMI with its exchange (141 lines) and a
+foreground poll (128) are more than a frame. `net tune exch 1` and the
+default 2 measure the same at SlowROM; 2 stays, because a frame whose NMI
+left the link to the console still gets an exchange from the foreground
+(the hwresponse key, 15 frames). Every NMI ends by line 152, so none is
+still running when the next vblank begins; `pad_latch` starts 0.44 lines
+into the NMI and spins 3.5 lines on both images, nowhere near its guards
+(which, being pass counts, only cover more time at SlowROM).
+
+### What was retuned
+
+| constant | where | stock | SlowROM | from |
+|---|---|---|---|---|
+| `CON_FLUSH_ROWS` | console.h | 4 | 3 | full flushes landed 7 or 8 transfers |
+| `CON_FLUSH_ROWS_NARROW` | console.h | 8 | 6 | full flushes landed 6 or 7 rows |
+| `XFER_LAST` | link_serial.c | 131 | 115 | check to unmask 104.1 lines |
+| `XFER_LAST_HDMA` | link_serial.c | 128 | 112 | 107.5 under HDMA |
+| `FG_LAST` | link_serial.c | 100 | 79 | 35.6 lines of C before the clocks |
+| `QUIET` (lead-in turns) | linkxfer.s | 220 | 183 | 36 master cycles a turn, ~307 us |
+| `POLL_LAST` (mailbox poll) | input.c | 134 | 122 | longest mask 94.8 lines (82.0 stock) |
+
+Each was measured with the gate or budget raised, then set to leave the
+margin stock has (four lines before vblank for the cable, the least full
+flush for the console). Checked and left alone: the keyboard panel's row
+DMAs (one row a call, already checked against vblank: 16 frames to paint
+the panel), the HDMA split (no CPU timing), the kick (eight clocks ~6.9 us
+apart, still well inside the Pico's 64 us gap timer), the exchange budget
+`EXCH_MAX` 3 and default 2, `net tune window` 4, `pad_latch` and `win_open`
+guards, and the apps: `vnc` closes its write window by line 213 on both
+images (`test-vnc`, 0 blanks outside 192-224), `view` works in forced
+blank, `speedtest` and `mc` count frames, not cycles. `apps/wire` links
+its own copy of `linkxfer.s` without `SLOWROM` and keeps 220 turns, ~368
+us at SlowROM, which the adapter takes as it takes the shorter one. The
+Pico firmware is unchanged: its gap timer is 64 us and the longest gap
+between clocks at SlowROM is ~11 us.
+
+One bug, not a constant: after spawning a background job the shell waits
+a second without flushing, and the NMI leaves the link alone while a row is
+owed, so a dirty row held the job's first datagram for that second. At
+SlowROM the echoed command was still dirty when the wait began, and
+`test-netreset`'s background `get` sent its DNS query after 70 frames
+instead of 11 (the test allows 30). `kcon_sync` before the wait fixes it.
+The race is the stock image's too; the fix sits under `SLOWROM` only to
+keep that image byte-identical, and should lose the `#ifdef` when stock
+may change.
+
+One test value differs on the SlowROM image and is spliced from the build,
+like `@SRAM_KB@`: `test-hwspeed` asks for at least one foreground exchange
+on stock and none at SlowROM (`@SPEED_FG_MIN@`); the gate checks still
+judge any there are. `@XFER_LAST@` and `@XFER_LAST_HDMA@` are read from the
+build's side of `link_serial.c`'s `#ifdef`.
+
+### Why it was "super slow"
+
+The owner's run was `snos-sa1-beacon-safe.sfc` with the Pico attached.
+Under Mesen, the same image with the adapter model answering:
+
+- **The beacon itself.** Prompt on screen at frame 399 (6.7 s), against
+  94 for the plain SlowROM image. Eight colours held 30 frames each (4 s),
+  the 30-frame NMI check, and each word checkpoint flushed alone: the
+  console line came out a word at a time over 73 frames (1.2 s), where the
+  plain image paints everything at once at frame 94. That is 305 frames,
+  5.1 s, the whole difference to the plain image.
+- **Shell text, ~20% slower than stock**: `help` 25 frames against 21,
+  `cat NET.TXT` 181 against 148. Part of it was the FastROM budget of 8
+  rows a flush at 32 columns: at SlowROM only 6 or 7 fit, and 10 of 103
+  row DMAs in `cat` started in active display and were redrawn a flush
+  later. With 6, none is lost and `cat` takes 180; the rest is SlowROM.
+- **The cable timing mismatch** did not slow text: the NMI hands the vblank
+  to the console whenever a row is owed, and in every run no NMI ran an
+  exchange while one was. It mattered during transfers: with the FastROM
+  gates a foreground exchange could still hold NMI masked when vblank
+  began (2-3 times in test-hwresponse and test-hwpanel), the hazard that
+  can cascade into nested NMIs. The SlowROM gates remove it.
+
+So Mesen explains about 5 s of beacon and a fifth on top of stock for
+text, and nothing slower. If the plain SlowROM image still feels much
+slower than that on the cart (`help` should take ~0.4 s), the cart is
+doing something Mesen does not model, and timing `help` and `cat NET.TXT`
+there against the figures above is the next measurement.
+
+### Results (2026-11-23)
+
+`make -k SA1=1 test`: 33 RESULT PASS, no make errors. `make SA1=1
+test-vnc`: PASS, latest blank close line 213. `SA1=1 LINK_HW=1`:
+`test-hwspeed`, `test-hwresponse`, `test-hwpanel` PASS; `test-hwspeed` on
+the stock `LINK_HW` image PASS after the test change. `test-beacon` PASS
+on `BEACON=1` and `BEACON=1 BEACON_FASTROM=1`, with and without `LINK_HW`;
+`test-beacon`, `test-boot` and `test-shell` PASS on both `BEACON_HOLD=1`
+`LINK_HW` builds. Stock `make` and `make LINK_HW=1` images byte-identical
+to `main`'s, every app identical across all four images and to `main`'s.
+
+### For the next cart run
+
+- `snes/build-hw-sa1/snos-sa1.sfc`: the SlowROM image, Pico on port 2.
+  Time `help` (Mesen: 25 frames, ~0.4 s) and `cat NET.TXT` (180 frames
+  with its two page stops), then `net speedtest` (Mesen: 2482 / 2250 /
+  2336 + 1636).
+- `snes/build-hw-sa1-beacon-fastrom/snos-sa1-beacon-fastrom.sfc`: should
+  stop after orange. If it boots, FastROM was not the cause.
+- `snes/build-hw-sa1-beacon/snos-sa1-beacon.sfc`: the control, should
+  reach the prompt.
