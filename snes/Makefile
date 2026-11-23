@@ -159,7 +159,7 @@ KERNEL_O := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(KERNEL_C))) \
             $(patsubst %.s,$(BUILD)/%.o,$(notdir $(KERNEL_S))) \
             $(BUILD)/fontvram.o
 
-.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel test-sa1 test-beacon clean
+.PHONY: all kernel apps bridge test test-host test-boot test-input test-history test-shadow test-shell test-apps test-fs test-restart test-basic test-panel test-editor test-mtask test-bg test-bgbare test-telnetd test-ip test-net test-netreset test-pager test-httpd test-irc test-vnc test-mc test-kbd test-keys test-wire test-speedtest test-mode test-hwspeed test-hwresponse test-hwpanel test-sa1 test-beacon test-pace clean
 # The combined Lua bridge is built by default. It used to be produced only on
 # demand into build/, which is gitignored — so it existed, worked, and was
 # invisible. Mesen loads exactly one script at a time, so this is the file to
@@ -572,6 +572,18 @@ test-hwpanel: $(ROM) $(BUILD)/test/hwpanel.lua
 	$(call check_env)
 	@test -n "$(LINK_HW)" || { echo "test-hwpanel needs LINK_HW=1"; exit 1; }
 	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/hwpanel.lua
+
+# How fast the console feels on this image: boot to prompt, `help` and a file
+# painted, key to echo, and the row DMAs and NMI lengths behind them, with the
+# adapter model answering on port 2 (PACE="adapter=false" for none). Prints
+# numbers, like test-hwspeed; not in `test`. `make SA1=1 LINK_HW=1 test-pace`.
+test-pace: $(ROM) $(BUILD)/test/pace.lua
+	$(call check_env)
+	rm -f "$(MESEN_SRM)"
+	addr=$$(python3 tools/hwprof.py $(BUILD) snos_nmi_c pad_latch dirty con_panel_dirty) && \
+	sed "s|^-- @CONFIG@.*|CONFIG = {$(PACE)}; CONFIG.linkhw = $(if $(LINK_HW),true,false); CONFIG.addr = $$addr|" \
+	  $(BUILD)/test/pace.lua > $(BUILD)/test/pace-run.lua
+	sh tools/runtest.sh "$(MESEN)" $(ROM) $(BUILD)/test/pace-run.lua
 
 # The SA-1 image's own checks (docs/sa1-notes.md): the 192 KB volume, the
 # SA-1's 64 KB left alone, the chip held in reset, and a file across an
