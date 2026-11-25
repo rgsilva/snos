@@ -371,7 +371,7 @@ therefore follows the same console window, one-segment output, busy-link
 deferral, retry and FIN rules as an external TCP flow. `net speedtest` with no
 argument measures the console-to-Pico link in tier 2; an explicit host and port
 continues to use a remote peer, and tier 1 remains the PC `speedtest.py` path.
-The `nat:` status line reports active local peers as `speed=`.
+The `[NAT]` status line reports active local peers as `speed=`.
 
 UDP has eight fixed flows and preserves the console-visible source address.
 `10.0.2.3` rotates the DHCP resolvers and falls back to 1.1.1.1 then 8.8.8.8;
@@ -397,7 +397,7 @@ reply from the host that sent it. The PCB is removed when the last flow
 expires and on reset, mode switch and WiFi loss, which also free queued
 replies. ICMP errors (unreachable, TTL exceeded) are not mapped back: they
 quote the Pico's own header, which would need rewriting, so they are dropped;
-`slirp.py` does not relay them either. The `nat:` line reports `icmp=` flows.
+`slirp.py` does not relay them either. The `[NAT]` line reports `icmp=` flows.
 
 `IPFWD`/`IPUNFWD` bind/listen on the Pico and accepted sockets become inbound
 console SYNs. Accepted sockets take ownership callbacks before they are

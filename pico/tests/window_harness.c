@@ -63,7 +63,7 @@ bool relay_send(uint8_t type, const uint8_t *data, size_t len) {
     (void)type; (void)data; (void)len;
     return false;
 }
-void log_puts(const char *s) { (void)s; }
+int log_event(const char *s, ...) { (void)s; return 0; }
 
 /* --- the streams --- */
 #define STREAM 400000

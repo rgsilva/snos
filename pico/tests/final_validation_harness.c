@@ -39,7 +39,7 @@ void cyw43_arch_lwip_end(void) {
     }
     --locks;
 }
-int log_puts(const char *s) { (void)s; return 0; }
+int log_event(const char *s, ...) { (void)s; return 0; }
 static err_t net_output(struct netif *n, struct pbuf *p, const ip4_addr_t *ip) {
     (void)n; (void)p; (void)ip; return ERR_OK;
 }

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "log.h"
 #include <inttypes.h>
 #include "pico/stdlib.h"
 #include "port.h"
@@ -33,8 +34,8 @@ static void trace_print(void) {
         latch[i] = (trace_bits[i] & 2) ? '1' : '0';
     }
     clk[TRACE_N] = latch[TRACE_N] = 0;
-    printf("trace clk  =%s\n", clk);
-    printf("trace latch=%s\n", latch);
+    printf(P_WIRE "trace clk  =%s\n", clk);
+    printf(P_WIRE "trace latch=%s\n", latch);
 }
 
 int main(void) {
@@ -63,7 +64,7 @@ int main(void) {
                 for (unsigned i = 0; i < LINK_FRAME; ++i)
                     snprintf(hex + i * 3, 4, "%02x ", last[i]);
                 if (bad <= 3 || bad % 600 == 0)
-                    printf("wire: bad=%"PRIu32" clocks=%"PRIu32" hex=%s\n", bad, port_stats().clocks, hex);
+                    printf(P_WIRE "bad=%"PRIu32" clocks=%"PRIu32" hex=%s\n", bad, port_stats().clocks, hex);
             }
         }
         uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -78,13 +79,13 @@ int main(void) {
             port_stats_t p = port_stats();
             port_event_t ev[16];
             unsigned n = port_events(ev, 16);
-            printf("events:");
+            printf(P_WIRE "events:");
             for (unsigned i = 0; i < n; ++i)
                 printf(" %c%u%+ld", ev[i].cause, ev[i].bytes, i ? (long)(ev[i].t - ev[i - 1].t) : 0L);
             printf("\n");
-            printf("pio: padoe=%08lx padout=%08lx (bit5 = DATA1 driven / level)\n",
+            printf(P_WIRE "pio: padoe=%08lx padout=%08lx (bit5 = DATA1 driven / level)\n",
                    (unsigned long)port_padoe(), (unsigned long)port_padout());
-            printf("wire: frames=%"PRIu32" ok=%"PRIu32" bad=%"PRIu32
+            printf(P_WIRE "frames=%"PRIu32" ok=%"PRIu32" bad=%"PRIu32
                    " short=%"PRIu32" gaps=%"PRIu32" restarts=%"PRIu32
                    " underruns=%"PRIu32" clocks=%"PRIu32" data1=%d snes#=%u last=%s\n",
                    frames, ok, bad, p.short_frames, p.gaps, p.restarts,
