@@ -497,6 +497,14 @@ All unsolicited output now goes through one helper (`pico/log.c`); `log off`
 silences it, `log on` restores it, `log` reports the state. Default ON at every
 boot, not saved to flash. Command replies, the typed echo and `stats` on demand
 always print.
+*(2026-11-25: default flipped to OFF, and every line now starts with a
+subsystem prefix — `[SNES]`, `[NAT]`, `[BT]`, `[WIFI]`, ... — so the output can
+be filtered. Output is two classes in `pico/log.h`: replies always print;
+unsolicited lines need `log on`. What the user is waiting on counts as a reply:
+after `bt pair` every `[BT]` line until "keyboard ready" (two-minute window),
+after `wifi`/`mode` the join progress. That window exists because the progress
+lines after `bt pair` were log lines and a Bluetooth keyboard was lost to
+silence. The LE wait now says "press a key". Host-tested; unproven on hardware.)*
 
 **8. The whole keyboard, and the keyboard as a controller. ✅ (2026-10-05;
 untested on a real keyboard)** `hidkeys.c` dropped every key it had no byte

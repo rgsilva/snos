@@ -38,8 +38,8 @@ mode
 mode nat
 mode relay 192.168.1.100
 stats
-log off
 log on
+log off
 log
 bt
 bt scan
@@ -57,12 +57,12 @@ WiFi credentials. Existing saved settings with a host remain relay settings.
 In NAT mode HELLO reports the Pico DHCP address and `stats` includes flows.
 `net speedtest` with no argument connects to the built-in port-7778 peer at
 that address, so it measures the console-to-Pico link. An explicit `HOST:PORT`
-still measures that remote peer. The `nat:` stats line includes `speed=`, the
+still measures that remote peer. The `[NAT]` stats line includes `speed=`, the
 number of active built-in speedtest flows.
 In NAT mode the console's pings reach real hosts: the Pico forwards echo
 requests over lwIP raw ICMP and maps the replies back. It answers pings to
 10.0.2.2, 10.0.2.3 and its own DHCP address itself. ICMP errors (unreachable,
-TTL exceeded) are dropped, not relayed to the console. `icmp=` in the `nat:`
+TTL exceeded) are dropped, not relayed to the console. `icmp=` in the `[NAT]`
 line counts echo flows: at most four, each freed after 15 idle seconds.
 A mode switch never touches the link; keyboard input is delivered exactly once.
 Input is echoed, including the password in the setup command; `wifi?` masks it.
@@ -79,12 +79,40 @@ Avoid changing settings during an active SNES exchange.
 
 Port, link, and keyboard service starts without waiting for WiFi. Failed joins
 retry after 10 seconds; a join has a 30-second deadline. Without an SSID the
-firmware waits for configuration. WiFi state changes are logged, and stats
-include WiFi state and relay host every two seconds. `stats` prints immediately.
-`log on|off` enables or silences all unsolicited stats, events, and warnings on
-USB CDC and UART0; `log` reports the current setting. Logging is on at every
-boot and the setting is not saved to flash. Command replies, input echo, and
-help remain visible with logging off, and `stats` still prints once on demand.
+firmware waits for configuration. WiFi state changes and the stats lines are
+logged (see below); `stats` prints immediately.
+
+Every line the firmware prints starts with a subsystem prefix in square
+brackets, so the output can be filtered (`grep '^\[BT\]'`):
+
+| Prefix    | Lines                                                            |
+|-----------|------------------------------------------------------------------|
+| `[SNES]`  | the controller-port link: the stats line (gaps, frames, ...), restarts |
+| `[NAT]`   | the NAT stats line (`in= out= drop= ...`) and NAT events         |
+| `[BT]`    | everything Bluetooth: scan, pairing progress, keyboard state     |
+| `[WIFI]`  | join progress and state, `wifi?`, saved or cleared settings      |
+| `[KBD]`   | `type`, `kbd test`, `kbd map`                                    |
+| `[RELAY]` | tier-1 relay events                                              |
+| `[MODE]`  | `mode`                                                           |
+| `[CTRL]`  | control-channel warnings                                         |
+| `[LOG]`   | `log`, `log on`, `log off`                                       |
+| `[CON]`   | the command list and console line errors                         |
+| `[WIRE]`  | the `snos_wiretest` targets, every line                          |
+
+The prefix replaces the old lower-case tag: `[BT] keyboard ready [LE boot]`,
+`[SNES] gaps=...`, `[NAT] in=...`. The echo of the characters you type has no
+prefix.
+
+Logging is off at every boot; the setting is not saved to flash. `log on|off`
+enables or silences the unsolicited output on USB CDC and UART0 (the stats
+lines every two seconds, background events such as a bonded keyboard
+reconnecting after sleep or WiFi state changes on their own, relay and NAT
+events, warnings); `log` reports the current setting. Replies always print,
+whatever the setting: the answer to a command, `stats` and `bt scan` results,
+errors a command causes, and the progress of an operation you started. After
+`bt pair`, every `[BT]` line prints until `keyboard ready` (or two minutes
+pass); after `wifi ...`, `wifi clear` or `mode ...`, the join progress prints
+until it succeeds or fails (or a minute passes).
 
 From the repository root on the relay host:
 
@@ -112,7 +140,11 @@ bt
 `bt scan` runs for about 10 seconds and prints `[LE]` and `[BR]` devices, with
 likely keyboards first. LE scanning is active, so names from scan responses are
 included. `bt pair <n|addr>` connects to an entry from the latest scan, or to a
-Bluetooth address (an address entered directly is Classic). If a passkey is
+Bluetooth address (an address entered directly is Classic). Every pairing and
+connection step prints, logging on or off, up to `[BT] keyboard ready [...]`.
+When the LE path waits for the first key report or for the keyboard to
+reconnect in report protocol, it says `[BT] press a key on the keyboard now`
+or `[BT] waiting for the keyboard: press a key to wake it`. If a passkey is
 printed, type those digits on the keyboard and press Enter. A bonded keyboard
 reconnects automatically at boot and after sleep disconnects; LE reconnect uses
 the bonded identity/IRK and controller accept list, so Logitech private
@@ -162,14 +194,14 @@ counter; bytes 1..63 must repeat `1234567890`, starting with `1`.
 Once per second it prints:
 
 ```text
-wire: frames=N ok=M bad=K short=S gaps=G snes#=C last=<text>
+[WIRE] frames=N ok=M bad=K short=S gaps=G snes#=C last=<text>
 ```
 
 `frames` counts complete frames processed, `ok`/`bad` count matching/mismatched
 RX patterns, `short` counts discarded nonempty short bursts, and `gaps` counts
 all silence timeouts (including idle ones). `snes#` is the last console counter;
 `last` shows bytes 1..31 of the last complete frame, replacing nonprintable
-bytes with dots. Every bad frame also produces one `wire: bad=... hex=...`
+bytes with dots. Every bad frame also produces one `[WIRE] bad=... hex=...`
 line containing all 64 bytes. Counter continuity is not part of the pattern
 check. Before the first frame, the counter is zero and the text is all dots.
 
@@ -191,6 +223,8 @@ PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/wire_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/config_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/hidkeys_test.py
 PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/hogp_test.py
+PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/console_log_test.py
+PYTHONPYCACHEPREFIX="$PWD/pico/build/pycache" python3 pico/tests/ble_pairlog_test.py
 ```
 
 The first compares 10,000 seeded exchanges to `gateway.py` at 64 bytes,
@@ -198,6 +232,11 @@ including checksum rejection, duplicate frames, SYN episodes, sequence wrap,
 and HELLO priority. The second checks fragmented control commands and layouts. The third models
 the assembled PIO instructions across 50 pulse phases, including MSB-first
 TX/RX, short joypad bursts, partial bytes, and the gap/polling cycle counts.
+
+The console log check compiles `main.c` for the host with stubbed hardware and
+checks that logging is off at boot, that replies print and unsolicited lines
+do not, the WiFi join window, and that every line carries a listed prefix; the
+pairing log check does the same for `btkbd.c`'s pairing window.
 
 The config check mocks flash erase/program and interrupt masking, checking
 version validation, persistence, string bounds, and clearing.
