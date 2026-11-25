@@ -44,6 +44,18 @@ static void print_stats(bool reply) {
             " tcp=%u udp=%u icmp=%u fwd=%u speed=%u\n", n.in, n.out, n.drop, n.tcp,
             n.udp, n.icmp, n.forwards, n.speed); }
 }
+/* The driver applies CYW43_DEFAULT_PM (PM2, 200 ms sleep retention) once when
+ * the station comes up; a join does not touch it. PM2 holds inbound frames
+ * until the next beacon, so it is switched off; retried at each join until it takes. */
+static bool wifi_pm_off, wifi_pm_warned;
+static void wifi_power_save_off(void) {
+    if (wifi_pm_off) return;
+    cyw43_arch_lwip_begin();
+    int e = cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
+    cyw43_arch_lwip_end();
+    if (!e) { wifi_pm_off = true; return; }
+    if (!wifi_pm_warned) { wifi_pm_warned = true; log_event(P_WIFI "power save stays on (%d)\n", e); }
+}
 static void wifi_changed(void) {
     if (wifi_ready) {
         relay_configure(settings.host, false); nat_configure(false); ctrl_set_forwarder(NULL, NULL);
@@ -67,7 +79,7 @@ static void wifi_poll(void) {
         }
         wifi_ready = true;
         btkbd_init();
-        cyw43_arch_enable_sta_mode(); relay_init(); nat_init();
+        cyw43_arch_enable_sta_mode(); wifi_power_save_off(); relay_init(); nat_init();
         wifi_status = 99; wifi_retry_at = now;
     }
     if (!settings.ssid[0]) {
@@ -107,6 +119,7 @@ static void wifi_poll(void) {
     if (nat_mode()) { relay_configure(settings.host, false); nat_configure(status == CYW43_LINK_UP); ctrl_set_forwarder(nat_forward_add, nat_forward_del); }
     else { nat_configure(false); ctrl_set_forwarder(NULL, NULL); relay_configure(settings.host, status == CYW43_LINK_UP); }
     if (!wifi_attempt && status != CYW43_LINK_UP && (int32_t)(now - wifi_retry_at) >= 0) {
+        wifi_power_save_off();
         int e = cyw43_arch_wifi_connect_async(settings.ssid, settings.pass,
                     settings.pass[0] ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN);
         wifi_retry_at = now + 10000;
@@ -162,7 +175,8 @@ static void console_command(char *line) {
     if (!strcmp(line, "kbd test off")) { kbd_test(false); reply_puts(P_KBD "test pattern off"); return; }
     if (!strcmp(line, "kbd map") || !strncmp(line, "kbd map ", 8)) { kbd_map_command(line + 7); return; }
     if (!strcmp(line, "wifi?")) {
-        reply_printf(P_WIFI "ssid=%s password=******** host=%s\n", settings.ssid, settings.host);
+        reply_printf(P_WIFI "ssid=%s password=******** host=%s power-save=%s\n",
+                     settings.ssid, settings.host, wifi_pm_off ? "off" : "on");
         return;
     }
     if (!strcmp(line, "mode")) { reply_puts(nat_mode() ? P_MODE "nat" : P_MODE "relay"); return; }

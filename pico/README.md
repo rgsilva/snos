@@ -81,7 +81,9 @@ Avoid changing settings during an active SNES exchange.
 
 Port, link, and keyboard service starts without waiting for WiFi. Failed joins
 retry after 10 seconds; a join has a 30-second deadline. Without an SSID the
-firmware waits for configuration. WiFi state changes and the stats lines are
+firmware waits for configuration. WiFi power saving is turned off once the
+station is up (the driver default adds hundreds of milliseconds to inbound
+traffic) and `wifi?` shows `power-save=off`. WiFi state changes and the stats lines are
 logged (see below); `stats` prints immediately.
 
 Every line the firmware prints starts with a subsystem prefix in square

@@ -49,6 +49,9 @@ void cyw43_arch_lwip_begin(void);
 void cyw43_arch_lwip_end(void);
 int cyw43_tcpip_link_status(cyw43_t *s, int itf);
 int cyw43_wifi_leave(cyw43_t *s, int itf);
+#define CYW43_NONE_PM 0x111u
+#define CYW43_DEFAULT_PM 0xa1112u
+int cyw43_wifi_pm(cyw43_t *s, uint32_t pm);
 int cyw43_arch_wifi_connect_async(const char *ssid, const char *pass, uint32_t auth);
 ''')
 (BUILD / "lwip/netif.h").write_text('''
@@ -80,6 +83,9 @@ void cyw43_arch_lwip_begin(void) {}
 void cyw43_arch_lwip_end(void) {}
 int cyw43_tcpip_link_status(cyw43_t *s, int itf) { (void)s; (void)itf; return link_status; }
 int cyw43_wifi_leave(cyw43_t *s, int itf) { (void)s; (void)itf; return 0; }
+/* Like the driver: sta mode applies the default, a join or leave leaves it alone. */
+static uint32_t pm_now = 0xa1112u; static int pm_calls, pm_fail;
+int cyw43_wifi_pm(cyw43_t *s, uint32_t pm) { (void)s; ++pm_calls; if (pm_fail) return -1; pm_now = pm; return 0; }
 int cyw43_arch_wifi_connect_async(const char *a, const char *b, uint32_t c) { (void)a; (void)b; (void)c; return 0; }
 const ip4_addr_t *netif_ip4_addr(struct netif *n) { (void)n; static ip4_addr_t a; return &a; }
 const char *ip4addr_ntoa(const ip4_addr_t *a) { (void)a; return "10.0.0.5"; }
@@ -125,6 +131,7 @@ bool nat_forward_add(uint16_t p, uint8_t c) { (void)p; (void)c; return true; }
 void nat_forward_del(uint16_t p, uint8_t c) { (void)p; (void)c; }
 nat_stats_t nat_stats(void) { nat_stats_t s; memset(&s, 0, sizeof(s)); return s; }
 
+static void pm_mark(const char *at) { fflush(stdout); printf("## %s %x %d\n", at, (unsigned)pm_now, pm_calls); }
 static void type(const char *text) {
     input = text;
     while (*input) console_poll();
@@ -138,6 +145,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     config_load(&settings);
     phase("boot-event");              wifi_poll();
+    pm_mark("boot");
     phase("boot-stats");              print_stats(false);
     phase("boot-stats-command");      type("stats\r");
     phase("log-query");               type("log\r");
@@ -154,6 +162,7 @@ int main(void) {
     type("wifi Net|pw|\r");
     {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_JOIN, CYW43_LINK_NOIP, CYW43_LINK_UP};
         wifi_steps(s, 4); }
+    pm_mark("joined");
     phase("wifi-after-join");
     t_now += 20000;
     {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_DOWN}; wifi_steps(s, 2); }
@@ -167,6 +176,7 @@ int main(void) {
     phase("wifi-fail-watched");
     type("wifi Other|pw|\r");
     {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_JOIN, CYW43_LINK_FAIL}; wifi_steps(s, 3); }
+    pm_mark("rejoin-failed");
     phase("wifi-clear");
     type("wifi clear\r");
     {   int s[] = {CYW43_LINK_DOWN}; wifi_steps(s, 1); }
@@ -174,7 +184,9 @@ int main(void) {
     type("wifi Late|pw|\r");
     t_now += 61000;
     {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_JOIN, CYW43_LINK_UP}; wifi_steps(s, 3); }
+    pm_mark("reconfigured");
     phase("log-debug-again"); type("log debug\r"); print_stats(false);
+    pm_mark("end");
     phase("end");
     return 0;
 }
@@ -187,11 +199,14 @@ run = subprocess.run([str(exe)], capture_output=True, text=True, check=True)
 
 prefixes = re.findall(r'#define P_[A-Z]+\s+"(\[[A-Z]+\] )"', (ROOT / "log.h").read_text())
 assert len(prefixes) >= 10, prefixes
-phases, cur = {}, None
+phases, marks, cur = {}, {}, None
 for line in run.stdout.splitlines():
     if line.startswith("@@ "):
         cur = line[3:]
         phases[cur] = []
+    elif line.startswith("## "):
+        _, at, value, calls = line.split()
+        marks[at] = (value, int(calls))
     else:
         phases[cur].append(line)
         assert line.startswith(tuple(prefixes)), f"no known prefix: {line!r}"
@@ -203,6 +218,11 @@ def has(phase, text):
 
 
 assert phases["boot-event"] == ["[WIFI] not configured, type: wifi SSID|PASSWORD|HOST"]
+assert "power-save=off" in "".join(phases["commands"]), phases["commands"]
+# NONE_PM (0x111) set once at bring-up; joins, retries, clear and reconfiguration never undo it.
+assert marks["boot"] == ("111", 1), marks
+assert all(v == ("111", 1) for v in marks.values()), marks
+assert set(marks) >= {"boot", "joined", "rejoin-failed", "reconfigured", "end"}, marks
 assert phases["boot-stats"] == [], "stats printed at the default level"
 assert phases["boot-stats-command"][0].startswith("[SNES] gaps=")
 assert phases["boot-stats-command"][1].startswith("[NAT] in=")
