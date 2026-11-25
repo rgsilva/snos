@@ -236,7 +236,7 @@ bool relay_send(uint8_t type, const uint8_t *data, size_t len) {
     (void)type; (void)data; (void)len;
     return false;
 }
-void log_puts(const char *s) { (void)s; }
+int log_event(const char *s, ...) { (void)s; return 0; }
 
 /* pico/nat.c's adapter, minus lwIP: the local speedtest flow never leaves
  * nat_core, so only the link-facing half matters here. */

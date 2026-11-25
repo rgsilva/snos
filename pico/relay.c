@@ -17,6 +17,13 @@ static char hostname[64];
 static bool network_up, ready;
 static uintptr_t dns_generation;
 static uint32_t retry_at, connect_at, backoff = 1000;
+static bool link_noted;
+/* One info line per relay link transition; call outside the lwIP lock. */
+static void note_link(void) {
+    if (connected == link_noted) return;
+    link_noted = connected;
+    log_event(P_RELAY "link %s\n", connected ? "up" : "down");
+}
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
 static void error_cb(void *arg, err_t error) {
     (void)arg; (void)error; pcb = NULL; connected = false; failed = true;
@@ -62,10 +69,12 @@ void relay_configure(const char *name, bool wifi_up) {
         backoff = 1000; retry_at = now_ms();
     }
     cyw43_arch_lwip_end();
+    note_link();
 }
 void relay_reset(void) {
     if (!ready) return;
     cyw43_arch_lwip_begin(); disconnect(); cyw43_arch_lwip_end();
+    note_link();
 }
 bool relay_send(uint8_t type, const uint8_t *data, size_t len) {
     if (!ready) return false;
@@ -79,7 +88,7 @@ bool relay_send(uint8_t type, const uint8_t *data, size_t len) {
 }
 static void relay_input(const uint8_t *packet, size_t len) {
     if (!relay_send(1, packet, len))
-        log_puts(P_RELAY "IP output queue full");
+        log_event(P_RELAY "IP output queue full\n");
 }
 void relay_ip_bytes(const uint8_t *data, size_t len) {
     ip_stream_bytes(data, len, relay_input);
@@ -128,6 +137,7 @@ void relay_poll(void) {
         }
     }
     cyw43_arch_lwip_end();
+    note_link();
     ctrl_poll();
 }
 const char *relay_state(void) {

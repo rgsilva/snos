@@ -38,8 +38,10 @@ mode
 mode nat
 mode relay 192.168.1.100
 stats
-log on
+log debug
+log info
 log off
+log on
 log
 bt
 bt scan
@@ -103,16 +105,24 @@ The prefix replaces the old lower-case tag: `[BT] keyboard ready [LE boot]`,
 `[SNES] gaps=...`, `[NAT] in=...`. The echo of the characters you type has no
 prefix.
 
-Logging is off at every boot; the setting is not saved to flash. `log on|off`
-enables or silences the unsolicited output on USB CDC and UART0 (the stats
-lines every two seconds, background events such as a bonded keyboard
-reconnecting after sleep or WiFi state changes on their own, relay and NAT
-events, warnings); `log` reports the current setting. Replies always print,
-whatever the setting: the answer to a command, `stats` and `bt scan` results,
-errors a command causes, and the progress of an operation you started. After
+Unsolicited output has a level, set with `log off|info|debug`; `log` alone
+reports it. The default at every boot is `info`, and the setting is not saved
+to flash. `log on` still works and means `debug`. The level is not printed in
+the line.
+
+| Level   | Shows                                                                  |
+|---------|------------------------------------------------------------------------|
+| `off`   | no unsolicited lines                                                   |
+| `info`  | events and problems: Bluetooth connect, pairing, ready, disconnect and the two "press a key" lines; WiFi joining, joined, lost, failed, not configured; `[SNES]` link up, link lost, restarted; `[RELAY]` link up/down; every warning or error (queue full, stream desync, init or setup failed) |
+| `debug` | all of `info`, plus the stats lines every two seconds (`[SNES] gaps=...`, `[NAT] in=...`) |
+
+Replies print at every level, `off` included: the answer to a command, `stats`,
+`bt scan` results, `bt`, `wifi?`, `mode`, the command list, errors a command
+causes, passkeys, and the progress of an operation you started. After
 `bt pair`, every `[BT]` line prints until `keyboard ready` (or two minutes
 pass); after `wifi ...`, `wifi clear` or `mode ...`, the join progress prints
-until it succeeds or fails (or a minute passes).
+until it succeeds or fails (or a minute passes). At `info` and `debug` those
+windows add nothing visible; at `off` they are all you see.
 
 From the repository root on the relay host:
 
@@ -141,7 +151,7 @@ bt
 likely keyboards first. LE scanning is active, so names from scan responses are
 included. `bt pair <n|addr>` connects to an entry from the latest scan, or to a
 Bluetooth address (an address entered directly is Classic). Every pairing and
-connection step prints, logging on or off, up to `[BT] keyboard ready [...]`.
+connection step prints, at any log level, up to `[BT] keyboard ready [...]`.
 When the LE path waits for the first key report or for the keyboard to
 reconnect in report protocol, it says `[BT] press a key on the keyboard now`
 or `[BT] waiting for the keyboard: press a key to wake it`. If a passkey is
@@ -234,8 +244,7 @@ the assembled PIO instructions across 50 pulse phases, including MSB-first
 TX/RX, short joypad bursts, partial bytes, and the gap/polling cycle counts.
 
 The console log check compiles `main.c` for the host with stubbed hardware and
-checks that logging is off at boot, that replies print and unsolicited lines
-do not, the WiFi join window, and that every line carries a listed prefix; the
+checks the log levels (`info` at boot), that replies print at every level, the WiFi join window, and that every line carries a listed prefix; the
 pairing log check does the same for `btkbd.c`'s pairing window.
 
 The config check mocks flash erase/program and interrupt masking, checking

@@ -37,13 +37,12 @@ static int say_to(char *buf, const char *format, va_list args) {
     size_t n = strlen(buf);
     return vsnprintf(buf + n, 4096 - n, format, args);
 }
-int log_printf(const char *format, ...) {
+int log_event(const char *format, ...) {
     va_list args; va_start(args, format);
     int n = say_to(log_out, format, args);
     va_end(args);
     return n;
 }
-int log_puts(const char *text) { return log_printf("%s\n", text); }
 int reply_printf(const char *format, ...) {
     va_list args; va_start(args, format);
     int n = say_to(reply_out, format, args);

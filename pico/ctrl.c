@@ -40,7 +40,7 @@ static void dispatch(void) {
             else { forward_del(port, p[2]); ok = true; }
         } else ok = relay_send(type == 0x0b ? 2 : 3, p, sizeof(p));
         if (!ok && !ctrl_error(p))
-            log_puts(P_CTRL "error queue full");
+            log_event(P_CTRL "error queue full\n");
     }
 }
 void ctrl_bytes(const uint8_t *data, size_t len) {

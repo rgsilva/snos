@@ -21,7 +21,7 @@ sys_prot_t sys_arch_protect(void) { return 0; }
 void sys_arch_unprotect(sys_prot_t value) { (void)value; }
 void cyw43_arch_lwip_begin(void) { ++locks; }
 void cyw43_arch_lwip_end(void) { assert(locks); --locks; }
-int log_puts(const char *s) { (void)s; return 0; }
+int log_event(const char *s, ...) { (void)s; return 0; }
 bool relay_send(uint8_t type, const uint8_t *p, size_t len) {
     (void)type; (void)p; (void)len; return false;
 }

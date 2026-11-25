@@ -505,6 +505,10 @@ after `bt pair` every `[BT]` line until "keyboard ready" (two-minute window),
 after `wifi`/`mode` the join progress. That window exists because the progress
 lines after `bt pair` were log lines and a Bluetooth keyboard was lost to
 silence. The LE wait now says "press a key". Host-tested; unproven on hardware.)*
+*(Same day, later: the switch became levels. `log off|info|debug`, default
+`info`, `log on` = `debug`. Info is events and problems, debug adds the stats
+lines. New info lines: `[SNES] link up` / `link lost`, `[WIFI] lost`,
+`[RELAY] link up` / `down`. Replies and the two windows are unchanged.)*
 
 **8. The whole keyboard, and the keyboard as a controller. ✅ (2026-10-05;
 untested on a real keyboard)** `hidkeys.c` dropped every key it had no byte

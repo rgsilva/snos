@@ -63,7 +63,7 @@ static bool pairing_watched(void) {
         pairing_window = false;
     return pairing_window;
 }
-#define BT_SAY(...) (pairing_watched() ? reply_printf(__VA_ARGS__) : log_printf(__VA_ARGS__))
+#define BT_SAY(...) (pairing_watched() ? reply_printf(__VA_ARGS__) : log_event(__VA_ARGS__))
 static bd_addr_type_t target_addr_type;
 static transport_t target_transport;
 static char target_name[64];
@@ -148,7 +148,7 @@ static bool store_target(void) {
     memcpy(rec.addr, target_addr, sizeof(rec.addr));
     copy_text(rec.name, sizeof(rec.name), target_name);
     if (tlv->store_tag(ctx, TARGET_TAG, (const uint8_t *)&rec, sizeof(rec))) {
-        log_puts(P_BT "could not save keyboard target");
+        log_event(P_BT "could not save keyboard target\n");
         return false;
     }
     return true;
@@ -266,7 +266,7 @@ static void drop_target_bond(void) {
     for (int i = le_device_db_count() - 1; i >= 0; --i) le_device_db_remove(i);
     if (gap_load_resolving_list_from_le_device_db != NULL &&
         gap_load_resolving_list_from_le_device_db() != ERROR_CODE_SUCCESS) {
-        log_puts(P_BT "could not reload LE resolving list");
+        log_event(P_BT "could not reload LE resolving list\n");
     }
 }
 
@@ -615,7 +615,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             working = btstack_event_state_get_state(packet) == HCI_STATE_WORKING;
             if (working) {
                 load_target();
-                log_puts(P_BT "radio ready");
+                log_event(P_BT "radio ready\n");
                 if (target_valid) connect_target(500);
             }
             break;
@@ -772,7 +772,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 void btkbd_init(void) {
     if (initialized) return;
     if (!btstack_cyw43_init(cyw43_arch_async_context())) {
-        log_puts(P_BT "init failed");
+        log_event(P_BT "init failed\n");
         return;
     }
     l2cap_init();

@@ -6,9 +6,10 @@ and keyboard modules are stubs. log.c and hidkeys.c are the real ones. The
 driver types commands into console_poll() and steps wifi_poll(); the firmware's
 stdout is checked here, the typed-character echo goes to stderr.
 
-Checked: logging is off at boot, `log on|off|` behave, a reply prints either
-way, the WiFi join after `wifi ...` prints with logging off and later state
-changes do not, and every line starts with a prefix listed in log.h.
+Checked: the level is info at boot (events print, stats lines do not), `log
+off|info|debug|on|` and a bad level, replies print at every level, the WiFi
+join after `wifi ...` prints at `off` and later state changes do not, and
+every line starts with a prefix listed in log.h.
 """
 import pathlib
 import re
@@ -136,10 +137,14 @@ static void wifi_steps(const int *statuses, unsigned n) {
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     config_load(&settings);
+    phase("boot-event");              wifi_poll();
     phase("boot-stats");              print_stats(false);
     phase("boot-stats-command");      type("stats\r");
     phase("log-query");               type("log\r");
-    phase("log-on");                  type("log on\r"); print_stats(false);
+    phase("log-debug");               type("log debug\r"); print_stats(false);
+    phase("log-info");                type("log info\r"); print_stats(false);
+    phase("log-on-alias");            type("log on\r"); print_stats(false); type("log\r");
+    phase("log-bad");                 type("log loud\r"); type("log\r");
     phase("log-off");                 type("log off\r"); print_stats(false); type("log\r");
     phase("commands");
     type("mode\rmode nat\rmode relay 10.0.0.9\rwifi?\rtype hi\rtype\rkbd test on\rkbd test off\r");
@@ -154,6 +159,11 @@ int main(void) {
     {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_DOWN}; wifi_steps(s, 2); }
     t_now += 20000;
     {   int s[] = {CYW43_LINK_DOWN}; wifi_steps(s, 1); }
+    phase("wifi-after-join-info");
+    type("log info\r");
+    t_now += 20000;
+    {   int s[] = {CYW43_LINK_UP, CYW43_LINK_DOWN}; wifi_steps(s, 2); }
+    type("log off\r");
     phase("wifi-fail-watched");
     type("wifi Other|pw|\r");
     {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_JOIN, CYW43_LINK_FAIL}; wifi_steps(s, 3); }
@@ -164,7 +174,7 @@ int main(void) {
     type("wifi Late|pw|\r");
     t_now += 61000;
     {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_JOIN, CYW43_LINK_UP}; wifi_steps(s, 3); }
-    phase("log-on-again"); type("log on\r"); print_stats(false);
+    phase("log-debug-again"); type("log debug\r"); print_stats(false);
     phase("end");
     return 0;
 }
@@ -192,14 +202,18 @@ def has(phase, text):
     return any(text in line for line in phases[phase])
 
 
-assert phases["boot-stats"] == [], "stats printed at boot with logging off"
+assert phases["boot-event"] == ["[WIFI] not configured, type: wifi SSID|PASSWORD|HOST"]
+assert phases["boot-stats"] == [], "stats printed at the default level"
 assert phases["boot-stats-command"][0].startswith("[SNES] gaps=")
 assert phases["boot-stats-command"][1].startswith("[NAT] in=")
-assert phases["log-query"] == ["[LOG] off"]
-assert phases["log-on"][0] == "[LOG] on" and phases["log-on"][1].startswith("[SNES] gaps=")
-assert len(phases["log-on"]) == 3
-assert phases["log-off"][0] == "[LOG] off" and phases["log-off"][1] == "[LOG] off"
-assert len(phases["log-off"]) == 2, "stats printed after log off"
+assert phases["log-query"] == ["[LOG] info"]
+assert phases["log-debug"][0] == "[LOG] debug" and phases["log-debug"][1].startswith("[SNES] gaps=")
+assert len(phases["log-debug"]) == 3
+assert phases["log-info"] == ["[LOG] info"]
+assert phases["log-on-alias"][0] == "[LOG] debug" and len(phases["log-on-alias"]) == 4
+assert phases["log-on-alias"][3] == "[LOG] debug"
+assert phases["log-bad"] == ["[LOG] usage: log [off|info|debug] (on = debug)", "[LOG] debug"]
+assert phases["log-off"] == ["[LOG] off", "[LOG] off"], "stats printed at off"
 for text in ("[MODE] nat", "[MODE] relay", "[WIFI] ssid=", "[KBD] sent", "[KBD] test pattern on",
              "[KBD] test pattern off", "[KBD] map: B=z", "[KBD] map <", "[BT] stub",
              "[CON] commands: "):
@@ -209,6 +223,9 @@ watched = phases["wifi-join-watched"]
 assert watched[0] == "[WIFI] settings saved"
 assert watched[1:] == ["[WIFI] joining", "[WIFI] dhcp", "[WIFI] joined 10.0.0.5"], watched
 assert phases["wifi-after-join"] == [], phases["wifi-after-join"]
+assert phases["wifi-after-join-info"][0] == "[LOG] info"
+assert "[WIFI] lost" in phases["wifi-after-join-info"], phases["wifi-after-join-info"]
+assert phases["wifi-after-join-info"][-1] == "[LOG] off"
 assert phases["wifi-fail-watched"][0] == "[WIFI] settings saved"
 assert phases["wifi-fail-watched"][1:] == ["[WIFI] joining", "[WIFI] join failed (-1)"], \
     phases["wifi-fail-watched"]
@@ -216,5 +233,6 @@ assert phases["wifi-clear"][0] == "[WIFI] saved settings cleared"
 assert "[WIFI] not configured, type: wifi SSID|PASSWORD|HOST" in phases["wifi-clear"]
 assert phases["wifi-quiet-after-window"] == ["[WIFI] settings saved"], \
     phases["wifi-quiet-after-window"]
-assert phases["log-on-again"][0] == "[LOG] on"
+assert phases["log-debug-again"][0] == "[LOG] debug"
+assert phases["log-debug-again"][1].startswith("[SNES] gaps=")
 print(f"console log: {len(prefixes)} prefixes, {sum(map(len, phases.values()))} lines checked")

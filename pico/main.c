@@ -28,10 +28,10 @@ static bool wifi_watched(void) {
     if (wifi_watch && (int32_t)(now_ms() - wifi_watch_until) >= 0) wifi_watch = false;
     return wifi_watch;
 }
-#define WIFI_SAY(...) (wifi_watched() ? reply_printf(__VA_ARGS__) : log_printf(__VA_ARGS__))
+#define WIFI_SAY(...) (wifi_watched() ? reply_printf(__VA_ARGS__) : log_event(__VA_ARGS__))
 static void print_stats(bool reply) {
     port_stats_t p = port_stats(); link_stats_t l = link_stats();
-    int (*say)(const char *, ...) = reply ? reply_printf : log_printf;
+    int (*say)(const char *, ...) = reply ? reply_printf : log_diag;
     say(P_SNES "gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
            " overrun=%"PRIu32" badsum=%"PRIu32" seq=%u ack=%u resends=%"PRIu32" win=%u"
            " kbd=%u mode=%s %s wifi=%s host=%s\n", p.gaps, p.complete, p.short_frames,
@@ -62,7 +62,7 @@ static void wifi_poll(void) {
         wifi_retry_at = now + 10000;
         int e = cyw43_arch_init();
         if (e) {
-            if (wifi_status != e) log_printf(P_WIFI "init failed (%d)\n", e);
+            if (wifi_status != e) log_event(P_WIFI "init failed (%d)\n", e);
             wifi_status = e; wifi_state = "init-failed"; return;
         }
         wifi_ready = true;
@@ -82,6 +82,10 @@ static void wifi_poll(void) {
     cyw43_arch_lwip_end();
     if (wifi_attempt && status != CYW43_LINK_UP &&
         (uint32_t)(now - wifi_join_at) >= 30000) status = CYW43_LINK_FAIL;
+    if (wifi_status == CYW43_LINK_UP && status != CYW43_LINK_UP) {
+        WIFI_SAY(P_WIFI "lost\n");
+        wifi_state = "lost"; wifi_status = status; wifi_attempt = false; wifi_retry_at = now;
+    }
     if (wifi_attempt || status == CYW43_LINK_UP) {
         if (status != wifi_status) {
             if (status == CYW43_LINK_UP) {
@@ -140,10 +144,14 @@ static void kbd_map_command(const char *args) {
 static void console_command(char *line) {
     if (btkbd_command(line)) return;
     if (!strcmp(line, "stats")) { print_stats(true); return; }
-    if (!strcmp(line, "log") || !strcmp(line, "log on") || !strcmp(line, "log off")) {
-        if (!strcmp(line, "log on")) log_set_enabled(true);
-        else if (!strcmp(line, "log off")) log_set_enabled(false);
-        reply_puts(log_enabled() ? P_LOG "on" : P_LOG "off"); return;
+    if (!strncmp(line, "log", 3) && (!line[3] || line[3] == ' ')) {
+        const char *arg = line + (line[3] ? 4 : 3);
+        if (!*arg) ;
+        else if (!strcmp(arg, "off")) log_set_level(LOG_OFF);
+        else if (!strcmp(arg, "info")) log_set_level(LOG_INFO);
+        else if (!strcmp(arg, "debug") || !strcmp(arg, "on")) log_set_level(LOG_DEBUG);
+        else { reply_puts(P_LOG "usage: log [off|info|debug] (on = debug)"); return; }
+        reply_printf(P_LOG "%s\n", log_level_name(log_level())); return;
     }
     if (!strncmp(line, "type ", 5)) {
         reply_puts(kbd_type(line + 5) ? P_KBD "sent" : P_KBD "queue full");
@@ -188,7 +196,7 @@ static void console_command(char *line) {
             }
         }
     }
-    reply_puts(P_CON "commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text>, kbd test on|off, kbd map [<button> <key>|reset]");
+    reply_puts(P_CON "commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log [off|info|debug] (on = debug), type <text>, kbd test on|off, kbd map [<button> <key>|reset]");
 }
 static void console_poll(void) {
     static char line[168];
@@ -226,8 +234,11 @@ int main(void) {
         bool moved = port_take_rx(rx);
         if (moved) {
             link_rx_t result = link_on_rx(rx);
-            if (result.valid) { last_valid_at = to_ms_since_boot(get_absolute_time()); port_set_idle(false); }
-            if (result.reset) { ctrl_reset(); relay_reset(); nat_reset(); kbd_link_restart(); log_puts(P_SNES "SNES restarted"); }
+            if (result.valid) {
+                if (!last_valid_at) log_event(P_SNES "link up\n");
+                last_valid_at = to_ms_since_boot(get_absolute_time()); port_set_idle(false);
+            }
+            if (result.reset) { ctrl_reset(); relay_reset(); nat_reset(); kbd_link_restart(); log_event(P_SNES "SNES restarted\n"); }
             for (size_t i = 0; i < result.count; ++i) {
                 link_record_t *r = &result.records[i];
                 if (r->ch == CH_CTRL) ctrl_bytes(r->data, r->len);
@@ -237,7 +248,9 @@ int main(void) {
         kbd_poll(); btkbd_poll(); console_poll(); wifi_poll(); if (nat_mode()) nat_poll(); else relay_poll();
         if (moved) { link_next_out(tx); port_set_tx(tx); }
         uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (last_valid_at && (int32_t)(now - last_valid_at) > 2000) { last_valid_at = 0; port_set_idle(true); }
+        if (last_valid_at && (int32_t)(now - last_valid_at) > 2000) {
+            last_valid_at = 0; port_set_idle(true); log_event(P_SNES "link lost\n");
+        }
         if ((int32_t)(now - stats_at) >= 0) {
             stats_at = now + 2000;
             print_stats(false);
