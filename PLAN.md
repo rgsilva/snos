@@ -509,6 +509,17 @@ silence. The LE wait now says "press a key". Host-tested; unproven on hardware.)
 `info`, `log on` = `debug`. Info is events and problems, debug adds the stats
 lines. New info lines: `[SNES] link up` / `link lost`, `[WIFI] lost`,
 `[RELAY] link up` / `down`. Replies and the two windows are unchanged.)*
+*(2026-11-25, WiFi power save off. Measured from a wired machine on the
+LAN: ping to the Pico 286 ms average, 1138 ms worst, mdev 258 ms, some loss,
+while the gateway answered in 0.4 ms. A 146 KB TCP transfer from the console
+through the Pico took 100 s with 4 to 14 s pauses, though the console side was
+delivering its usual 2-3 KB/s; a Minecraft client timed out. The firmware never
+called `cyw43_wifi_pm`, so the radio ran the driver default, `CYW43_DEFAULT_PM`
+(PM2, 200 ms sleep retention), which holds inbound frames until a beacon. The
+board is USB powered, so `main.c` now sets `CYW43_NONE_PM` once after the
+station comes up; the driver applies its default only then and a join leaves
+it alone. `wifi?` says `power-save=off`. Host-tested; the effect on latency is
+unproven until measured on the board.)*
 
 **8. The whole keyboard, and the keyboard as a controller. ✅ (2026-10-05;
 untested on a real keyboard)** `hidkeys.c` dropped every key it had no byte
