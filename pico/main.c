@@ -20,9 +20,19 @@ static uint32_t wifi_retry_at, wifi_join_at;
 static const char *wifi_state = "starting";
 static bool nat_mode(void) { return settings.host[0] == '\0'; }
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
+/* One-shot WiFi join watch: after `wifi ...`/`mode ...` the join progress is
+ * a reply until it succeeds, fails, or 60 s pass; later state changes are not. */
+static bool wifi_watch;
+static uint32_t wifi_watch_until;
+static bool wifi_watched(void) {
+    if (wifi_watch && (int32_t)(now_ms() - wifi_watch_until) >= 0) wifi_watch = false;
+    return wifi_watch;
+}
+#define WIFI_SAY(...) (wifi_watched() ? reply_printf(__VA_ARGS__) : log_printf(__VA_ARGS__))
 static void print_stats(bool reply) {
     port_stats_t p = port_stats(); link_stats_t l = link_stats();
-    (reply ? printf : log_printf)("gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
+    int (*say)(const char *, ...) = reply ? reply_printf : log_printf;
+    say(P_SNES "gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
            " overrun=%"PRIu32" badsum=%"PRIu32" seq=%u ack=%u resends=%"PRIu32" win=%u"
            " kbd=%u mode=%s %s wifi=%s host=%s\n", p.gaps, p.complete, p.short_frames,
            p.clocks, p.overruns, l.bad_sum, l.seq, l.ack, l.resends, l.window,
@@ -30,7 +40,7 @@ static void print_stats(bool reply) {
            nat_mode() ? "" : relay_state(), wifi_state,
            settings.host[0] ? settings.host : "(none)");
     if (nat_mode()) { nat_stats_t n = nat_stats();
-        (reply ? printf : log_printf)("nat: in=%"PRIu32" out=%"PRIu32" drop=%"PRIu32
+        say(P_NAT "in=%"PRIu32" out=%"PRIu32" drop=%"PRIu32
             " tcp=%u udp=%u icmp=%u fwd=%u speed=%u\n", n.in, n.out, n.drop, n.tcp,
             n.udp, n.icmp, n.forwards, n.speed); }
 }
@@ -41,6 +51,7 @@ static void wifi_changed(void) {
         cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
         cyw43_arch_lwip_end();
     }
+    wifi_watch = true; wifi_watch_until = now_ms() + 60000;
     wifi_attempt = false; wifi_status = 99; wifi_retry_at = now_ms();
     wifi_state = settings.ssid[0] ? "starting" : "unconfigured";
 }
@@ -51,7 +62,7 @@ static void wifi_poll(void) {
         wifi_retry_at = now + 10000;
         int e = cyw43_arch_init();
         if (e) {
-            if (wifi_status != e) log_printf("wifi: init failed (%d)\n", e);
+            if (wifi_status != e) log_printf(P_WIFI "init failed (%d)\n", e);
             wifi_status = e; wifi_state = "init-failed"; return;
         }
         wifi_ready = true;
@@ -60,7 +71,7 @@ static void wifi_poll(void) {
         wifi_status = 99; wifi_retry_at = now;
     }
     if (!settings.ssid[0]) {
-        if (wifi_status != 98) log_puts("wifi: not configured, type: wifi SSID|PASSWORD|HOST");
+        if (wifi_status != 98) { WIFI_SAY(P_WIFI "not configured, type: wifi SSID|PASSWORD|HOST\n"); wifi_watch = false; }
         wifi_status = 98; wifi_state = "unconfigured";
         relay_configure(settings.host, false); nat_configure(false);
         wifi_retry_at = now + 10000;
@@ -75,16 +86,16 @@ static void wifi_poll(void) {
         if (status != wifi_status) {
             if (status == CYW43_LINK_UP) {
                 cyw43_arch_lwip_begin();
-                log_printf("wifi: joined %s\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
+                WIFI_SAY(P_WIFI "joined %s\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
                 cyw43_arch_lwip_end();
-                wifi_state = "up";
+                wifi_state = "up"; wifi_watch = false;
             } else if (status < 0 || status == CYW43_LINK_DOWN) {
-                log_printf("wifi: join failed (%d)\n", status);
-                wifi_state = "failed";
+                WIFI_SAY(P_WIFI "join failed (%d)\n", status);
+                wifi_state = "failed"; wifi_watch = false;
                 wifi_attempt = false; wifi_retry_at = now + 10000;
             } else {
                 wifi_state = status == CYW43_LINK_NOIP ? "dhcp" : "joining";
-                log_printf("wifi: %s\n", wifi_state);
+                WIFI_SAY(P_WIFI "%s\n", wifi_state);
             }
             wifi_status = status;
         }
@@ -96,10 +107,10 @@ static void wifi_poll(void) {
                     settings.pass[0] ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN);
         wifi_retry_at = now + 10000;
         if (e) {
-            log_printf("wifi: join failed (%d)\n", e); wifi_state = "failed";
+            WIFI_SAY(P_WIFI "join failed (%d)\n", e); wifi_state = "failed"; wifi_watch = false;
         } else {
             wifi_attempt = true; wifi_join_at = now; wifi_status = CYW43_LINK_JOIN;
-            wifi_state = "joining"; log_puts("wifi: joining");
+            wifi_state = "joining"; WIFI_SAY(P_WIFI "joining\n");
         }
     }
 }
@@ -114,17 +125,17 @@ static void kbd_map_command(const char *args) {
         int b = -1, n = sscanf(args, "%7s %9s %c", button, key, &extra);
         uint8_t usage = n == 2 ? hidkeys_usage_parse(key) : 0;
         if (n != 2 || (b = hidpad_button_parse(button)) < 0 || !usage) {
-            puts("kbd: map <B|Y|SELECT|START|UP|DOWN|LEFT|RIGHT|A|X|L|R> <key>, or map reset");
+            reply_puts(P_KBD "map <B|Y|SELECT|START|UP|DOWN|LEFT|RIGHT|A|X|L|R> <key>, or map reset");
             return;
         }
         next.pad_map[b] = usage;
     }
     if (*args) {
-        if (!config_save(&next)) { puts("kbd: flash save failed"); return; }
+        if (!config_save(&next)) { reply_puts(P_KBD "flash save failed"); return; }
         settings = next; kbd_set_map(settings.pad_map);
     }
     kbd_map_text(text, sizeof(text));
-    printf("kbd map: %s\n", text);
+    reply_printf(P_KBD "map: %s\n", text);
 }
 static void console_command(char *line) {
     if (btkbd_command(line)) return;
@@ -132,35 +143,35 @@ static void console_command(char *line) {
     if (!strcmp(line, "log") || !strcmp(line, "log on") || !strcmp(line, "log off")) {
         if (!strcmp(line, "log on")) log_set_enabled(true);
         else if (!strcmp(line, "log off")) log_set_enabled(false);
-        puts(log_enabled() ? "log: on" : "log: off"); return;
+        reply_puts(log_enabled() ? P_LOG "on" : P_LOG "off"); return;
     }
     if (!strncmp(line, "type ", 5)) {
-        puts(kbd_type(line + 5) ? "kbd: sent" : "kbd: queue full");
+        reply_puts(kbd_type(line + 5) ? P_KBD "sent" : P_KBD "queue full");
         return;
     }
-    if (!strcmp(line, "type")) { puts(kbd_type("") ? "kbd: sent" : "kbd: queue full"); return; }
-    if (!strcmp(line, "kbd test on")) { kbd_test(true); puts("kbd: test pattern on"); return; }
-    if (!strcmp(line, "kbd test off")) { kbd_test(false); puts("kbd: test pattern off"); return; }
+    if (!strcmp(line, "type")) { reply_puts(kbd_type("") ? P_KBD "sent" : P_KBD "queue full"); return; }
+    if (!strcmp(line, "kbd test on")) { kbd_test(true); reply_puts(P_KBD "test pattern on"); return; }
+    if (!strcmp(line, "kbd test off")) { kbd_test(false); reply_puts(P_KBD "test pattern off"); return; }
     if (!strcmp(line, "kbd map") || !strncmp(line, "kbd map ", 8)) { kbd_map_command(line + 7); return; }
     if (!strcmp(line, "wifi?")) {
-        printf("wifi: ssid=%s password=******** host=%s\n", settings.ssid, settings.host);
+        reply_printf(P_WIFI "ssid=%s password=******** host=%s\n", settings.ssid, settings.host);
         return;
     }
-    if (!strcmp(line, "mode")) { puts(nat_mode() ? "mode: nat" : "mode: relay"); return; }
+    if (!strcmp(line, "mode")) { reply_puts(nat_mode() ? P_MODE "nat" : P_MODE "relay"); return; }
     if (!strcmp(line, "mode nat")) {
         config_t next = settings; next.host[0] = '\0';
-        if (!config_save(&next)) { puts("mode: flash save failed"); return; }
-        settings = next; wifi_changed(); puts("mode: nat"); return;
+        if (!config_save(&next)) { reply_puts(P_MODE "flash save failed"); return; }
+        settings = next; wifi_changed(); reply_puts(P_MODE "nat"); return;
     }
     if (!strncmp(line, "mode relay ", 11) && line[11] && strlen(line + 11) <= 63 && !strchr(line + 11, ' ')) {
         config_t next = settings; strcpy(next.host, line + 11);
-        if (!config_save(&next)) { puts("mode: flash save failed"); return; }
-        settings = next; wifi_changed(); puts("mode: relay"); return;
+        if (!config_save(&next)) { reply_puts(P_MODE "flash save failed"); return; }
+        settings = next; wifi_changed(); reply_puts(P_MODE "relay"); return;
     }
     if (!strcmp(line, "wifi clear")) {
-        if (!config_clear()) { puts("wifi: flash erase failed"); return; }
+        if (!config_clear()) { reply_puts(P_WIFI "flash erase failed"); return; }
         memset(&settings, 0, sizeof(settings)); wifi_changed(); kbd_set_map(settings.pad_map);
-        puts("wifi: saved settings cleared"); return;
+        reply_puts(P_WIFI "saved settings cleared"); return;
     }
     if (!strncmp(line, "wifi ", 5)) {
         char *ssid = line + 5, *pass = strchr(ssid, '|');
@@ -172,12 +183,12 @@ static void console_command(char *line) {
                 config_t next = {0};
                 memcpy(next.pad_map, settings.pad_map, sizeof(next.pad_map));
                 strcpy(next.ssid, ssid); strcpy(next.pass, pass); strcpy(next.host, host);
-                if (!config_save(&next)) { puts("wifi: flash save failed"); return; }
-                settings = next; wifi_changed(); puts("wifi: settings saved"); return;
+                if (!config_save(&next)) { reply_puts(P_WIFI "flash save failed"); return; }
+                settings = next; wifi_changed(); reply_puts(P_WIFI "settings saved"); return;
             }
         }
     }
-    puts("commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text>, kbd test on|off, kbd map [<button> <key>|reset]");
+    reply_puts(P_CON "commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log, log on|off, type <text>, kbd test on|off, kbd map [<button> <key>|reset]");
 }
 static void console_poll(void) {
     static char line[168];
@@ -191,7 +202,7 @@ static void console_poll(void) {
         was_cr = c == '\r';
         if (c == '\r' || c == '\n') {
             putchar('\n'); line[used] = '\0';
-            if (overflow) puts("wifi: line too long; discarded");
+            if (overflow) reply_puts(P_CON "line too long; discarded");
             else if (used) console_command(line);
             used = 0; overflow = false;
         } else if (c == '\b' || c == 127) {
@@ -216,7 +227,7 @@ int main(void) {
         if (moved) {
             link_rx_t result = link_on_rx(rx);
             if (result.valid) { last_valid_at = to_ms_since_boot(get_absolute_time()); port_set_idle(false); }
-            if (result.reset) { ctrl_reset(); relay_reset(); nat_reset(); kbd_link_restart(); log_puts("link: SNES restarted"); }
+            if (result.reset) { ctrl_reset(); relay_reset(); nat_reset(); kbd_link_restart(); log_puts(P_SNES "SNES restarted"); }
             for (size_t i = 0; i < result.count; ++i) {
                 link_record_t *r = &result.records[i];
                 if (r->ch == CH_CTRL) ctrl_bytes(r->data, r->len);

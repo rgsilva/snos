@@ -24,6 +24,7 @@
 #define TARGET_VERSION 2u
 #define LE_BOOT_INPUT_TIMEOUT_MS 5000u
 #define LE_PAIRING_TIMEOUT_MS 5000u
+#define PAIRING_WINDOW_MS 120000u
 
 typedef enum { TRANSPORT_BR, TRANSPORT_LE } transport_t;
 typedef enum { NAME_MISSING, NAME_REQUESTED, NAME_DONE } name_state_t;
@@ -52,6 +53,17 @@ static size_t scan_count;
 static bool initialized, radio_on, working, scanning, scan_print_pending;
 static bool connected, connecting, descriptor_available, target_valid;
 static bd_addr_t target_addr;
+/* From `bt pair` until the keyboard is ready, its progress lines are replies
+ * and print with logging off; the same lines from a background reconnect are
+ * unsolicited. A pairing that never finishes stops being watched after 2 min. */
+static bool pairing_window;
+static uint32_t pairing_until;
+static bool pairing_watched(void) {
+    if (pairing_window && (int32_t)(to_ms_since_boot(get_absolute_time()) - pairing_until) >= 0)
+        pairing_window = false;
+    return pairing_window;
+}
+#define BT_SAY(...) (pairing_watched() ? reply_printf(__VA_ARGS__) : log_printf(__VA_ARGS__))
 static bd_addr_type_t target_addr_type;
 static transport_t target_transport;
 static char target_name[64];
@@ -136,7 +148,7 @@ static bool store_target(void) {
     memcpy(rec.addr, target_addr, sizeof(rec.addr));
     copy_text(rec.name, sizeof(rec.name), target_name);
     if (tlv->store_tag(ctx, TARGET_TAG, (const uint8_t *)&rec, sizeof(rec))) {
-        log_puts("bt: could not save keyboard target");
+        log_puts(P_BT "could not save keyboard target");
         return false;
     }
     return true;
@@ -254,7 +266,7 @@ static void drop_target_bond(void) {
     for (int i = le_device_db_count() - 1; i >= 0; --i) le_device_db_remove(i);
     if (gap_load_resolving_list_from_le_device_db != NULL &&
         gap_load_resolving_list_from_le_device_db() != ERROR_CODE_SUCCESS) {
-        log_puts("bt: could not reload LE resolving list");
+        log_puts(P_BT "could not reload LE resolving list");
     }
 }
 
@@ -285,7 +297,7 @@ static void start_le_connect(void) {
     if (gap_whitelist_add(target_addr_type, target_addr) == ERROR_CODE_SUCCESS &&
         gap_connect_with_whitelist() == ERROR_CODE_SUCCESS) {
         connecting = true;
-        log_printf("bt: reconnecting to %s [LE]\n", target_name[0] ? target_name : "keyboard");
+        BT_SAY(P_BT "reconnecting to %s [LE]\n", target_name[0] ? target_name : "keyboard");
     } else connect_target(5000);
 }
 
@@ -298,9 +310,9 @@ static void try_connect_now(void) {
     uint8_t status = hid_host_connect(target_addr, HID_PROTOCOL_MODE_BOOT, &hid_cid);
     if (status == ERROR_CODE_SUCCESS) {
         connecting = true;
-        log_printf("bt: connecting to %s [BR]\n", target_name[0] ? target_name : "keyboard");
+        BT_SAY(P_BT "connecting to %s [BR]\n", target_name[0] ? target_name : "keyboard");
     } else {
-        log_printf("bt: connect failed to start (0x%02x)\n", status);
+        BT_SAY(P_BT "connect failed to start (0x%02x)\n", status);
         connect_target(5000);
     }
 }
@@ -318,16 +330,16 @@ static void request_next_name(void) {
 }
 
 static void print_scan_results(void) {
-    puts("bt scan:");
+    reply_puts(P_BT "scan:");
     if (!scan_count) {
-        puts("  (no Bluetooth devices found)");
+        reply_puts(P_BT "  (no Bluetooth devices found)");
         return;
     }
     unsigned index = 1;
     for (unsigned pass = 0; pass < 2; ++pass) {
         for (size_t i = 0; i < scan_count; ++i) {
             if ((pass == 0) != scan[i].keyboard) continue;
-            printf("  %u  [%s]  %s  %s  %s\n", index++, transport_name(scan[i].transport),
+            reply_printf(P_BT "  %u  [%s]  %s  %s  %s\n", index++, transport_name(scan[i].transport),
                    scan[i].name[0] ? scan[i].name : "(unnamed)", addr_str(scan[i].addr),
                    scan[i].keyboard ? "keyboard" : "-");
         }
@@ -371,7 +383,7 @@ static void start_le_hids(void) {
     uint8_t status = hids_client_connect(le_handle, le_hids_event, mode, &hids_cid);
     if (status != ERROR_CODE_SUCCESS) {
         le_hids_started = false;
-        log_printf("bt: LE HID setup could not start (0x%02x)\n", status);
+        BT_SAY(P_BT "LE HID setup could not start (0x%02x)\n", status);
         gap_disconnect(le_handle);
     }
 }
@@ -384,7 +396,7 @@ static void start_le_report_hids(void) {
                                          &hids_cid);
     if (status != ERROR_CODE_SUCCESS) {
         le_hids_started = false;
-        log_printf("bt: LE report HID setup could not start (0x%02x)\n", status);
+        BT_SAY(P_BT "LE report HID setup could not start (0x%02x)\n", status);
         gap_disconnect(le_handle);
     }
 }
@@ -395,7 +407,8 @@ static void start_le_report_fallback(void) {
     le_hids_started = false;
     /* A successful client remains allocated, so reconnect before changing mode. */
     le_prefer_report_mode = true;
-    log_puts("bt: LE boot input unavailable; reconnecting in report protocol");
+    BT_SAY(P_BT "LE boot input unavailable; reconnecting in report protocol\n");
+    BT_SAY(P_BT "waiting for the keyboard: press a key to wake it\n");
     gap_disconnect(le_handle);
 }
 
@@ -414,12 +427,12 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
             if (status != ERROR_CODE_SUCCESS && !le_report_mode) {
                 /* hids_client finalizes its live client after this callback returns. */
                 le_report_retry = true;
-                log_puts("bt: LE boot protocol unavailable; trying report protocol");
+                BT_SAY(P_BT "LE boot protocol unavailable; trying report protocol\n");
                 return;
             }
             if (status != ERROR_CODE_SUCCESS) {
                 le_hids_started = false;
-                log_printf("bt: LE HID setup failed (0x%02x)\n", status);
+                BT_SAY(P_BT "LE HID setup failed (0x%02x)\n", status);
                 gap_disconnect(le_handle);
                 return;
             }
@@ -429,7 +442,7 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
                     hids_client_descriptor_storage_get_descriptor_data(hids_cid, 0);
                 uint16_t map_len = hids_client_descriptor_storage_get_descriptor_len(hids_cid, 0);
                 if (!hogp_keyboard_map_parse(map, map_len, &le_map)) {
-                    log_puts("bt: LE HID report map has no keyboard input");
+                    BT_SAY(P_BT "LE HID report map has no keyboard input\n");
                     gap_disconnect(le_handle);
                     return;
                 }
@@ -438,12 +451,14 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
                 /* Boot mode is ready only after its keyboard input report arrives. */
                 le_boot_waiting = true;
                 le_boot_wait_at = to_ms_since_boot(get_absolute_time()) + LE_BOOT_INPUT_TIMEOUT_MS;
+                BT_SAY(P_BT "press a key on the keyboard now\n");
                 return;
             }
             connected = true;
             connecting = false;
             schedule_target_store();
-            log_printf("bt: keyboard ready [LE %s]\n", le_report_mode ? "report" : "boot");
+            BT_SAY(P_BT "keyboard ready [LE %s]\n", le_report_mode ? "report" : "boot");
+            pairing_window = false;
             break;
         }
         case GATTSERVICE_SUBEVENT_HID_REPORT:
@@ -459,7 +474,8 @@ static void le_hids_event(uint8_t packet_type, uint16_t channel, uint8_t *packet
                 connected = true;
                 connecting = false;
                 schedule_target_store();
-                log_puts("bt: keyboard ready [LE boot]");
+                BT_SAY(P_BT "keyboard ready [LE boot]\n");
+                pairing_window = false;
             }
             if (connected) {
                 handle_le_report(gattservice_subevent_hid_report_get_report_id(packet),
@@ -488,30 +504,30 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
             if (sm_event_just_works_request_get_handle(packet) != le_handle) break;
             le_pairing_waiting = false;
             sm_just_works_confirm(le_handle);
-            log_puts("bt: LE pairing Just Works accepted");
+            BT_SAY(P_BT "LE pairing Just Works accepted\n");
             break;
         case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
             if (sm_event_passkey_display_number_get_handle(packet) != le_handle) break;
             /* This is protocol progress, not an unanswered pairing request. */
             le_pairing_waiting = false;
-            printf("bt: passkey %06" PRIu32 " - type this on the keyboard, then Enter\n",
+            reply_printf(P_BT "passkey %06" PRIu32 " - type this on the keyboard, then Enter\n",
                    sm_event_passkey_display_number_get_passkey(packet));
             break;
         case SM_EVENT_PAIRING_STARTED:
             if (sm_event_pairing_started_get_handle(packet) != le_handle) break;
             /* Let the Security Manager's own timeout govern an active exchange. */
             le_pairing_waiting = false;
-            log_puts("bt: LE pairing started");
+            BT_SAY(P_BT "LE pairing started\n");
             break;
         case SM_EVENT_PAIRING_COMPLETE:
             if (sm_event_pairing_complete_get_handle(packet) != le_handle) break;
             le_pair_retry = false;
             le_pairing_waiting = false;
             if (sm_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
-                log_puts("bt: LE pairing complete");
+                BT_SAY(P_BT "LE pairing complete\n");
                 start_le_hids();
             } else {
-                log_printf("bt: LE pairing failed (0x%02x)\n",
+                BT_SAY(P_BT "LE pairing failed (0x%02x)\n",
                            sm_event_pairing_complete_get_status(packet));
                 gap_disconnect(le_handle);
             }
@@ -524,7 +540,7 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *pa
                 le_pairing_waiting = false;
                 start_le_hids();
             } else {
-                log_printf("bt: LE re-encryption failed (0x%02x); pairing again\n", status);
+                BT_SAY(P_BT "LE re-encryption failed (0x%02x); pairing again\n", status);
                 /* Missing-key failures have already entered the retryable SM state. */
                 if (status == ERROR_CODE_PIN_OR_KEY_MISSING && sm_request_pairing != NULL) {
                     sm_request_pairing(le_handle);
@@ -599,7 +615,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             working = btstack_event_state_get_state(packet) == HCI_STATE_WORKING;
             if (working) {
                 load_target();
-                log_puts("bt: radio ready");
+                log_puts(P_BT "radio ready");
                 if (target_valid) connect_target(500);
             }
             break;
@@ -649,21 +665,21 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             hci_event_pin_code_request_get_bd_addr(packet, addr);
             char pin_text[7];
             snprintf(pin_text, sizeof(pin_text), "%06" PRIu32, passkey_for_addr(addr));
-            printf("bt: passkey %s - type this on the keyboard, then Enter\n", pin_text);
+            reply_printf(P_BT "passkey %s - type this on the keyboard, then Enter\n", pin_text);
             gap_pin_code_response(addr, pin_text);
             break;
         }
         case HCI_EVENT_USER_PASSKEY_NOTIFICATION:
-            printf("bt: passkey %06" PRIu32 " - type this on the keyboard, then Enter\n",
+            reply_printf(P_BT "passkey %06" PRIu32 " - type this on the keyboard, then Enter\n",
                    hci_event_user_passkey_notification_get_numeric_value(packet));
             break;
         case HCI_EVENT_USER_CONFIRMATION_REQUEST:
             hci_event_user_confirmation_request_get_bd_addr(packet, addr);
             gap_ssp_confirmation_response(addr);
-            log_puts("bt: pairing confirmation accepted");
+            BT_SAY(P_BT "pairing confirmation accepted\n");
             break;
         case GAP_EVENT_PAIRING_STARTED:
-            log_puts("bt: pairing started");
+            BT_SAY(P_BT "pairing started\n");
             break;
         case GAP_EVENT_PAIRING_COMPLETE:
             if (!le_events_cancelled &&
@@ -685,7 +701,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 connecting = false;
                 connected = false;
                 reset_le_session();
-                log_puts("bt: LE connected; pairing");
+                BT_SAY(P_BT "LE connected; pairing\n");
                 if (sm_request_pairing != NULL) sm_request_pairing(le_handle);
             }
             break;
@@ -696,7 +712,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 connected = connecting = false;
                 reset_le_session();
                 keys_released();
-                log_puts("bt: LE keyboard disconnected");
+                BT_SAY(P_BT "LE keyboard disconnected\n");
                 if (target_valid && radio_on) connect_target(3000);
             }
             break;
@@ -722,11 +738,14 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     target_valid = true;
                     target_transport = TRANSPORT_BR;
                     schedule_target_store();
-                    log_printf("bt: keyboard connected [BR] (%s)\n", addr_str(target_addr));
+                    BT_SAY(P_BT "keyboard connected [BR] (%s)\n", addr_str(target_addr));
                     break;
                 case HID_SUBEVENT_DESCRIPTOR_AVAILABLE:
                     descriptor_available = hid_subevent_descriptor_available_get_status(packet) == ERROR_CODE_SUCCESS;
-                    if (descriptor_available) log_puts("bt: keyboard ready [BR]");
+                    if (descriptor_available) {
+                        BT_SAY(P_BT "keyboard ready [BR]\n");
+                        pairing_window = false;
+                    }
                     break;
                 case HID_SUBEVENT_REPORT:
                     if (connected && target_transport == TRANSPORT_BR) {
@@ -738,7 +757,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                     connected = connecting = descriptor_available = false;
                     hid_cid = 0;
                     keys_released();
-                    log_puts("bt: keyboard disconnected [BR]");
+                    BT_SAY(P_BT "keyboard disconnected [BR]\n");
                     if (target_valid && radio_on) connect_target(3000);
                     break;
                 default:
@@ -753,7 +772,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 void btkbd_init(void) {
     if (initialized) return;
     if (!btstack_cyw43_init(cyw43_arch_async_context())) {
-        log_puts("bt: init failed");
+        log_puts(P_BT "init failed");
         return;
     }
     l2cap_init();
@@ -818,20 +837,20 @@ void btkbd_poll(void) {
 
 static void print_status(void) {
     const char *state = !initialized ? "uninitialized" : radio_on ? (working ? "on" : "starting") : "off";
-    printf("bt: radio=%s connected=%s scanning=%s\n", state, connected ? "yes" : "no", scanning ? "yes" : "no");
+    reply_printf(P_BT "radio=%s connected=%s scanning=%s\n", state, connected ? "yes" : "no", scanning ? "yes" : "no");
     if (target_valid) {
-        printf("bt: keyboard=[%s] %s %s bonded=%s\n", transport_name(target_transport),
+        reply_printf(P_BT "keyboard=[%s] %s %s bonded=%s\n", transport_name(target_transport),
                target_name[0] ? target_name : "(unnamed)", addr_str(target_addr), bonded() ? "yes" : "no");
-    } else puts("bt: keyboard=(none)");
+    } else reply_puts(P_BT "keyboard=(none)");
 }
 
 static void start_scan(void) {
     if (!initialized || !radio_on || !working) {
-        puts("bt: radio not ready");
+        reply_puts(P_BT "radio not ready");
         return;
     }
     if (scanning) {
-        puts("bt: scan already running");
+        reply_puts(P_BT "scan already running");
         return;
     }
     scan_count = 0;
@@ -846,8 +865,8 @@ static void start_scan(void) {
     if (err) {
         gap_stop_scan();
         scanning = false;
-        printf("bt: scan failed (0x%02x)\n", err);
-    } else puts("bt: scanning [LE] and [BR] for about 10 seconds...");
+        reply_printf(P_BT "scan failed (0x%02x)\n", err);
+    } else reply_puts(P_BT "scanning [LE] and [BR] for about 10 seconds...");
 }
 
 static bool parse_target(const char *arg, scan_entry_t *entry) {
@@ -874,12 +893,12 @@ static bool parse_target(const char *arg, scan_entry_t *entry) {
 
 static void pair_target(const char *arg) {
     if (!initialized || !radio_on || !working) {
-        puts("bt: radio not ready");
+        reply_puts(P_BT "radio not ready");
         return;
     }
     scan_entry_t entry;
     if (!parse_target(arg, &entry)) {
-        puts("bt: unknown scan index or address");
+        reply_puts(P_BT "unknown scan index or address");
         return;
     }
     if (scanning) {
@@ -896,20 +915,23 @@ static void pair_target(const char *arg) {
     copy_text(target_name, sizeof(target_name), entry.name);
     target_valid = true;
     reconnect_at = 0;
+    pairing_window = true;
+    pairing_until = to_ms_since_boot(get_absolute_time()) + PAIRING_WINDOW_MS;
     try_connect_now();
-    puts("bt: pairing/connecting");
+    reply_puts(P_BT "pairing/connecting");
 }
 
 static void forget(void) {
     if (!initialized) {
-        puts("bt: radio not ready");
+        reply_puts(P_BT "radio not ready");
         return;
     }
     disconnect_current_target();
     drop_target_bond();
     clear_target();
+    pairing_window = false;
     connected = connecting = false;
-    puts("bt: forgotten");
+    reply_puts(P_BT "forgotten");
 }
 
 bool btkbd_command(const char *line) {
@@ -922,18 +944,18 @@ bool btkbd_command(const char *line) {
             gap_inquiry_stop();
             gap_stop_scan();
         }
-        scanning = scan_print_pending = false;
+        scanning = scan_print_pending = pairing_window = false;
         le_handle = HCI_CON_HANDLE_INVALID;
         cancel_deferred_actions();
         radio_on = working = connected = connecting = false;
         keys_released();
         if (initialized) hci_power_control(HCI_POWER_OFF);
-        puts("bt: off");
+        reply_puts(P_BT "off");
         return true;
     }
     if (strcmp(line, "bt on") == 0) {
-        if (!initialized) puts("bt: radio not ready");
-        else { radio_on = true; hci_power_control(HCI_POWER_ON); puts("bt: on"); }
+        if (!initialized) reply_puts(P_BT "radio not ready");
+        else { radio_on = true; hci_power_control(HCI_POWER_ON); reply_puts(P_BT "on"); }
         return true;
     }
     return false;

@@ -546,7 +546,7 @@ void ip_stream_bytes(const uint8_t *data, size_t len, ip_stream_consumer_t consu
             continue;
         size_t n = ipbuf[0] | ((size_t)ipbuf[1] << 8);
         if (!n || n > LINK_MTU) {
-            log_puts("nat: IP stream desync");
+            log_puts(P_NAT "IP stream desync");
             ipused = 0;
             break;
         }

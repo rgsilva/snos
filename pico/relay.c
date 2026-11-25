@@ -79,7 +79,7 @@ bool relay_send(uint8_t type, const uint8_t *data, size_t len) {
 }
 static void relay_input(const uint8_t *packet, size_t len) {
     if (!relay_send(1, packet, len))
-        log_puts("relay: IP output queue full");
+        log_puts(P_RELAY "IP output queue full");
 }
 void relay_ip_bytes(const uint8_t *data, size_t len) {
     ip_stream_bytes(data, len, relay_input);

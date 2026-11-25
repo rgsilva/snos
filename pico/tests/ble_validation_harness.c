@@ -30,8 +30,27 @@ static const uint8_t keyboard_map[] = {
 static const uint8_t shift_a[8] = {2, 0, 4};
 
 /* Only external effects are stubbed. SDK event accessors remain real. */
-int log_puts(const char *text) { (void)text; return 0; }
-int log_printf(const char *format, ...) { (void)format; return 0; }
+/* The firmware's two output classes, kept apart for the tests that read them. */
+#include <stdarg.h>
+static char log_out[4096], reply_out[4096];
+static int say_to(char *buf, const char *format, va_list args) {
+    size_t n = strlen(buf);
+    return vsnprintf(buf + n, 4096 - n, format, args);
+}
+int log_printf(const char *format, ...) {
+    va_list args; va_start(args, format);
+    int n = say_to(log_out, format, args);
+    va_end(args);
+    return n;
+}
+int log_puts(const char *text) { return log_printf("%s\n", text); }
+int reply_printf(const char *format, ...) {
+    va_list args; va_start(args, format);
+    int n = say_to(reply_out, format, args);
+    va_end(args);
+    return n;
+}
+int reply_puts(const char *text) { return reply_printf("%s\n", text); }
 void kbd_hid_boot_report(const uint8_t report[8]) {
     ++reports_seen;
     memcpy(received, report, 8);
