@@ -536,6 +536,17 @@ in, so `pad` and any game see it unchanged; the on-screen keyboard, the kill
 switch and `edit` (through the new `SYS_PAD_PHYS`) see the controller alone.
 `test-keys`, `pico/tests/kbdpad_test.py`; [docs/pico-adapter.md](docs/pico-adapter.md) §3.
 
+**8b. The serial console as a keyboard. ✅ (2026-11-25; host tests only, no
+terminal program or silicon yet)** A flaky Bluetooth keyboard needs a plan B
+that needs no Bluetooth: `kbd` on the Pico's console turns every byte typed in
+the terminal into a `LINK_CH_KBD` key, live; Ctrl+] leaves. `termkeys.c` is a
+pure state machine (xterm and VT100 sequences, CR/LF as one Enter, 0x7F as
+Backspace, a lone Escape after 50 ms, Alt+x as Escape x); `log_capture()` keeps
+every other line off the terminal while it is on. Not possible: the keyboard
+as a controller, a terminal sends no key-up. Unproven: that 50 ms clears the gap
+inside one sequence over real USB CDC and UART at 115200. `termkeys_test.py`,
+`console_log_test.py`; [pico/README.md](pico/README.md).
+
 **9. `mc`: mobs, and world changes that persist.** The world is baked into
 ROM and forgotten at exit. Keep a bounded set of changed chunks (block
 edits as a journal in SRAMFS, replayed over the ROM world at load), and
