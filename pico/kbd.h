@@ -8,6 +8,7 @@ void kbd_poll(void);
 void kbd_test(bool on);      /* "abcdef" every 5 s, the wire test; off by default */
 bool kbd_test_on(void);
 bool kbd_type(const char *text); /* send text + newline as keystrokes */
+bool kbd_key(const uint8_t *keys, size_t n); /* raw key bytes, in order with the rest */
 void kbd_hid_boot_report(const uint8_t report[8]);
 /* The keyboard went away: every key it held is up, and the console is told. */
 void kbd_hid_release(void);

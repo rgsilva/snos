@@ -31,6 +31,7 @@ bool kbd_type(const char *text) {
     if (n && !link_push(CH_KBD, (const uint8_t *)text, n)) return false;
     return link_push(CH_KBD, (const uint8_t *)"\n", 1);
 }
+bool kbd_key(const uint8_t *keys, size_t n) { return link_push(CH_KBD, keys, n); }
 void kbd_hid_boot_report(const uint8_t report[HIDKEYS_REPORT_LEN]) {
     uint32_t irq = save_and_disable_interrupts();
     uint8_t next_head = (uint8_t)((report_head + 1u) & 7u);

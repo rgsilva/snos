@@ -95,7 +95,7 @@ brackets, so the output can be filtered (`grep '^\[BT\]'`):
 | `[NAT]`   | the NAT stats line (`in= out= drop= ...`) and NAT events         |
 | `[BT]`    | everything Bluetooth: scan, pairing progress, keyboard state     |
 | `[WIFI]`  | join progress and state, `wifi?`, saved or cleared settings      |
-| `[KBD]`   | `type`, `kbd test`, `kbd map`                                    |
+| `[KBD]`   | `type`, `kbd`, `kbd test`, `kbd map`                             |
 | `[RELAY]` | tier-1 relay events                                              |
 | `[MODE]`  | `mode`                                                           |
 | `[CTRL]`  | control-channel warnings                                         |
@@ -139,6 +139,47 @@ and forwards. `--debug` dumps IP datagrams; `SNOS_GW_STATS=1` enables host stats
 HELLO reports protocol version 2 and the relay host's address. The keyboard
 module sends `abcdef` every five seconds only with `kbd test on`; `type <text>`
 sends text plus Enter as keystrokes.
+
+### Keyboard passthrough (`kbd`)
+
+A plan B for a flaky Bluetooth keyboard: `kbd` on the serial console (USB or
+UART0) sends everything you type in the terminal program to the SNES as
+keystrokes, live, key by key. Nothing is echoed (the SNES screen is the echo)
+and the command line is bypassed, so `stats` and every other command are
+unavailable until you leave with **Ctrl+]** (byte 0x1D, consumed, never sent).
+The Pico prints `[KBD] passthrough on: ...` and `[KBD] passthrough off`.
+While it is on the Pico prints nothing else, whatever `log` says: no stats
+lines, no events, no pairing or WiFi progress; the one exception is
+`[KBD] queue full: is the SNES link up?`, once per episode (a dropped key,
+e.g. the link is down). Nothing is replayed after leaving; `log` is unchanged.
+The mode survives a SNES restart or link loss; only Ctrl+] ends it.
+
+| Terminal sends                                   | The SNES gets            |
+|--------------------------------------------------|--------------------------|
+| printable ASCII, Tab, Ctrl+letter                | as is (Ctrl+] excepted)  |
+| CR, LF or CR LF                                  | one Enter ($0A)          |
+| 0x7F or 0x08 (Backspace)                         | Backspace ($08)          |
+| `ESC [ A/B/C/D`, `ESC O A/B/C/D`                 | Up/Down/Right/Left       |
+| `ESC [ H`, `1~`, `7~`, `ESC O H`                 | Home                     |
+| `ESC [ F`, `4~`, `8~`, `ESC O F`                 | End                      |
+| `ESC [ 2~` / `3~` / `5~` / `6~`                  | Insert / Delete / PageUp / PageDown |
+| `ESC O P..S`, `ESC [ 11~..14~`                   | F1-F4                    |
+| `ESC [ 15~ 17~ 18~ 19~ 20~ 21~ 23~ 24~`          | F5-F12                   |
+| a lone Escape (nothing follows for 50 ms)        | $1B                      |
+| Alt+x (`ESC x`)                                  | $1B then x               |
+| UTF-8 Portuguese letters (a with tilde, c with cedilla, ...) | the base letter |
+| any other UTF-8 (bytes >= 0x80)                  | dropped                  |
+
+Modifier forms (`ESC [ 1 ; 5 C`) act as the plain key; an unknown escape
+sequence is swallowed whole. Not available: the keyboard-as-a-controller
+channel (`LINK_CH_KBDPAD`), because a terminal sends no key-up events, so
+`kbd map` keys do nothing here. Alt+[ and Alt+Shift+O are read as the start of
+a sequence.
+
+Terminal programs: GNU `screen` keeps Ctrl+A for itself (type Ctrl+A then `a`
+to send Ctrl+A); `picocom` (Ctrl+A) and `minicom` (Ctrl+A) have their own
+escape keys; none of them uses Ctrl+], which is telnet's. If your program does
+use it, quit the mode with the program's own way of sending it.
 
 Bluetooth HID keyboards pair from the console. Both Bluetooth Classic and BLE
 HID-over-GATT keyboards are supported (one bonded keyboard at a time):

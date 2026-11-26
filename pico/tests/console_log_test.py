@@ -113,6 +113,12 @@ void kbd_init(void) {}
 void kbd_poll(void) {}
 void kbd_test(bool on) { (void)on; }
 bool kbd_type(const char *t) { (void)t; return true; }
+static uint8_t keybuf[64]; static unsigned keyn; static int key_fail;
+bool kbd_key(const uint8_t *k, size_t n) {
+    if (key_fail) return false;
+    for (size_t i = 0; i < n && keyn < sizeof(keybuf); ++i) keybuf[keyn++] = k[i];
+    return true;
+}
 void kbd_link_restart(void) {}
 void kbd_set_map(const uint8_t m[12]) { (void)m; }
 size_t kbd_map_text(char *out, size_t cap) { snprintf(out, cap, "B=z"); return 3; }
@@ -136,6 +142,12 @@ static void type(const char *text) {
     input = text;
     while (*input) console_poll();
 }
+static void keys_dump(const char *label) {
+    fflush(stdout); printf("$$ %s", label);
+    for (unsigned i = 0; i < keyn; ++i) printf(" %02x", keybuf[i]);
+    printf("\n"); keyn = 0;
+}
+static void idle(uint32_t ms) { t_now += ms; input = ""; console_poll(); }
 static void phase(const char *name) { fflush(stdout); fprintf(stdout, "@@ %s\n", name); }
 static void wifi_steps(const int *statuses, unsigned n) {
     for (unsigned i = 0; i < n; ++i) { link_status = statuses[i]; t_now += 100; wifi_poll(); }
@@ -187,6 +199,26 @@ int main(void) {
     pm_mark("reconfigured");
     phase("log-debug-again"); type("log debug\r"); print_stats(false);
     pm_mark("end");
+    phase("pt-enter");                type("log info\rkbd\r\n");
+    phase("pt-keys");                 type("zebra\r"); keys_dump("zebra");
+    type("\r\n\n\r\r\n"); keys_dump("enters");
+    type("stats\r"); keys_dump("stats");
+    type("\x1b[A\x1b[B\x1b[3~\x1bOP\x1b[15~"); keys_dump("seqs");
+    type("\x1b[1;5C\x1b[99~z"); keys_dump("swallow");
+    type("\x1b"); idle(10); keys_dump("esc-early"); idle(60); keys_dump("esc-late");
+    type("\x1bx"); keys_dump("alt-x");
+    type("\x1b["); idle(60); keys_dump("esc-bracket");
+    type("\x1b[1"); idle(10); type("5~"); keys_dump("split");
+    type("\xc3\xa7\xe2\x82\xac!"); keys_dump("utf8");
+    phase("pt-full");                 key_fail = 1; type("abc"); type("d"); key_fail = 0;
+    type("e"); keys_dump("recovered"); key_fail = 1; type("f"); key_fail = 0;
+    phase("pt-leave");                type("\x1d"); keys_dump("leave");
+    type("stats\r"); type("kbd test on\rkbd test off\rkbd map\r");
+    phase("pt-reenter");              type("kbd\r"); type("\x1b\x1d"); keys_dump("esc-exit");
+    phase("pt-captured");             type("log debug\rkbd\r"); print_stats(false);
+    log_event(P_SNES "link lost\n"); log_diag(P_SNES "chatter\n"); reply_puts(P_BT "passkey");
+    type("\x1b[A"); key_fail = 1; type("a"); type("b"); key_fail = 0;
+    type("\x1d"); print_stats(false); log_event(P_SNES "link up\n");
     phase("end");
     return 0;
 }
@@ -194,14 +226,18 @@ int main(void) {
 exe = BUILD / "driver"
 subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-I", str(BUILD), "-I", str(ROOT),
                 str(BUILD / "driver.c"), str(ROOT / "log.c"), str(ROOT / "hidkeys.c"),
+                str(ROOT / "termkeys.c"),
                 "-o", str(exe)], check=True)
 run = subprocess.run([str(exe)], capture_output=True, text=True, check=True)
 
 prefixes = re.findall(r'#define P_[A-Z]+\s+"(\[[A-Z]+\] )"', (ROOT / "log.h").read_text())
 assert len(prefixes) >= 10, prefixes
-phases, marks, cur = {}, {}, None
+phases, marks, cur, keys = {}, {}, None, {}
 for line in run.stdout.splitlines():
-    if line.startswith("@@ "):
+    if line.startswith("$$ "):
+        label, *hexes = line[3:].split()
+        keys[label] = bytes(int(h, 16) for h in hexes)
+    elif line.startswith("@@ "):
         cur = line[3:]
         phases[cur] = []
     elif line.startswith("## "):
@@ -255,4 +291,28 @@ assert phases["wifi-quiet-after-window"] == ["[WIFI] settings saved"], \
     phases["wifi-quiet-after-window"]
 assert phases["log-debug-again"][0] == "[LOG] debug"
 assert phases["log-debug-again"][1].startswith("[SNES] gaps=")
+PT = "[KBD] passthrough on: keys go to the SNES; Ctrl+] leaves"
+assert phases["pt-enter"][-1] == PT, phases["pt-enter"]
+assert keys["zebra"] == b"zebra\n"
+assert keys["enters"] == b"\n\n\n\n", keys["enters"]
+assert keys["stats"] == b"stats\n"
+assert keys["seqs"] == bytes([0x1C, 0x1D, 0x7F, 0x81, 0x85]), keys["seqs"]
+assert keys["swallow"] == b"\x1fz", keys["swallow"]
+assert keys["esc-early"] == b"" and keys["esc-late"] == b"\x1b"
+assert keys["alt-x"] == b"\x1bx" and keys["esc-bracket"] == b"\x1b["
+assert keys["split"] == bytes([0x85]), keys["split"]
+assert keys["utf8"] == b"c!", keys["utf8"]
+assert phases["pt-keys"] == [] and "zebra" not in run.stderr, phases["pt-keys"]
+assert phases["pt-full"] == ["[KBD] queue full: is the SNES link up?"] * 2, phases["pt-full"]
+assert keys["recovered"] == b"e"
+assert phases["pt-leave"][0] == "[KBD] passthrough off" and keys["leave"] == b""
+assert phases["pt-leave"][1].startswith("[SNES] gaps="), phases["pt-leave"]
+for text in ("[KBD] test pattern on", "[KBD] test pattern off", "[KBD] map: B=z"):
+    assert text in phases["pt-leave"], text
+assert keys["esc-exit"] == b"\x1b" and phases["pt-reenter"][-1] == "[KBD] passthrough off"
+cap = phases["pt-captured"]
+assert cap[0] == "[LOG] debug" and cap[1] == PT, cap
+assert cap[2] == "[KBD] queue full: is the SNES link up?", cap
+assert cap[3] == "[KBD] passthrough off" and cap[4].startswith("[SNES] gaps="), cap
+assert cap[5].startswith("[NAT] in=") and cap[6:] == ["[SNES] link up"], cap
 print(f"console log: {len(prefixes)} prefixes, {sum(map(len, phases.values()))} lines checked")
