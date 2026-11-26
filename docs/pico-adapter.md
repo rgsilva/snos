@@ -174,6 +174,13 @@ every byte into the input ring with `kbd_push()`, the same funnel the harness
 and telnetd use. An old kernel skips the record by its length byte, as every
 parser on both sides always has.
 
+The serial console can also be a keyboard: `kbd` puts it in passthrough, where
+every byte typed in the terminal program is translated by `termkeys.c` (xterm
+escape sequences to the codes above, CR/LF to one Enter, 0x7F to Backspace, a
+lone Escape after a 50 ms timeout) and queued on `LINK_CH_KBD` behind the same
+`link_push` as the other sources; Ctrl+] leaves. It has no `LINK_CH_KBDPAD`
+side, since a terminal sends no key-up events.
+
 `LINK_CH_KBDPAD` is two bytes, the `PAD_*` bitmask in `SYS_PAD`'s layout (B
 $8000, Y $4000, SELECT $2000, START $1000, Up $0800, Down $0400, Left $0200,
 Right $0100, A $0080, X $0040, L $0020, R $0010), little-endian: which buttons

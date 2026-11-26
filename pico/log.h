@@ -31,6 +31,11 @@
  * `log off` shows neither, `log info` (the boot default) shows info,
  * `log debug` both; `log on` is an alias for debug. Not saved to flash. A line
  * that is a reply while a window is open is not also sent through a level. */
+/* While the console is captured (the keyboard passthrough) nothing prints
+ * through reply_* or the levels, whatever the level; nothing is kept for later.
+ * console_puts is the capturing mode's own line and always prints. */
+void log_capture(bool on);
+int console_puts(const char *text);
 typedef enum { LOG_OFF, LOG_INFO, LOG_DEBUG } log_level_t;
 void log_set_level(log_level_t level);
 log_level_t log_level(void);

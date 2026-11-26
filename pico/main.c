@@ -10,6 +10,7 @@
 #include "btkbd.h"
 #include "kbd.h"
 #include "hidkeys.h"
+#include "termkeys.h"
 #include "relay.h"
 #include "nat.h"
 #include "log.h"
@@ -154,6 +155,20 @@ static void kbd_map_command(const char *args) {
     kbd_map_text(text, sizeof(text));
     reply_printf(P_KBD "map: %s\n", text);
 }
+/* Passthrough: console bytes become SNES keystrokes until Ctrl+]. */
+static bool passthrough;
+static termkeys_t term;
+static bool key_full;
+static void passthrough_send(const termkeys_out_t *o) {
+    if (!o->n) return;
+    if (kbd_key(o->keys, o->n)) { key_full = false; return; }
+    if (!key_full) console_puts(P_KBD "queue full: is the SNES link up?");
+    key_full = true;
+}
+static void passthrough_leave(void) {
+    passthrough = false; log_capture(false);
+    console_puts(P_KBD "passthrough off");
+}
 static void console_command(char *line) {
     if (btkbd_command(line)) return;
     if (!strcmp(line, "stats")) { print_stats(true); return; }
@@ -171,6 +186,12 @@ static void console_command(char *line) {
         return;
     }
     if (!strcmp(line, "type")) { reply_puts(kbd_type("") ? P_KBD "sent" : P_KBD "queue full"); return; }
+    if (!strcmp(line, "kbd")) {
+        passthrough = true; key_full = false; termkeys_init(&term, true);
+        console_puts(P_KBD "passthrough on: keys go to the SNES; Ctrl+] leaves");
+        log_capture(true);
+        return;
+    }
     if (!strcmp(line, "kbd test on")) { kbd_test(true); reply_puts(P_KBD "test pattern on"); return; }
     if (!strcmp(line, "kbd test off")) { kbd_test(false); reply_puts(P_KBD "test pattern off"); return; }
     if (!strcmp(line, "kbd map") || !strncmp(line, "kbd map ", 8)) { kbd_map_command(line + 7); return; }
@@ -210,16 +231,28 @@ static void console_command(char *line) {
             }
         }
     }
-    reply_puts(P_CON "commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log [off|info|debug] (on = debug), type <text>, kbd test on|off, kbd map [<button> <key>|reset]");
+    reply_puts(P_CON "commands: wifi SSID|PASSWORD|HOST (empty HOST is NAT), wifi?, wifi clear, mode [nat|relay HOST], bt, bt scan, bt pair <n|addr>, bt forget, bt on|off, stats, log [off|info|debug] (on = debug), type <text>, kbd (keys go to the SNES until Ctrl+]), kbd test on|off, kbd map [<button> <key>|reset]");
 }
 static void console_poll(void) {
     static char line[168];
     static size_t used;
     static bool overflow, was_cr;
+    if (passthrough) {
+        termkeys_out_t o;
+        termkeys_tick(&term, now_ms(), &o);
+        passthrough_send(&o);
+    }
     /* Bound input work so a busy console cannot starve the link. */
     for (unsigned n = 0; n < 32; ++n) {
         int c = getchar_timeout_us(0);
         if (c == PICO_ERROR_TIMEOUT) break;
+        if (passthrough) {
+            termkeys_out_t o;
+            termkeys_feed(&term, now_ms(), (uint8_t)c, &o);
+            passthrough_send(&o);
+            if (o.leave) { passthrough_leave(); was_cr = false; }
+            continue;
+        }
         if (c == '\n' && was_cr) { was_cr = false; continue; }
         was_cr = c == '\r';
         if (c == '\r' || c == '\n') {
