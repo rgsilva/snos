@@ -5,6 +5,8 @@
 #include <string.h>
 #include "config.h"
 #include "lwip/netif.h"
+#include "lwip/dhcp.h"
+#include "lwip/dns.h"
 #include "port.h"
 #include "ctrl.h"
 #include "btkbd.h"
@@ -18,6 +20,7 @@ static config_t settings;
 static bool wifi_ready, wifi_attempt;
 static int wifi_status = 99;
 static uint32_t wifi_retry_at, wifi_join_at;
+static uint32_t wifi_addr; /* the address last announced as up, 0 = none */
 static const char *wifi_state = "starting";
 static bool nat_mode(void) { return settings.host[0] == '\0'; }
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
@@ -30,15 +33,33 @@ static bool wifi_watched(void) {
     return wifi_watch;
 }
 #define WIFI_SAY(...) (wifi_watched() ? reply_printf(__VA_ARGS__) : log_event(__VA_ARGS__))
+/* The STA address as text, "-" when there is none; wifi_ready guards the lwIP lock. */
+static const char *wifi_ip_text(char out[16]) {
+    const ip4_addr_t *a;
+    strcpy(out, "-");
+    if (!wifi_ready) return out;
+    cyw43_arch_lwip_begin();
+    a = netif_default ? netif_ip4_addr(netif_default) : NULL;
+    if (a && a->addr) { strncpy(out, ip4addr_ntoa(a), 15); out[15] = '\0'; }
+    cyw43_arch_lwip_end();
+    return out;
+}
+static uint32_t netif_addr(void) {
+    cyw43_arch_lwip_begin();
+    uint32_t a = netif_default ? netif_ip4_addr(netif_default)->addr : 0;
+    cyw43_arch_lwip_end();
+    return a;
+}
 static void print_stats(bool reply) {
+    char ip[16];
     port_stats_t p = port_stats(); link_stats_t l = link_stats();
     int (*say)(const char *, ...) = reply ? reply_printf : log_diag;
     say(P_SNES "gaps=%"PRIu32" frames=%"PRIu32" short=%"PRIu32" clocks=%"PRIu32
            " overrun=%"PRIu32" badsum=%"PRIu32" seq=%u ack=%u resends=%"PRIu32" win=%u"
-           " kbd=%u mode=%s %s wifi=%s host=%s\n", p.gaps, p.complete, p.short_frames,
+           " kbd=%u mode=%s %s wifi=%s ip=%s host=%s\n", p.gaps, p.complete, p.short_frames,
            p.clocks, p.overruns, l.bad_sum, l.seq, l.ack, l.resends, l.window,
            (unsigned)link_queued(CH_KBD), nat_mode() ? "nat" : "relay",
-           nat_mode() ? "" : relay_state(), wifi_state,
+           nat_mode() ? "" : relay_state(), wifi_state, wifi_ip_text(ip),
            settings.host[0] ? settings.host : "(none)");
     if (nat_mode()) { nat_stats_t n = nat_stats();
         say(P_NAT "in=%"PRIu32" out=%"PRIu32" drop=%"PRIu32
@@ -57,12 +78,26 @@ static void wifi_power_save_off(void) {
     if (!e) { wifi_pm_off = true; return; }
     if (!wifi_pm_warned) { wifi_pm_warned = true; log_event(P_WIFI "power save stays on (%d)\n", e); }
 }
+/* lwIP keeps the lease across a link-down and answers the next link-up with a
+ * REQUEST for it, and cyw43 starts DHCP once, at bring-up. So the old address
+ * stays on the netif, and cyw43_tcpip_link_status() calls that "up", until
+ * something replaces it. Clear it and restart DHCP; `leave` also releases the
+ * lease and disassociates first. */
+static void wifi_reset_address(bool leave) {
+    cyw43_arch_lwip_begin();
+    if (leave) dhcp_release_and_stop(netif_default);
+    netif_set_addr(netif_default, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4);
+    for (unsigned i = 0; i < DNS_MAX_SERVERS; ++i) dns_setserver((u8_t)i, NULL);
+    if (leave) cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+    err_t e = dhcp_start(netif_default);
+    cyw43_arch_lwip_end();
+    if (e != ERR_OK) log_event(P_WIFI "dhcp start failed (%d)\n", (int)e);
+    wifi_addr = 0;
+}
 static void wifi_changed(void) {
     if (wifi_ready) {
         relay_configure(settings.host, false); nat_configure(false); ctrl_set_forwarder(NULL, NULL);
-        cyw43_arch_lwip_begin();
-        cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
-        cyw43_arch_lwip_end();
+        wifi_reset_address(true);
     }
     wifi_watch = true; wifi_watch_until = now_ms() + 60000;
     wifi_attempt = false; wifi_status = 99; wifi_retry_at = now_ms();
@@ -98,13 +133,14 @@ static void wifi_poll(void) {
     if (wifi_status == CYW43_LINK_UP && status != CYW43_LINK_UP) {
         WIFI_SAY(P_WIFI "lost\n");
         wifi_state = "lost"; wifi_status = status; wifi_attempt = false; wifi_retry_at = now;
+        wifi_reset_address(false);
     }
     if (wifi_attempt || status == CYW43_LINK_UP) {
         if (status != wifi_status) {
             if (status == CYW43_LINK_UP) {
-                cyw43_arch_lwip_begin();
-                WIFI_SAY(P_WIFI "joined %s\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
-                cyw43_arch_lwip_end();
+                char ip[16];
+                wifi_addr = netif_addr();
+                WIFI_SAY(P_WIFI "joined %s\n", wifi_ip_text(ip));
                 wifi_state = "up"; wifi_watch = false;
             } else if (status < 0 || status == CYW43_LINK_DOWN) {
                 WIFI_SAY(P_WIFI "join failed (%d)\n", status);
@@ -116,6 +152,12 @@ static void wifi_poll(void) {
             }
             wifi_status = status;
         }
+    }
+    if (status == CYW43_LINK_UP && wifi_addr && netif_addr() != wifi_addr) {
+        char ip[16];
+        wifi_addr = netif_addr();
+        log_event(P_WIFI "address changed to %s\n", wifi_ip_text(ip));
+        if (nat_mode()) { nat_configure(false); ctrl_announce(); }
     }
     if (nat_mode()) { relay_configure(settings.host, false); nat_configure(status == CYW43_LINK_UP); ctrl_set_forwarder(nat_forward_add, nat_forward_del); }
     else { nat_configure(false); ctrl_set_forwarder(NULL, NULL); relay_configure(settings.host, status == CYW43_LINK_UP); }
@@ -196,8 +238,9 @@ static void console_command(char *line) {
     if (!strcmp(line, "kbd test off")) { kbd_test(false); reply_puts(P_KBD "test pattern off"); return; }
     if (!strcmp(line, "kbd map") || !strncmp(line, "kbd map ", 8)) { kbd_map_command(line + 7); return; }
     if (!strcmp(line, "wifi?")) {
-        reply_printf(P_WIFI "ssid=%s password=******** host=%s power-save=%s\n",
-                     settings.ssid, settings.host, wifi_pm_off ? "off" : "on");
+        char ip[16];
+        reply_printf(P_WIFI "ssid=%s password=******** host=%s ip=%s power-save=%s\n",
+                     settings.ssid, settings.host, wifi_ip_text(ip), wifi_pm_off ? "off" : "on");
         return;
     }
     if (!strcmp(line, "mode")) { reply_puts(nat_mode() ? P_MODE "nat" : P_MODE "relay"); return; }
