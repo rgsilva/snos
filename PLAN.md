@@ -520,6 +520,18 @@ board is USB powered, so `main.c` now sets `CYW43_NONE_PM` once after the
 station comes up; the driver applies its default only then and a join leaves
 it alone. `wifi?` says `power-save=off`. Host-tested; the effect on latency is
 unproven until measured on the board.)*
+*(2026-11-27, changing WiFi network. On the board: joined at 172.16.247.9,
+`wifi <hotspot>|...` printed `joined 172.16.247.9`, the old address, and the Pico
+was gone from the home LAN. cyw43 starts DHCP once, at bring-up, and lwIP keeps
+the lease across a link-down; `cyw43_tcpip_link_status()` says up as soon as the
+radio is associated and the netif has any address, and it still had the old one.
+`wifi_changed()` and a lost link now release and clear the address and restart
+DHCP, so `joined` waits for the new lease; a lease that changes under an up link
+prints `address changed`, rebuilds the NAT and pushes a HELLO. The NAT and the
+HELLO text re-read the address every poll, so only the console's copy (asked
+once) and the flows were stale. The console host test models the netif; real
+DHCP timing on a phone hotspot, and whether the chip reports a link-down between
+two associations, are unproven.)*
 
 **8. The whole keyboard, and the keyboard as a controller. ✅ (2026-10-05;
 untested on a real keyboard)** `hidkeys.c` dropped every key it had no byte
