@@ -12,6 +12,7 @@ void ctrl_set_forwarder(bool (*add)(uint16_t, uint8_t), void (*del)(uint16_t, ui
 }
 void ctrl_reset(void) { state = used = 0; hello_pending = have_address = false; }
 void ctrl_clear_address(void) { have_address = false; }
+void ctrl_announce(void) { hello_pending = true; }
 void ctrl_address(const uint8_t *ip) {
     for (unsigned i = 0; i < 4; ++i) address[i] = ip[i];
     have_address = true;

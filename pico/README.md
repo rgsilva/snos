@@ -86,6 +86,14 @@ station is up (the driver default adds hundreds of milliseconds to inbound
 traffic) and `wifi?` shows `power-save=off`. WiFi state changes and the stats lines are
 logged (see below); `stats` prints immediately.
 
+Changing network at run time (`wifi SSID|...`, `wifi clear`, `mode ...`)
+releases the DHCP lease, clears the address and starts DHCP again; `joined
+<address>` is printed only once the new network has handed one out, and the
+same happens when the link is lost and comes back. A lease that changes while
+the link stays up prints `[WIFI] address changed to <address>`, rebuilds the
+NAT and pushes a fresh HELLO to the console. `wifi?` and the stats line show
+`ip=<address>`, or `ip=-` when there is none.
+
 Every line the firmware prints starts with a subsystem prefix in square
 brackets, so the output can be filtered (`grep '^\[BT\]'`):
 

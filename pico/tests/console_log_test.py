@@ -55,10 +55,26 @@ int cyw43_wifi_pm(cyw43_t *s, uint32_t pm);
 int cyw43_arch_wifi_connect_async(const char *ssid, const char *pass, uint32_t auth);
 ''')
 (BUILD / "lwip/netif.h").write_text('''
-struct netif; typedef struct { int x; } ip4_addr_t;
+#pragma once
+#include <stdint.h>
+struct netif; typedef struct { uint32_t addr; } ip4_addr_t;
+typedef int err_t; typedef uint8_t u8_t;
+#define ERR_OK 0
+#define IP4_ADDR_ANY4 ((const ip4_addr_t *)0)
 extern struct netif *netif_default;
 const ip4_addr_t *netif_ip4_addr(struct netif *n);
 const char *ip4addr_ntoa(const ip4_addr_t *a);
+void netif_set_addr(struct netif *n, const ip4_addr_t *ip, const ip4_addr_t *mask, const ip4_addr_t *gw);
+''')
+(BUILD / "lwip/dhcp.h").write_text('''
+#include "lwip/netif.h"
+err_t dhcp_start(struct netif *n);
+void dhcp_release_and_stop(struct netif *n);
+''')
+(BUILD / "lwip/dns.h").write_text('''
+#include "lwip/netif.h"
+#define DNS_MAX_SERVERS 2
+void dns_setserver(u8_t i, const void *ip);
 ''')
 (BUILD / "driver.c").write_text(r'''
 #include <stdio.h>
@@ -72,7 +88,6 @@ const char *ip4addr_ntoa(const ip4_addr_t *a);
 
 uint32_t t_now = 1000;
 cyw43_t cyw43_state;
-struct netif *netif_default;
 static int link_status = CYW43_LINK_DOWN;
 static const char *input;
 int getchar_timeout_us(uint32_t us) { (void)us; return *input ? (unsigned char)*input++ : PICO_ERROR_TIMEOUT; }
@@ -81,14 +96,38 @@ int cyw43_arch_init(void) { return 0; }
 void cyw43_arch_enable_sta_mode(void) {}
 void cyw43_arch_lwip_begin(void) {}
 void cyw43_arch_lwip_end(void) {}
-int cyw43_tcpip_link_status(cyw43_t *s, int itf) { (void)s; (void)itf; return link_status; }
-int cyw43_wifi_leave(cyw43_t *s, int itf) { (void)s; (void)itf; return 0; }
+/* The netif address survives a leave unless the firmware clears it, as in lwIP; with DHCP
+ * running, the lease lands when the link is up and `dhcp_delay` link-status calls have passed. */
+static struct netif { int x; } the_netif;
+struct netif *netif_default = &the_netif;
+static ip4_addr_t stub_addr = {0x0500000au};      /* 10.0.0.5 */
+static uint32_t lease = 0x0500000au; static int dhcp_on = 1, dhcp_delay;
+static int dhcp_starts, dhcp_stops, leaves, announces, nat_up_calls, nat_down_calls;
+static char ntoa_buf[16];
+int cyw43_tcpip_link_status(cyw43_t *s, int itf) {
+    (void)s; (void)itf;
+    if (link_status != CYW43_LINK_UP) return link_status;
+    if (!stub_addr.addr && dhcp_on && --dhcp_delay <= 0) stub_addr.addr = lease;
+    return stub_addr.addr ? CYW43_LINK_UP : CYW43_LINK_NOIP;
+}
+int cyw43_wifi_leave(cyw43_t *s, int itf) { (void)s; (void)itf; ++leaves; return 0; }
+err_t dhcp_start(struct netif *n) { (void)n; ++dhcp_starts; dhcp_on = 1; return ERR_OK; }
+void dhcp_release_and_stop(struct netif *n) { (void)n; ++dhcp_stops; dhcp_on = 0; stub_addr.addr = 0; }
+void netif_set_addr(struct netif *n, const ip4_addr_t *i, const ip4_addr_t *m, const ip4_addr_t *g) {
+    (void)n; (void)m; (void)g; stub_addr.addr = i ? i->addr : 0;
+}
+void dns_setserver(u8_t i, const void *ip) { (void)i; (void)ip; }
+void ctrl_announce(void) { ++announces; }
 /* Like the driver: sta mode applies the default, a join or leave leaves it alone. */
 static uint32_t pm_now = 0xa1112u; static int pm_calls, pm_fail;
 int cyw43_wifi_pm(cyw43_t *s, uint32_t pm) { (void)s; ++pm_calls; if (pm_fail) return -1; pm_now = pm; return 0; }
 int cyw43_arch_wifi_connect_async(const char *a, const char *b, uint32_t c) { (void)a; (void)b; (void)c; return 0; }
-const ip4_addr_t *netif_ip4_addr(struct netif *n) { (void)n; static ip4_addr_t a; return &a; }
-const char *ip4addr_ntoa(const ip4_addr_t *a) { (void)a; return "10.0.0.5"; }
+const ip4_addr_t *netif_ip4_addr(struct netif *n) { (void)n; return &stub_addr; }
+const char *ip4addr_ntoa(const ip4_addr_t *a) {
+    uint32_t v = a->addr;
+    snprintf(ntoa_buf, sizeof(ntoa_buf), "%u.%u.%u.%u", v & 255, (v >> 8) & 255, (v >> 16) & 255, v >> 24);
+    return ntoa_buf;
+}
 bool config_load(config_t *c) { memset(c, 0, sizeof(*c)); return true; }
 bool config_save(const config_t *c) { (void)c; return true; }
 bool config_clear(void) { return true; }
@@ -130,7 +169,7 @@ void relay_ip_bytes(const uint8_t *d, size_t n) { (void)d; (void)n; }
 const char *relay_state(void) { return "down"; }
 void nat_init(void) {}
 void nat_reset(void) {}
-void nat_configure(bool up) { (void)up; }
+void nat_configure(bool up) { if (up) ++nat_up_calls; else ++nat_down_calls; }
 void nat_ip_bytes(const uint8_t *d, size_t n) { (void)d; (void)n; }
 void nat_poll(void) {}
 bool nat_forward_add(uint16_t p, uint8_t c) { (void)p; (void)c; return true; }
@@ -148,6 +187,14 @@ static void keys_dump(const char *label) {
     printf("\n"); keyn = 0;
 }
 static void idle(uint32_t ms) { t_now += ms; input = ""; console_poll(); }
+#define ADDR_B 0x142ba8c0u /* 192.168.43.20 */
+#define ADDR_C 0x0900a8c0u /* 192.168.0.9 */
+#define ADDR_D 0x0a01a8c0u /* 192.168.1.10 */
+static void counts(const char *label) {
+    fflush(stdout);
+    printf("%%%% %s dhcp_start=%d dhcp_stop=%d leave=%d announce=%d nat_down=%d\n", label,
+           dhcp_starts, dhcp_stops, leaves, announces, nat_down_calls);
+}
 static void phase(const char *name) { fflush(stdout); fprintf(stdout, "@@ %s\n", name); }
 static void wifi_steps(const int *statuses, unsigned n) {
     for (unsigned i = 0; i < n; ++i) { link_status = statuses[i]; t_now += 100; wifi_poll(); }
@@ -199,6 +246,29 @@ int main(void) {
     pm_mark("reconfigured");
     phase("log-debug-again"); type("log debug\r"); print_stats(false);
     pm_mark("end");
+    phase("addr-hotspot");            type("log info\r");
+    counts("hotspot-before");
+    lease = ADDR_B; dhcp_delay = 3;
+    type("wifi Hot|pw|\r");
+    {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_JOIN, CYW43_LINK_UP, CYW43_LINK_UP, CYW43_LINK_UP,
+                   CYW43_LINK_UP}; wifi_steps(s, 6); }
+    counts("hotspot-after");
+    type("wifi?\r");
+    phase("addr-changed-up");
+    counts("changed-before");
+    stub_addr.addr = ADDR_C;
+    {   int s[] = {CYW43_LINK_UP, CYW43_LINK_UP, CYW43_LINK_UP}; wifi_steps(s, 3); }
+    counts("changed-after");
+    type("wifi?\r");
+    phase("addr-lost-rejoin");
+    counts("rejoin-before");
+    lease = ADDR_D; dhcp_delay = 2;
+    {   int s[] = {CYW43_LINK_DOWN, CYW43_LINK_DOWN, CYW43_LINK_JOIN, CYW43_LINK_UP, CYW43_LINK_UP,
+                   CYW43_LINK_UP}; wifi_steps(s, 6); }
+    counts("rejoin-after");
+    phase("addr-stats");              print_stats(true);
+    phase("addr-cleared");            type("wifi clear\r"); type("wifi?\r");
+    print_stats(true);
     phase("pt-enter");                type("log info\rkbd\r\n");
     phase("pt-keys");                 type("zebra\r"); keys_dump("zebra");
     type("\r\n\n\r\r\n"); keys_dump("enters");
@@ -232,11 +302,14 @@ run = subprocess.run([str(exe)], capture_output=True, text=True, check=True)
 
 prefixes = re.findall(r'#define P_[A-Z]+\s+"(\[[A-Z]+\] )"', (ROOT / "log.h").read_text())
 assert len(prefixes) >= 10, prefixes
-phases, marks, cur, keys = {}, {}, None, {}
+phases, marks, cur, keys, counters = {}, {}, None, {}, {}
 for line in run.stdout.splitlines():
     if line.startswith("$$ "):
         label, *hexes = line[3:].split()
         keys[label] = bytes(int(h, 16) for h in hexes)
+    elif line.startswith("%% "):
+        label, *kv = line[3:].split()
+        counters[label] = {k: int(v) for k, v in (x.split("=") for x in kv)}
     elif line.startswith("@@ "):
         cur = line[3:]
         phases[cur] = []
@@ -291,6 +364,35 @@ assert phases["wifi-quiet-after-window"] == ["[WIFI] settings saved"], \
     phases["wifi-quiet-after-window"]
 assert phases["log-debug-again"][0] == "[LOG] debug"
 assert phases["log-debug-again"][1].startswith("[SNES] gaps=")
+def delta(name, key):
+    return counters[name + "-after"][key] - counters[name + "-before"][key]
+
+
+# `wifi Hot|...` while the netif still holds the old network's address: the lease is
+# released and cleared once, DHCP restarted once, and "joined" waits for the new address.
+hot = phases["addr-hotspot"]
+assert not any("10.0.0.5" in l for l in hot[2:]), hot
+assert [l for l in hot if "joined" in l] == ["[WIFI] joined 192.168.43.20"], hot
+assert "[WIFI] dhcp" in hot and hot[-1].startswith("[WIFI] ssid="), hot
+assert "ip=192.168.43.20" in hot[-1], hot
+assert (delta("hotspot", "dhcp_stop"), delta("hotspot", "dhcp_start"),
+        delta("hotspot", "leave")) == (1, 1, 1), counters
+# A different address while the link stays up: one line, the NAT rebuilt, a HELLO pushed.
+ch = phases["addr-changed-up"]
+assert ch[:1] == ["[WIFI] address changed to 192.168.0.9"] and len(ch) == 2, ch
+assert "ip=192.168.0.9" in ch[1], ch
+assert (delta("changed", "nat_down"), delta("changed", "announce"),
+        delta("changed", "dhcp_start")) == (1, 1, 0), counters
+# The link drops and comes back on a network that hands out another address.
+rj = phases["addr-lost-rejoin"]
+assert rj[0] == "[WIFI] lost" and [l for l in rj if "joined" in l] == ["[WIFI] joined 192.168.1.10"], rj
+assert not any("192.168.0.9" in l for l in rj[1:]) and not has("addr-lost-rejoin", "changed"), rj
+assert (delta("rejoin", "dhcp_start"), delta("rejoin", "dhcp_stop"), delta("rejoin", "leave"),
+        delta("rejoin", "announce")) == (1, 0, 0, 0), counters
+assert "ip=192.168.1.10" in "".join(phases["addr-stats"]), phases["addr-stats"]
+assert "ip=10.0.0.5" in phases["boot-stats-command"][0]
+assert "ip=-" in phases["addr-cleared"][1] and "ip=-" in phases["addr-cleared"][2], \
+    phases["addr-cleared"]
 PT = "[KBD] passthrough on: keys go to the SNES; Ctrl+] leaves"
 assert phases["pt-enter"][-1] == PT, phases["pt-enter"]
 assert keys["zebra"] == b"zebra\n"
